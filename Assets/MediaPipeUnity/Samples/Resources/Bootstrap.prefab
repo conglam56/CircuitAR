@@ -45,3 +45,4 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _appSettings: {fileID: 11400000, guid: c1dea6c0f46f82342ac6b11989a0fb74, type: 2}
+  _useARCamera: 0

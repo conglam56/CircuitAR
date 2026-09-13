@@ -71,9 +71,11 @@ namespace Mediapipe.Unity
       var assetPath = GetAssetPathFor(assetName);
       using (var webRequest = UnityWebRequest.Get(assetPath))
       {
-        yield return webRequest.SendWebRequest();
+                Debug.Log("[ARBridge-WebReq] SAP gui UnityWebRequest toi: " + assetPath); 
+                yield return webRequest.SendWebRequest(); 
+                Debug.Log("[ARBridge-WebReq] webRequest DA XONG, result = " + webRequest.result + ", error = " + webRequest.error);
 
-        if (webRequest.result == UnityWebRequest.Result.Success)
+                if (webRequest.result == UnityWebRequest.Result.Success)
         {
           if (!Directory.Exists(_CachePathRoot))
           {

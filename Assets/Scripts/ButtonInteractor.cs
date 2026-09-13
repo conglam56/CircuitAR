@@ -6,13 +6,17 @@ using Mediapipe.Tasks.Vision.HandLandmarker;
 
 public class ButtonInteractor : MonoBehaviour
 {
-    [Header("Tham chiếu Hệ thống")]
-    public HandLandmarkerRunner handRunner;
+    [Header("KÉO OBJECT 'Screen' VÀO ĐÂY")]
     public RectTransform videoPanel;
+
+    [Header("Kéo Nút Vàng (Debug Point) vào đây")]
     public RectTransform debugPoint;
 
+    [Header("Tham chiếu Hệ thống")]
+    public HandLandmarkerRunner handRunner;
+
     [Header("Kết nối Logic Game")]
-    public MenuHUDController menuHUD; // <-- Thêm biến này để kết nối với HUD
+    public MenuHUDController menuHUD;
 
     [Header("Danh sách Nút tương tác")]
     public List<RectTransform> interactiveButtons;
@@ -24,6 +28,9 @@ public class ButtonInteractor : MonoBehaviour
     [Header("Cấu hình Pinch & Chống Spam")]
     public float pinchThreshold = 0.03f;
     public float clickCooldown = 0.5f;
+
+    [Header("Bảng Điều Khiển Trục Tọa Độ")]
+    public bool hoanDoiTrucXY = true; // Bật sẵn để sửa lỗi lên thành trái
     public bool latNguocTrucX = false;
     public bool latNguocTrucY = false;
 
@@ -70,9 +77,7 @@ public class ButtonInteractor : MonoBehaviour
             pinch = isPinching;
         }
 
-        if (videoPanel == null) return;
-
-        if (!visible)
+        if (!visible || videoPanel == null)
         {
             foreach (var btn in interactiveButtons)
             {
@@ -83,21 +88,25 @@ public class ButtonInteractor : MonoBehaviour
             return;
         }
 
-        Vector3[] corners = new Vector3[4];
-        videoPanel.GetWorldCorners(corners);
-        Vector3 bottomEdge = Vector3.Lerp(corners[0], corners[3], x);
-        Vector3 topEdge = Vector3.Lerp(corners[1], corners[2], x);
-        Vector3 fingerWorldPos = Vector3.Lerp(bottomEdge, topEdge, y);
+        Vector2 screenPos = Vector2.zero;
 
         if (debugPoint != null)
         {
             debugPoint.gameObject.SetActive(true);
-            debugPoint.position = fingerWorldPos;
-        }
 
-        Canvas videoCanvas = videoPanel.GetComponentInParent<Canvas>();
-        Camera videoCam = (videoCanvas != null && videoCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? videoCanvas.worldCamera : null;
-        Vector2 screenPos = RectTransformUtility.WorldToScreenPoint(videoCam, fingerWorldPos);
+            if (debugPoint.parent != videoPanel)
+            {
+                debugPoint.SetParent(videoPanel);
+            }
+
+            debugPoint.anchorMin = new Vector2(x, 1.0f - y);
+            debugPoint.anchorMax = new Vector2(x, 1.0f - y);
+            debugPoint.anchoredPosition = Vector2.zero;
+
+            Canvas videoCanvas = videoPanel.GetComponentInParent<Canvas>();
+            Camera uiCam = (videoCanvas != null && videoCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? videoCanvas.worldCamera : null;
+            screenPos = RectTransformUtility.WorldToScreenPoint(uiCam, debugPoint.position);
+        }
 
         bool anyButtonHovered = false;
 
@@ -118,12 +127,7 @@ public class ButtonInteractor : MonoBehaviour
 
                 if (pinch && !wasPinching && Time.time - lastClickTime > clickCooldown)
                 {
-                    // <-- GỌI SANG MENU HUD ĐỂ LƯU LINH KIỆN VÀO BỘ NHỚ
-                    if (menuHUD != null)
-                    {
-                        menuHUD.ReceiveClick(btn);
-                    }
-
+                    if (menuHUD != null) menuHUD.ReceiveClick(btn);
                     lastClickTime = Time.time;
                 }
             }
@@ -133,14 +137,8 @@ public class ButtonInteractor : MonoBehaviour
             }
         }
 
-        if (pinch && !wasPinching && anyButtonHovered)
-        {
-            wasPinching = true;
-        }
-        else if (!pinch)
-        {
-            wasPinching = false;
-        }
+        if (pinch && !wasPinching && anyButtonHovered) wasPinching = true;
+        else if (!pinch) wasPinching = false;
     }
 
     private void ProcessHandResult(HandLandmarkerResult result)
@@ -155,17 +153,29 @@ public class ButtonInteractor : MonoBehaviour
         var indexTip = hand.landmarks[8];
         var thumbTip = hand.landmarks[4];
 
-        float outX = latNguocTrucX ? (1.0f - indexTip.x) : indexTip.x;
-        float outY = latNguocTrucY ? indexTip.y : (1.0f - indexTip.y);
+        float rawX = indexTip.x;
+        float rawY = indexTip.y;
 
+        // Xử lý hoán đổi trục X và Y khi camera bị xoay 90 độ
+        if (hoanDoiTrucXY)
+        {
+            float temp = rawX;
+            rawX = rawY;
+            rawY = temp;
+        }
+
+        if (latNguocTrucX) rawX = 1.0f - rawX;
+        if (latNguocTrucY) rawY = 1.0f - rawY;
+
+        // Tính khoảng cách pinch (chỉ dùng tọa độ nguyên bản để tránh sai số khi xoay lật)
         float dx = thumbTip.x - indexTip.x;
         float dy = thumbTip.y - indexTip.y;
         float distance = Mathf.Sqrt(dx * dx + dy * dy);
 
         lock (_lock)
         {
-            targetX = outX;
-            targetY = outY;
+            targetX = rawX;
+            targetY = rawY;
             isPinching = (distance < pinchThreshold);
             isHandVisible = true;
         }
