@@ -1580,7 +1580,7 @@ MonoBehaviour:
   planeLock: {fileID: 1315578857}
   componentPrefabs:
   - {fileID: 7794568006292757454, guid: 9c16deacc8f5f8145b4564b239f3889a, type: 3}
-  - {fileID: 5722648397485223672, guid: 37e1a6c12f070ca4a99316aaf66fc9d2, type: 3}
+  - {fileID: 4732494235611132391, guid: c7d93ed073744d54181a7c0cb1d63c53, type: 3}
   - {fileID: 6909490552268425546, guid: f3eeb16c16f14704ab51fd8b7a80bf76, type: 3}
   - {fileID: 5098236497286199025, guid: da8b1ed100f004b4586cdcf955868ff9, type: 3}
   componentNames:
