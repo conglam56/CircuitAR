@@ -9,16 +9,16 @@ public class TapToPlaceController : MonoBehaviour
     public ButtonInteractor buttonInteractor;
     public MenuHUDController menuHUD;
     public ARRaycastManager raycastManager;
-    // Khôi phục lại biến planeLock nếu bạn có dùng nó
     public SinglePlaneLockController planeLock;
 
     [Header("Prefab linh kiện (Khớp tên với Menu HUD)")]
     public GameObject[] componentPrefabs;
     public string[] componentNames;
 
-    [Header("Cấu hình Preview")]
+    [Header("Cấu hình Preview & Di chuyển")]
     [Range(0.1f, 1f)] public float previewAlpha = 0.5f;
     public float scaleMultiplier = 0.035f;
+    public LayerMask placedObjectLayer;
 
     private GameObject previewAnchor;
     private GameObject previewVisual;
@@ -28,30 +28,61 @@ public class TapToPlaceController : MonoBehaviour
     private bool canPlace = false;
     private float cooldownTimer = 0f;
 
+    // --- BIẾN QUẢN LÝ DI CHUYỂN VẬT THỂ (DRAG & DROP) ---
+    private GameObject draggedObject = null;
+    private bool isDragging = false;
+    private Camera mainCamera;
+
+    void Start()
+    {
+        mainCamera = Camera.main;
+    }
+
     void Update()
     {
         if (buttonInteractor == null || menuHUD == null || raycastManager == null) return;
 
         if (cooldownTimer > 0) cooldownTimer -= Time.deltaTime;
 
-        if (menuHUD.HasSelection && currentPrefabToPlace == null)
+        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI (Khi Menu có lựa chọn)
+        if (menuHUD.HasSelection)
         {
-            StartPreview(menuHUD.SelectedComponent);
-            canPlace = false;
-            cooldownTimer = 1.0f;
-        }
+            if (isDragging) ReleaseDraggedObject();
 
+            if (currentPrefabToPlace == null)
+            {
+                StartPreview(menuHUD.SelectedComponent);
+                canPlace = false;
+                cooldownTimer = 1.0f;
+            }
+
+            if (!buttonInteractor.isPinching && cooldownTimer <= 0)
+            {
+                canPlace = true;
+            }
+
+            UpdatePreviewAndPlacement();
+        }
+        // 2. CHẾ ĐỘ DI CHUYỂN VẬT CŨ (Khi Menu trống)
+        else
+        {
+            if (previewAnchor != null)
+            {
+                Destroy(previewAnchor);
+                currentPrefabToPlace = null;
+            }
+
+            HandleDragAndDrop();
+        }
+    }
+
+    // --- LOGIC ĐẶT VẬT MỚI ---
+    private void UpdatePreviewAndPlacement()
+    {
         if (currentPrefabToPlace == null || previewAnchor == null) return;
-
-        if (!buttonInteractor.isPinching && cooldownTimer <= 0)
-        {
-            canPlace = true;
-        }
 
         Vector2 screenPos = GetCursorScreenPosition();
 
-        // CHÌA KHÓA: Trở lại dùng PlaneWithinPolygon để an toàn, không dùng Infinity nữa.
-        
         if (raycastManager.Raycast(screenPos, hits, TrackableType.PlaneWithinBounds))
         {
             Pose hitPose = default;
@@ -70,7 +101,7 @@ public class TapToPlaceController : MonoBehaviour
             if (foundValidHit)
             {
                 Vector3 normal = hitPose.up;
-                Vector3 forward = Vector3.ProjectOnPlane(Camera.main.transform.forward, normal).normalized;
+                Vector3 forward = Vector3.ProjectOnPlane(mainCamera.transform.forward, normal).normalized;
                 Quaternion properRotation = Quaternion.LookRotation(forward, normal);
 
                 previewAnchor.transform.position = hitPose.position;
@@ -96,6 +127,66 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    // --- LOGIC MỚI: KÉO THẢ VẬT THỂ ---
+    private void HandleDragAndDrop()
+    {
+        Vector2 screenPos = GetCursorScreenPosition();
+
+        // 2.1 Bắt đầu nắm vật thể
+        if (buttonInteractor.JustPinched && !isDragging)
+        {
+            Ray ray = mainCamera.ScreenPointToRay(screenPos);
+            RaycastHit hit;
+
+            if (Physics.Raycast(ray, out hit))
+            {
+                // Truy ngược lên để tìm gốc object có chứa BoxCollider mà bạn đã đặt tay
+                Transform rootObj = hit.collider.transform;
+                while (rootObj != null)
+                {
+                    if (rootObj.name.StartsWith("Placed_"))
+                    {
+                        draggedObject = rootObj.gameObject;
+                        isDragging = true;
+                        break;
+                    }
+                    rootObj = rootObj.parent;
+                }
+            }
+        }
+
+        // 2.2 Đang giữ và kéo vật thể
+        if (isDragging && draggedObject != null)
+        {
+            if (buttonInteractor.isPinching)
+            {
+                if (raycastManager.Raycast(screenPos, hits, TrackableType.PlaneWithinBounds))
+                {
+                    foreach (var arHit in hits)
+                    {
+                        if (planeLock == null || !planeLock.HasLockedPlane || arHit.trackableId == planeLock.LockedPlaneId)
+                        {
+                            draggedObject.transform.position = arHit.pose.position;
+                            break;
+                        }
+                    }
+                }
+            }
+            // 2.3 Thả tay
+            else
+            {
+                ReleaseDraggedObject();
+            }
+        }
+    }
+
+    private void ReleaseDraggedObject()
+    {
+        isDragging = false;
+        draggedObject = null;
+    }
+
+    // --- CÁC HÀM TIỆN ÍCH KHÁC ---
     private Vector2 GetCursorScreenPosition()
     {
         if (buttonInteractor.debugPoint == null) return new Vector2(Screen.width / 2, Screen.height / 2);
@@ -115,14 +206,11 @@ public class TapToPlaceController : MonoBehaviour
         previewVisual.transform.SetParent(previewAnchor.transform, false);
         previewVisual.transform.localScale = Vector3.one * scaleMultiplier;
 
-        // KHÔI PHỤC: Hàm đo đáy tự động của bạn
         AlignVisualBaseToAnchor(previewAnchor, previewVisual);
-
         SetPreviewTransparent(previewVisual, previewAlpha);
         previewAnchor.SetActive(false);
     }
 
-    // KHÔI PHỤC: Logic tính hộp bao quanh (Bounding Box) để nâng vật lên
     private void AlignVisualBaseToAnchor(GameObject anchor, GameObject visual)
     {
         Renderer[] renderers = visual.GetComponentsInChildren<Renderer>();
@@ -145,17 +233,14 @@ public class TapToPlaceController : MonoBehaviour
 
         SetPreviewTransparent(previewVisual, 1f);
         previewAnchor.name = "Placed_" + currentPrefabToPlace.name;
+
+        // ĐÃ XÓA KHỐI LỆNH TỰ ĐỘNG TẠO BOX COLLIDER ĐỂ KHÔNG BỊ TRÙNG LẶP/RÁC
+
         if (hits.Count > 0)
         {
-            // Tìm đối tượng Trackable (chính là ARPlane) mà tia raycast vừa chạm vào
-            var hitTrackable = raycastManager.raycastPrefab; // (Chỉ mang tính chất dò, dùng cách dưới)
-
-            // Lấy ARPlane từ hit đầu tiên
             ARPlane hitPlane = raycastManager.GetComponent<ARPlaneManager>().GetPlane(hits[0].trackableId);
-
             if (hitPlane != null)
             {
-                // Tìm script Visualizer nằm trên mặt phẳng đó và ra lệnh mở rộng
                 RectanglePlaneVisualizer visualizer = hitPlane.GetComponent<RectanglePlaneVisualizer>();
                 if (visualizer != null)
                 {
