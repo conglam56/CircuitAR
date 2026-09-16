@@ -18,17 +18,22 @@ namespace Mediapipe.Unity.Sample
 
     public RunningMode runningMode;
 
-    public override void Play()
-    {
-      if (_coroutine != null)
-      {
-        Stop();
-      }
-      base.Play();
-      _coroutine = StartCoroutine(Run());
-    }
+        public override void Play()
+        {
+            if (screen != null)
+            {
+                screen.gameObject.SetActive(false);
+            }
 
-    public override void Pause()
+            if (_coroutine != null)
+            {
+                Stop();
+            }
+            base.Play();
+            _coroutine = StartCoroutine(Run());
+        }
+
+        public override void Pause()
     {
       base.Pause();
       ImageSourceProvider.ImageSource.Pause();

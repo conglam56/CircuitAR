@@ -9,6 +9,7 @@ public class RectanglePlaneVisualizer : MonoBehaviour
     private ARPlane _plane;
     private Vector2 currentSize;
     private Transform visualChild;
+    private bool isRotationLocked = false; // Cờ đánh dấu đã khóa góc xoay ban đầu chưa
 
     void Awake()
     {
@@ -37,8 +38,9 @@ public class RectanglePlaneVisualizer : MonoBehaviour
     {
         if (visualChild == null) return;
 
-        // 1. DIỆT MẶT PHẲNG MINI: Nếu diện tích quét được dưới 20cm, tàng hình luôn tấm lưới
-        if (_plane.size.x < 0.2f || _plane.size.y < 0.2f)
+        // 1. Chỉ hiển thị khi mặt phẳng đạt độ tin cậy và kích thước đủ lớn (> 20cm)
+        if (_plane.trackingState != UnityEngine.XR.ARSubsystems.TrackingState.Tracking ||
+            _plane.size.x < 0.4f || _plane.size.y < 0.4f)
         {
             if (visualChild.gameObject.activeSelf) visualChild.gameObject.SetActive(false);
             return;
@@ -48,12 +50,16 @@ public class RectanglePlaneVisualizer : MonoBehaviour
             if (!visualChild.gameObject.activeSelf) visualChild.gameObject.SetActive(true);
         }
 
-        // 2. ÉP LƯỚI SONG SONG VỚI ĐIỆN THOẠI VÀ CHỐNG XÊ DỊCH CHÉO
-        // Lấy góc quay trái/phải (trục Y) của Camera hiện tại
-        float cameraYaw = Camera.main.transform.eulerAngles.y;
+        // 2. Khóa góc xoay ban đầu cố định trong thế giới thực
+        if (!isRotationLocked && Camera.main != null)
+        {
+            float initialCameraYaw = Camera.main.transform.eulerAngles.y;
+            visualChild.rotation = Quaternion.Euler(90f, initialCameraYaw, 0f);
+            isRotationLocked = true;
+        }
 
-        // Ghi đè góc xoay của lưới: Ép nó nằm úp (X=90) và luôn song song với điện thoại (Y=cameraYaw)
-        visualChild.rotation = Quaternion.Euler(90f, cameraYaw, 0f);
+        // 3. CẢI TIẾN: Đồng bộ vị trí của lưới mượt mà theo tâm thực tế của ARPlane (chống giật)
+        visualChild.position = Vector3.Lerp(visualChild.position, _plane.center, Time.deltaTime * 5f);
     }
 
     private void OnBoundaryChanged(ARPlaneBoundaryChangedEventArgs args)
@@ -85,7 +91,6 @@ public class RectanglePlaneVisualizer : MonoBehaviour
         if (visualChild != null)
         {
             // Áp dụng độ giãn nở trực tiếp lên thằng con (Visual) thay vì thằng cha
-            // Điều này giúp mặt phẳng giữ nguyên hình chữ nhật vuông vức, không bị méo lệch khi ARCore cập nhật
             visualChild.localScale = new Vector3(currentSize.x, currentSize.y, 1f);
         }
     }
