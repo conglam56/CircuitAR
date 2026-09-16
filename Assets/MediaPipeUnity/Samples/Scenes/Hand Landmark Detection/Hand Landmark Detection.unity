@@ -205,7 +205,7 @@ GameObject:
   - component: {fileID: 295728020}
   - component: {fileID: 295728019}
   - component: {fileID: 295728022}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Btn_Pin
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -498,7 +498,7 @@ GameObject:
   - component: {fileID: 521751605}
   - component: {fileID: 521751607}
   - component: {fileID: 521751606}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Text (TMP)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -642,7 +642,7 @@ GameObject:
   - component: {fileID: 605904092}
   - component: {fileID: 605904091}
   - component: {fileID: 605904094}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Btn_Den
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -785,7 +785,7 @@ GameObject:
   - component: {fileID: 918918017}
   - component: {fileID: 918918016}
   - component: {fileID: 918918019}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Btn_CongTac
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -1715,7 +1715,6 @@ GameObject:
   m_Component:
   - component: {fileID: 1327129852}
   - component: {fileID: 1327129855}
-  - component: {fileID: 1327129854}
   - component: {fileID: 1327129853}
   m_Layer: 3
   m_Name: Canvas
@@ -1731,18 +1730,18 @@ RectTransform:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1327129851}
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalRotation: {x: -0.42261827, y: 0, z: 0, w: 0.9063079}
+  m_LocalPosition: {x: 0, y: 0, z: 1.5}
+  m_LocalScale: {x: 0.0005, y: 0.0005, z: 0.0005}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 1359235827}
   m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: -50, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 0, y: 0}
-  m_AnchoredPosition: {x: 734.5, y: 346.75}
-  m_SizeDelta: {x: 1469, y: 693.5}
+  m_AnchoredPosition: {x: 0, y: -1.5}
+  m_SizeDelta: {x: 500, y: 300}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1327129853
 MonoBehaviour:
@@ -1761,29 +1760,6 @@ MonoBehaviour:
   m_BlockingMask:
     serializedVersion: 2
     m_Bits: 4294967295
---- !u!114 &1327129854
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1327129851}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.CanvasScaler
-  m_UiScaleMode: 0
-  m_ReferencePixelsPerUnit: 100
-  m_ScaleFactor: 1
-  m_ReferenceResolution: {x: 800, y: 600}
-  m_ScreenMatchMode: 0
-  m_MatchWidthOrHeight: 0
-  m_PhysicalUnit: 3
-  m_FallbackScreenDPI: 96
-  m_DefaultSpriteDPI: 96
-  m_DynamicPixelsPerUnit: 1
-  m_PresetInfoIsWorld: 1
 --- !u!223 &1327129855
 Canvas:
   m_ObjectHideFlags: 0
@@ -1819,7 +1795,9 @@ GameObject:
   - component: {fileID: 1359235830}
   - component: {fileID: 1359235829}
   - component: {fileID: 1359235828}
-  m_Layer: 3
+  - component: {fileID: 1359235831}
+  - component: {fileID: 1359235832}
+  m_Layer: 0
   m_Name: AR_Menu
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -1833,9 +1811,9 @@ RectTransform:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1359235826}
-  m_LocalRotation: {x: 0.7071068, y: -0, z: -0, w: 0.7071068}
-  m_LocalPosition: {x: 0, y: 0, z: 0.5999985}
-  m_LocalScale: {x: 0.001, y: 0.0009999999, z: 0.0009999999}
+  m_LocalRotation: {x: 0.86602545, y: 0, z: 0, w: 0.49999994}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 295728018}
@@ -1843,11 +1821,11 @@ RectTransform:
   - {fileID: 605904090}
   - {fileID: 918918015}
   m_Father: {fileID: 1327129852}
-  m_LocalEulerAnglesHint: {x: 90, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 120, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -734.5, y: -347.05}
-  m_SizeDelta: {x: 450, y: 300}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 500, y: 300}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1359235828
 MonoBehaviour:
@@ -1911,6 +1889,36 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1359235826}
   m_CullTransparentMesh: 1
+--- !u!114 &1359235831
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1359235826}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f1720e445e98ba84aaa1d9e8de2264d2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SpatialMenuFollow
+  distance: 0.55
+  heightOffset: -0.05
+  followSpeed: 3
+  menuPitchX: 10
+  pitchAngleThreshold: 45
+  fadeSpeed: 8
+--- !u!225 &1359235832
+CanvasGroup:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1359235826}
+  m_Enabled: 1
+  m_Alpha: 1
+  m_Interactable: 1
+  m_BlocksRaycasts: 1
+  m_IgnoreParentGroups: 0
 --- !u!1 &1443848890
 GameObject:
   m_ObjectHideFlags: 0
@@ -1922,7 +1930,7 @@ GameObject:
   - component: {fileID: 1443848891}
   - component: {fileID: 1443848893}
   - component: {fileID: 1443848892}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Text (TMP)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -2188,7 +2196,7 @@ GameObject:
   - component: {fileID: 1811218364}
   - component: {fileID: 1811218363}
   - component: {fileID: 1811218366}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Btn_Day
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -2334,7 +2342,7 @@ GameObject:
   - component: {fileID: 1899027587}
   - component: {fileID: 1899027589}
   - component: {fileID: 1899027588}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Text (TMP)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -2503,7 +2511,7 @@ GameObject:
   - component: {fileID: 2107059565}
   - component: {fileID: 2107059567}
   - component: {fileID: 2107059566}
-  m_Layer: 3
+  m_Layer: 0
   m_Name: Text (TMP)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -2900,7 +2908,7 @@ SceneRoots:
   - {fileID: 420786856}
   - {fileID: 1064799461}
   - {fileID: 372488930}
-  - {fileID: 919076349}
   - {fileID: 1327129852}
+  - {fileID: 919076349}
   - {fileID: 1315578856}
   - {fileID: 1289296881}
