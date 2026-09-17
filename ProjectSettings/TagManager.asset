@@ -5,6 +5,7 @@ TagManager:
   serializedVersion: 3
   tags:
   - Global Resource
+  - CircuitBoard
   layers:
   - Default
   - TransparentFX
