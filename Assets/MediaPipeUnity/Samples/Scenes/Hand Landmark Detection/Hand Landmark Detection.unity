@@ -1044,6 +1044,37 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 834430802}
   m_CullTransparentMesh: 1
+--- !u!1 &851896552
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 851896553}
+  m_Layer: 0
+  m_Name: Wires_Container
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &851896553
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 851896552}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 2123586960}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &918918014
 GameObject:
   m_ObjectHideFlags: 0
@@ -1848,7 +1879,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::TapToPlaceController
   buttonInteractor: {fileID: 372488933}
   menuHUD: {fileID: 372488932}
-  raycastManager: {fileID: 1315578853}
   planeLock: {fileID: 0}
   componentPrefabs:
   - {fileID: 7794568006292757454, guid: 9c16deacc8f5f8145b4564b239f3889a, type: 3}
@@ -1862,9 +1892,6 @@ MonoBehaviour:
   - Cong Tac
   previewAlpha: 0.5
   scaleMultiplier: 0.03
-  placedObjectLayer:
-    serializedVersion: 2
-    m_Bits: 0
 --- !u!4 &1289296881
 Transform:
   m_ObjectHideFlags: 0
@@ -3438,6 +3465,60 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2107059564}
   m_CullTransparentMesh: 1
+--- !u!1 &2123586958
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2123586960}
+  - component: {fileID: 2123586959}
+  m_Layer: 0
+  m_Name: WireConnectionManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2123586959
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2123586958}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a8871a3c9da9f7b4b9bb601752b17f1c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::WireConnectionController
+  buttonInteractor: {fileID: 372488933}
+  menuHUD: {fileID: 372488932}
+  wireMaterial: {fileID: 2100000, guid: 109d10594764ba04da2ae45a146a4a82, type: 2}
+  wireColor: {r: 0.1, g: 0.7, b: 1, a: 1}
+  wireWidth: 0.006
+  wiresContainer: {fileID: 851896553}
+  highlightColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
+  maxRaycastDistance: 15
+  activeWires: []
+--- !u!4 &2123586960
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2123586958}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children:
+  - {fileID: 851896553}
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &8571076842648159877
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -3713,3 +3794,4 @@ SceneRoots:
   - {fileID: 1289296881}
   - {fileID: 1817308247}
   - {fileID: 1477617177}
+  - {fileID: 2123586960}

@@ -160,6 +160,15 @@ public class TapToPlaceController : MonoBehaviour
 
             if (Physics.Raycast(ray, out hit, 15f))
             {
+                // Bỏ qua nếu bấm trúng cực (Terminal) để nhường cho WireConnectionController xử lý
+                if (hit.collider.CompareTag("Terminal")) return;
+
+                RaycastHit[] allHits = Physics.RaycastAll(ray, 15f);
+                for (int i = 0; i < allHits.Length; i++)
+                {
+                    if (allHits[i].collider.CompareTag("Terminal")) return;
+                }
+
                 Transform rootObj = hit.collider.transform;
                 while (rootObj != null)
                 {
