@@ -18,6 +18,16 @@ public class RectanglePlaneVisualizer : MonoBehaviour
         if (lr != null) lr.enabled = false;
     }
 
+    private static SinglePlaneLockController s_LockCtrl;
+
+    void Start()
+    {
+        if (s_LockCtrl == null)
+        {
+            s_LockCtrl = FindFirstObjectByType<SinglePlaneLockController>();
+        }
+    }
+
     void Update()
     {
         if (visualChild == null)
@@ -27,8 +37,7 @@ public class RectanglePlaneVisualizer : MonoBehaviour
         }
 
         // Tắt tấm mặt phẳng khi đang trong giai đoạn ngắm chọn 2 điểm
-        SinglePlaneLockController lockCtrl = FindObjectOfType<SinglePlaneLockController>();
-        bool isLocked = (lockCtrl != null && lockCtrl.HasLockedPlane && lockCtrl.LockedPlaneId == _plane.trackableId);
+        bool isLocked = (s_LockCtrl != null && s_LockCtrl.HasLockedPlane && s_LockCtrl.LockedPlaneId == _plane.trackableId);
 
         if (!isLocked)
         {

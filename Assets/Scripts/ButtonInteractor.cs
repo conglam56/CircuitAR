@@ -156,8 +156,7 @@ public class ButtonInteractor : MonoBehaviour
             }
         }
 
-        if (pinch && !wasPinching && anyButtonHovered) wasPinching = true;
-        else if (!pinch) wasPinching = false;
+        wasPinching = pinch;
 
         if (pinch && !wasPinchingGlobal)
         {

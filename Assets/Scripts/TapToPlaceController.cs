@@ -35,7 +35,7 @@ public class TapToPlaceController : MonoBehaviour
 
     void Update()
     {
-        if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
+        if (planeLock == null) planeLock = FindFirstObjectByType<SinglePlaneLockController>();
         if (planeLock == null || !planeLock.HasLockedPlane)
         {
             if (previewAnchor != null) Destroy(previewAnchor);
@@ -244,7 +244,8 @@ public class TapToPlaceController : MonoBehaviour
 
     private GameObject GetPrefabByName(string name)
     {
-        for (int i = 0; i < componentNames.Length; i++)
+        if (componentNames == null || componentPrefabs == null) return null;
+        for (int i = 0; i < componentNames.Length && i < componentPrefabs.Length; i++)
         {
             if (componentNames[i] == name) return componentPrefabs[i];
         }
@@ -258,6 +259,23 @@ public class TapToPlaceController : MonoBehaviour
         {
             foreach (var mat in r.materials)
             {
+                if (alpha < 1f)
+                {
+                    mat.SetFloat("_Surface", 1); // Transparent
+                    mat.SetFloat("_Blend", 0);   // Alpha
+                    mat.SetInt("_ZWrite", 0);
+                    mat.DisableKeyword("_SURFACE_TYPE_OPAQUE");
+                    mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                    mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+                }
+                else
+                {
+                    mat.SetFloat("_Surface", 0); // Opaque
+                    mat.SetInt("_ZWrite", 1);
+                    mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                    mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Geometry;
+                }
+
                 if (mat.HasProperty("_BaseColor"))
                 {
                     Color c = mat.GetColor("_BaseColor");

@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -51,7 +51,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     void Start()
     {
         SetText("1. HUONG TAM VAO MEP TRAI\nChum ngon tay (Pinch)");
-        if (handInteractor == null) handInteractor = FindObjectOfType<ButtonInteractor>();
+        if (handInteractor == null) handInteractor = FindFirstObjectByType<ButtonInteractor>();
+        if (anchorManager == null) anchorManager = FindFirstObjectByType<ARAnchorManager>();
     }
 
     void Update()
@@ -152,17 +153,28 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         // KHÓA HƯỚNG XOAY: Trục Z hướng theo depthDir, Trục Y hướng thẳng lên trời
         Quaternion rotation = Quaternion.LookRotation(depthDir, Vector3.up);
 
-        // Tạo World Anchor chống trôi độc lập
-        GameObject anchorObj = new GameObject("Board_Anchor");
-        anchorObj.transform.position = center;
-        anchorObj.transform.rotation = rotation;
-        anchorObj.transform.localScale = Vector3.one; // Khóa tỉ lệ Anchor chuẩn 1:1:1
-        ARAnchor anchor = anchorObj.AddComponent<ARAnchor>();
+        Pose pose = new Pose(center, rotation);
+        Transform anchorParent = null;
+
+        if (anchorManager != null && targetPlane != null)
+        {
+            ARAnchor anchor = anchorManager.AttachAnchor(targetPlane, pose);
+            if (anchor != null) anchorParent = anchor.transform;
+        }
+
+        if (anchorParent == null)
+        {
+            GameObject anchorObj = new GameObject("Board_Anchor");
+            anchorObj.transform.position = center;
+            anchorObj.transform.rotation = rotation;
+            anchorObj.transform.localScale = Vector3.one; // Khóa tỉ lệ Anchor chuẩn 1:1:1
+            anchorParent = anchorObj.transform;
+        }
 
         if (tableBoardPrefab != null)
         {
             GameObject board = Instantiate(tableBoardPrefab, center, rotation);
-            board.transform.SetParent(anchor.transform, true);
+            board.transform.SetParent(anchorParent, true);
             board.transform.localScale = new Vector3(length, thickness, depth);
             board.name = "ActiveCircuitBoard";
         }

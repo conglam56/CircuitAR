@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 
 [RequireComponent(typeof(CanvasGroup))]
 public class SpatialMenuFollow : MonoBehaviour
@@ -30,7 +30,7 @@ public class SpatialMenuFollow : MonoBehaviour
     void Start()
     {
         if (Camera.main != null) camTransform = Camera.main.transform;
-        lockController = FindObjectOfType<SinglePlaneLockController>();
+        lockController = FindFirstObjectByType<SinglePlaneLockController>();
     }
 
     void LateUpdate()
@@ -43,7 +43,7 @@ public class SpatialMenuFollow : MonoBehaviour
 
         if (lockController == null)
         {
-            lockController = FindObjectOfType<SinglePlaneLockController>();
+            lockController = FindFirstObjectByType<SinglePlaneLockController>();
         }
 
         // ĐIỀU KIỆN 1: Bắt buộc đã khóa cố định mặt bàn thành công

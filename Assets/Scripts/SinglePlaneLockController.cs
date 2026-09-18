@@ -10,7 +10,7 @@ public class SinglePlaneLockController : MonoBehaviour
 
     void Awake()
     {
-        if (planeManager == null) planeManager = FindObjectOfType<ARPlaneManager>();
+        if (planeManager == null) planeManager = FindFirstObjectByType<ARPlaneManager>();
     }
 
     // Hàm này chỉ chạy khi nút 3D TwoPointSpatialCalibrator hoàn thành đặt 2 điểm

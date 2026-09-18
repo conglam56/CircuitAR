@@ -40,16 +40,29 @@ public class CustomARFrameBridge : ImageSource
     public override IEnumerator Play()
     {
         Debug.Log("[ARBridge] Play() bat dau, dang dang ky su kien frameReceived...");
-        if (cameraManager != null)
-        {
-            cameraManager.frameReceived += OnCameraFrameReceived;
-            Debug.Log("[ARBridge] Da dang ky frameReceived. cameraManager.enabled = " + cameraManager.enabled);
-        }
-        else
+        if (cameraManager == null)
         {
             Debug.LogError("[ARBridge] cameraManager dang NULL, khong the dang ky su kien!");
+            yield break;
         }
-        yield return new WaitUntil(() => isPrepared);
+
+        cameraManager.frameReceived += OnCameraFrameReceived;
+        Debug.Log("[ARBridge] Da dang ky frameReceived. cameraManager.enabled = " + cameraManager.enabled);
+
+        float timeout = 8.0f;
+        float elapsed = 0f;
+        while (!isPrepared && elapsed < timeout)
+        {
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        if (!isPrepared)
+        {
+            Debug.LogError($"[ARBridge] Timeout sau {timeout}s khong nhan duoc frame tu ARCameraManager!");
+            yield break;
+        }
+
         Debug.Log("[ARBridge] isPrepared = true, Play() hoan tat.");
         _isPlaying = true;
     }

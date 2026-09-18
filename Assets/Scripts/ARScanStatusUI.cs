@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using TMPro; // Sử dụng TextMeshPro (hoặc UnityEngine.UI nếu dùng Text thường)
 using UnityEngine.UI;
 
@@ -19,7 +19,17 @@ public class ARScanStatusUI : MonoBehaviour
 
     void Awake()
     {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
         Instance = this;
+    }
+
+    void OnDestroy()
+    {
+        if (Instance == this) Instance = null;
     }
 
     void Start()

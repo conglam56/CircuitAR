@@ -13,13 +13,18 @@ public class MenuHUDController : MonoBehaviour
     // Hàm này sẽ được ButtonInteractor gọi thẳng sang khi có nút bị bấm
     public void ReceiveClick(RectTransform clickedButton)
     {
+        if (menuButtons == null || componentNames == null) return;
+
         for (int i = 0; i < menuButtons.Length; i++)
         {
             if (menuButtons[i] == clickedButton)
             {
-                SelectedComponent = componentNames[i];
-                HasSelection = true;
-                Debug.Log("Da chon: " + SelectedComponent);
+                if (i < componentNames.Length)
+                {
+                    SelectedComponent = componentNames[i];
+                    HasSelection = true;
+                    Debug.Log("Da chon: " + SelectedComponent);
+                }
                 break; // chỉ chọn 1 nút mỗi lần pinch
             }
         }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -53,8 +53,10 @@ public class InstruConnector : MonoBehaviour
     {
         parentInstrument = gameObject.transform.parent.GetComponent<Instrument>();
         ConnectedWires = new List<Wire>();
-        errorText = GameObject.Find("DisconnectionIndicator").GetComponent<Text>();
-        connectionSound = GameObject.Find("ConnectionSound").GetComponent<AudioSource>();        
+        GameObject errorObj = GameObject.Find("DisconnectionIndicator");
+        if (errorObj != null) errorText = errorObj.GetComponent<Text>();
+        GameObject soundObj = GameObject.Find("ConnectionSound");
+        if (soundObj != null) connectionSound = soundObj.GetComponent<AudioSource>();        
     }    
 
     private void ApplyConnection(Collision collision)
@@ -65,7 +67,7 @@ public class InstruConnector : MonoBehaviour
         joint.connectedBody = collision.rigidbody;        
         collision.rigidbody.constraints = RigidbodyConstraints.FreezeRotation;
 
-        connectionSound.Play();
+        if (connectionSound != null) connectionSound.Play();
 
         //Set connected body information
         isConnected = true;
@@ -75,7 +77,7 @@ public class InstruConnector : MonoBehaviour
         //wireConnector.ApplyConnection(parentInstrument);
         wireConnector.ApplyInstrConnection(this);
         //errorText.text = "Connection between " + parentInstrument + " and " + ConnectedWire.name;
-        errorText.text = "";
+        if (errorText != null) errorText.text = "";
         //errorText.text += "\nconnector name: " + this.name;
         //errorText.text += "\nWire connector name: " + wireConnector.name;
         //errorText.text += "\nWire connected instruments: ";
@@ -122,9 +124,13 @@ public class InstruConnector : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {        
-        if (collision.gameObject.tag == "Player")
+        if (collision.gameObject.CompareTag("Player"))
         {
-            ApplyConnection(collision);
+            WireConnector wireConnector = collision.gameObject.GetComponent<WireConnector>();
+            if (wireConnector != null && wireConnector.PartOfWire != null)
+            {
+                ApplyConnection(collision);
+            }
         }
     }
 
@@ -152,29 +158,32 @@ public class InstruConnector : MonoBehaviour
     public List<string> GetConnectedInstrumentNames()
     {
         List<string> connectedInstruments = new List<string>();
-        try
-        {            
-            foreach (Wire wire in ConnectedWires)
+        if (ConnectedWires == null) return connectedInstruments;
+
+        for (int i = ConnectedWires.Count - 1; i >= 0; i--)
+        {
+            Wire wire = ConnectedWires[i];
+            if (wire == null)
             {
-                List<string> connectedInstr = wire.GetConnectedInstrumentNames();
-                //if any wire is not currently connected to this instrument Connector, then remove the wire from the array
-                if (!connectedInstr.Contains(parentInstrument.gameObject.name))
+                ConnectedWires.RemoveAt(i);
+                continue;
+            }
+
+            List<string> connectedInstr = wire.GetConnectedInstrumentNames();
+            //if any wire is not currently connected to this instrument Connector, then remove the wire from the array
+            if (parentInstrument != null && !connectedInstr.Contains(parentInstrument.gameObject.name))
+            {
+                ConnectedWires.RemoveAt(i);
+                continue;
+            }
+
+            foreach (string instrumentname in connectedInstr)
+            {
+                if (!connectedInstruments.Contains(instrumentname))
                 {
-                    ConnectedWires.Remove(wire);
-                }
-                foreach (string instrumentname in connectedInstr)
-                {
-                    if (!connectedInstruments.Contains(instrumentname))
-                    {
-                        connectedInstruments.Add(instrumentname);
-                    }
+                    connectedInstruments.Add(instrumentname);
                 }
             }
-        }
-        catch(InvalidOperationException e)
-        {
-            Debug.Log("InvalidOperationException occurred");
-            return connectedInstruments;
         }
         return connectedInstruments;
     }

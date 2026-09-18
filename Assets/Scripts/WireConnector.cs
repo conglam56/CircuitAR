@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -29,12 +29,21 @@ public class WireConnector : MonoBehaviour
 
     private void Start()
     {
-        WireName = PartOfWire.gameObject.name;
+        if (PartOfWire == null)
+        {
+            PartOfWire = GetComponentInParent<Wire>();
+        }
+
+        if (PartOfWire != null)
+        {
+            WireName = PartOfWire.gameObject.name;
+        }
     }
 
     private void LateUpdate()
     {
-        if (Mathf.Abs(transform.localPosition.x) > 5 || Mathf.Abs(transform.localPosition.z) > 5 || !(transform.localPosition.y > 0.2f || transform.localPosition.y <= 3f))
+        float y = transform.localPosition.y;
+        if (Mathf.Abs(transform.localPosition.x) > 5 || Mathf.Abs(transform.localPosition.z) > 5 || (y < 0.2f || y > 3f))
             ResetPosition();
     }
 
