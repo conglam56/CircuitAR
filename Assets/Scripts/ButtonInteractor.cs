@@ -26,8 +26,8 @@ public class ButtonInteractor : MonoBehaviour
     public Color pressColor = Color.green;
 
     [Header("Cấu hình Pinch & Chống Spam")]
-    public float pinchThreshold = 0.03f;
-    public float clickCooldown = 0.5f;
+    [Range(0.02f, 0.08f)] public float pinchThreshold = 0.042f;
+    public float clickCooldown = 0.45f;
 
     [Header("Bảng Điều Khiển Trục Tọa Độ")]
     public bool hoanDoiTrucXY = true; // Bật sẵn để sửa lỗi lên thành trái
@@ -53,18 +53,47 @@ public class ButtonInteractor : MonoBehaviour
 
     void Start()
     {
-        foreach (var btn in interactiveButtons)
+        for (int i = interactiveButtons.Count - 1; i >= 0; i--)
         {
+            var btn = interactiveButtons[i];
             if (btn != null)
             {
-                Image img = btn.GetComponent<Image>();
-                if (img != null)
-                {
-                    buttonImages[btn] = img;
-                    originalColors[btn] = img.color;
-                }
+                RegisterButton(btn);
             }
         }
+    }
+
+    /// <summary>
+    /// Đăng ký nút UI động vào hệ thống nhận diện cử chỉ MediaPipe
+    /// </summary>
+    public void RegisterButton(RectTransform btn)
+    {
+        if (btn == null) return;
+        if (!interactiveButtons.Contains(btn))
+        {
+            interactiveButtons.Add(btn);
+        }
+        Image img = btn.GetComponent<Image>();
+        if (img != null && !buttonImages.ContainsKey(btn))
+        {
+            buttonImages[btn] = img;
+            originalColors[btn] = img.color;
+        }
+    }
+
+    /// <summary>
+    /// Hủy đăng ký nút UI khỏi hệ thống cử chỉ
+    /// </summary>
+    public void UnregisterButton(RectTransform btn)
+    {
+        if (btn == null) return;
+        if (buttonImages.ContainsKey(btn))
+        {
+            buttonImages[btn].color = originalColors[btn];
+            buttonImages.Remove(btn);
+            originalColors.Remove(btn);
+        }
+        interactiveButtons.Remove(btn);
     }
 
     void OnEnable() { if (handRunner != null) handRunner.OnHandResult += ProcessHandResult; }
@@ -122,7 +151,7 @@ public class ButtonInteractor : MonoBehaviour
 
         foreach (var btn in interactiveButtons)
         {
-            if (btn == null || !buttonImages.ContainsKey(btn)) continue;
+            if (btn == null || !btn.gameObject.activeInHierarchy || !buttonImages.ContainsKey(btn)) continue;
 
             Canvas btnCanvas = btn.GetComponentInParent<Canvas>();
             Camera btnCam = (btnCanvas != null && btnCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? btnCanvas.worldCamera : null;
@@ -146,6 +175,11 @@ public class ButtonInteractor : MonoBehaviour
 
                 if (pinch && !wasPinching && Time.time - lastClickTime > clickCooldown)
                 {
+                    Button uiBtn = btn.GetComponent<Button>();
+                    if (uiBtn != null && uiBtn.interactable)
+                    {
+                        uiBtn.onClick.Invoke();
+                    }
                     if (menuHUD != null) menuHUD.ReceiveClick(btn);
                     lastClickTime = Time.time;
                 }

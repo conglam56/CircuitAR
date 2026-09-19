@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -158,6 +158,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         anchorObj.transform.rotation = rotation;
         anchorObj.transform.localScale = Vector3.one; // Khóa tỉ lệ Anchor chuẩn 1:1:1
         ARAnchor anchor = anchorObj.AddComponent<ARAnchor>();
+        ActiveBoardAnchor = anchorObj;
 
         if (tableBoardPrefab != null)
         {
@@ -165,6 +166,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             board.transform.SetParent(anchor.transform, true);
             board.transform.localScale = new Vector3(length, thickness, depth);
             board.name = "ActiveCircuitBoard";
+            ActiveBoard = board;
         }
 
         if (lockController != null)
@@ -178,9 +180,38 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         enabled = false;
     }
 
+    public GameObject ActiveBoardAnchor { get; private set; }
+    public GameObject ActiveBoard { get; private set; }
+
     private void SetText(string content)
     {
         if (btnLabelTMP != null) btnLabelTMP.text = content;
         if (btnLabelLegacy != null) btnLabelLegacy.text = content;
+    }
+
+    /// <summary>
+    /// Khởi động lại quá trình căn chỉnh 2 điểm mép bàn từ đầu
+    /// </summary>
+    public void RestartCalibration()
+    {
+        if (ActiveBoard != null) Destroy(ActiveBoard);
+        if (ActiveBoardAnchor != null) Destroy(ActiveBoardAnchor);
+
+        GameObject existingAnchor = GameObject.Find("Board_Anchor");
+        if (existingAnchor != null) Destroy(existingAnchor);
+        GameObject existingBoard = GameObject.Find("ActiveCircuitBoard");
+        if (existingBoard != null) Destroy(existingBoard);
+
+        step = 0;
+        pointA = Vector3.zero;
+        pointB = Vector3.zero;
+        targetPlane = null;
+        if (guideLine != null) guideLine.positionCount = 0;
+
+        enabled = true;
+        if (spatialCalibrationUI != null) spatialCalibrationUI.SetActive(true);
+        if (reticleUI != null) reticleUI.SetActive(true);
+        SetText("1. HUONG TAM VAO MEP TRAI\nChum ngon tay (Pinch)");
+        Debug.Log("<color=cyan>[TwoPointSpatialCalibrator]</color> Đã khởi động lại căn chỉnh 2 điểm.");
     }
 }

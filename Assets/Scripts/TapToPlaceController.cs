@@ -32,6 +32,9 @@ public class TapToPlaceController : MonoBehaviour
     void Start()
     {
         mainCamera = Camera.main;
+        if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
+        if (menuHUD == null) menuHUD = FindObjectOfType<MenuHUDController>();
+        if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
     }
 
     void Update()
@@ -43,7 +46,8 @@ public class TapToPlaceController : MonoBehaviour
             return;
         }
 
-        if (buttonInteractor == null || menuHUD == null) return;
+        if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
+        if (buttonInteractor == null) return;
 
         if (mainCamera == null)
         {
@@ -53,16 +57,17 @@ public class TapToPlaceController : MonoBehaviour
 
         if (cooldownTimer > 0) cooldownTimer -= Time.deltaTime;
 
-        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI
-        if (menuHUD.HasSelection)
+        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI (Từ MenuHUD hoặc ARFloatingBubbleMenu gọi trực tiếp)
+        bool hasSelection = (menuHUD != null && menuHUD.HasSelection);
+        bool hasDirectPreview = (currentPrefabToPlace != null && previewAnchor != null);
+
+        if (hasSelection || hasDirectPreview)
         {
             if (isDragging) ReleaseDraggedObject();
 
-            if (currentPrefabToPlace == null)
+            if (hasSelection && currentPrefabToPlace == null)
             {
                 StartPreview(menuHUD.SelectedComponent);
-                canPlace = false;
-                cooldownTimer = 0.4f;
             }
 
             if (!buttonInteractor.isPinching && cooldownTimer <= 0)
@@ -132,7 +137,12 @@ public class TapToPlaceController : MonoBehaviour
             return;
         }
 
-        if (previewAnchor.activeSelf) previewAnchor.SetActive(false);
+        // Khi con trỏ chưa trúng mặt bàn: hiển thị linh kiện lơ lửng trước camera theo hướng nhìn/con trỏ
+        // để người dùng LUÔN NHÌN THẤY RÕ RÀNG linh kiện mình vừa chọn (khắc phục lỗi không thấy vật xuất hiện)
+        Vector3 floatingPos = ray.GetPoint(0.55f);
+        previewAnchor.transform.position = floatingPos;
+        previewAnchor.transform.rotation = Quaternion.LookRotation(mainCamera.transform.forward, Vector3.up);
+        if (!previewAnchor.activeSelf) previewAnchor.SetActive(true);
     }
 
     /// <summary>
@@ -285,10 +295,19 @@ public class TapToPlaceController : MonoBehaviour
         return RectTransformUtility.WorldToScreenPoint(uiCam, buttonInteractor.debugPoint.position);
     }
 
-    private void StartPreview(string componentName)
+    /// <summary>
+    /// Bắt đầu hiển thị bóng xem trước (Preview) cho linh kiện được chọn
+    /// </summary>
+    public void StartPreview(string componentName)
     {
+        ClearPreview();
+
         GameObject prefab = GetPrefabByName(componentName);
-        if (prefab == null) return;
+        if (prefab == null)
+        {
+            Debug.LogWarning("<color=orange>[TapToPlace]</color> Không tìm thấy prefab phù hợp cho: " + componentName);
+            return;
+        }
 
         currentPrefabToPlace = prefab;
         previewAnchor = new GameObject("PreviewAnchor_" + prefab.name);
@@ -305,7 +324,25 @@ public class TapToPlaceController : MonoBehaviour
 
         AlignVisualBaseToAnchor(previewAnchor, previewVisual);
         SetPreviewTransparent(previewVisual, previewAlpha);
-        previewAnchor.SetActive(false);
+        previewAnchor.SetActive(true); // Hiển thị ngay lập tức để người dùng nhìn thấy!
+
+        canPlace = false;
+        cooldownTimer = 0.4f;
+    }
+
+    /// <summary>
+    /// Huỷ bóng xem trước và xoá trạng thái chọn
+    /// </summary>
+    public void ClearPreview()
+    {
+        if (previewAnchor != null)
+        {
+            Destroy(previewAnchor);
+            previewAnchor = null;
+            previewVisual = null;
+            currentPrefabToPlace = null;
+        }
+        if (menuHUD != null) menuHUD.ClearSelection();
     }
 
     private void AlignVisualBaseToAnchor(GameObject anchor, GameObject visual)
@@ -326,10 +363,46 @@ public class TapToPlaceController : MonoBehaviour
 
     private GameObject GetPrefabByName(string name)
     {
-        for (int i = 0; i < componentNames.Length; i++)
+        if (string.IsNullOrEmpty(name)) return null;
+        string search = name.Trim().ToLowerInvariant();
+
+        // 1. Tìm chính xác hoặc tương đối theo mảng componentNames
+        if (componentNames != null && componentPrefabs != null)
         {
-            if (componentNames[i] == name) return componentPrefabs[i];
+            for (int i = 0; i < componentNames.Length; i++)
+            {
+                if (i < componentPrefabs.Length && componentPrefabs[i] != null)
+                {
+                    string configuredName = componentNames[i].Trim().ToLowerInvariant();
+                    if (configuredName == search || configuredName.Contains(search) || search.Contains(configuredName))
+                    {
+                        return componentPrefabs[i];
+                    }
+                }
+            }
         }
+
+        // 2. Tìm theo tên Prefab trong componentPrefabs
+        if (componentPrefabs != null)
+        {
+            for (int i = 0; i < componentPrefabs.Length; i++)
+            {
+                if (componentPrefabs[i] == null) continue;
+                string pName = componentPrefabs[i].name.ToLowerInvariant();
+                if (pName == search || pName.Contains(search) || search.Contains(pName))
+                {
+                    return componentPrefabs[i];
+                }
+
+                // Nhận diện theo từ khóa thông dụng
+                if ((search.Contains("pin") || search.Contains("battery") || search.Contains("nguon")) && pName.Contains("battery")) return componentPrefabs[i];
+                if ((search.Contains("den") || search.Contains("lamp") || search.Contains("bong")) && pName.Contains("lamp")) return componentPrefabs[i];
+                if ((search.Contains("cong") || search.Contains("tac") || search.Contains("key") || search.Contains("switch")) && pName.Contains("key")) return componentPrefabs[i];
+                if ((search.Contains("ampe") || search.Contains("ammetr") || search.Contains("ammeter")) && pName.Contains("ammetr")) return componentPrefabs[i];
+                if ((search.Contains("von") || search.Contains("volt") || search.Contains("voltmeter")) && pName.Contains("volt")) return componentPrefabs[i];
+            }
+        }
+
         return null;
     }
 

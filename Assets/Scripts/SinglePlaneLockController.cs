@@ -30,4 +30,23 @@ public class SinglePlaneLockController : MonoBehaviour
             planeManager.enabled = false;
         }
     }
+
+    /// <summary>
+    /// Mở khóa mặt phẳng để bắt đầu quét lại từ đầu
+    /// </summary>
+    public void UnlockAndRescan()
+    {
+        LockedPlaneId = TrackableId.invalidId;
+        HasLockedPlane = false;
+
+        if (planeManager != null)
+        {
+            planeManager.enabled = true;
+            foreach (var plane in planeManager.trackables)
+            {
+                plane.gameObject.SetActive(true);
+            }
+        }
+        Debug.Log("<color=cyan>[SinglePlaneLock]</color> Đã mở khóa mặt phẳng và kích hoạt lại quét AR.");
+    }
 }

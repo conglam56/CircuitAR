@@ -25,6 +25,13 @@ public class MenuHUDController : MonoBehaviour
         }
     }
 
+    public void Select(string componentName)
+    {
+        SelectedComponent = componentName;
+        HasSelection = true;
+        Debug.Log("Da chon: " + SelectedComponent);
+    }
+
     // Gọi hàm này sau khi đã đặt xong linh kiện, để reset lại lựa chọn
     public void ClearSelection()
     {

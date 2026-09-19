@@ -346,6 +346,7 @@ GameObject:
   - component: {fileID: 372488930}
   - component: {fileID: 372488932}
   - component: {fileID: 372488933}
+  - component: {fileID: 372488934}
   m_Layer: 0
   m_Name: GestureManager
   m_TagString: Untagged
@@ -414,12 +415,43 @@ MonoBehaviour:
   - {fileID: 730307468}
   hoverColor: {r: 0.8, g: 0.9, b: 1, a: 1}
   pressColor: {r: 0, g: 1, b: 0, a: 1}
-  pinchThreshold: 0.03
-  clickCooldown: 0.5
+  pinchThreshold: 0.042
+  clickCooldown: 0.45
   hoanDoiTrucXY: 1
   latNguocTrucX: 1
   latNguocTrucY: 0
   isPinching: 0
+--- !u!114 &372488934
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 372488928}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7f1b2c3d4e5f60718293a4b5c6d7e8f9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::ARFloatingBubbleMenu
+  buttonInteractor: {fileID: 372488933}
+  tapToPlaceController: {fileID: 0}
+  wireConnectionController: {fileID: 0}
+  singlePlaneLockController: {fileID: 0}
+  spatialCalibrator: {fileID: 0}
+  menuHUDController: {fileID: 372488932}
+  menuBottomOffset: 200
+  bubbleDiameter: 180
+  autoGenerateUI: 1
+  disableOldSpatialMenu: 1
+  mainChatBubble: {fileID: 0}
+  btnScanBubble: {fileID: 0}
+  btnResetBubble: {fileID: 0}
+  btnToolboxBubble: {fileID: 0}
+  toolboxDrawer: {fileID: 0}
+  componentButtons: []
+  mainBubbleLabelText: {fileID: 0}
+  isBarExpanded: 0
+  isToolboxOpen: 0
 --- !u!1 &420786853
 GameObject:
   m_ObjectHideFlags: 0
@@ -1885,11 +1917,15 @@ MonoBehaviour:
   - {fileID: 5722648397485223672, guid: 37e1a6c12f070ca4a99316aaf66fc9d2, type: 3}
   - {fileID: 6909490552268425546, guid: f3eeb16c16f14704ab51fd8b7a80bf76, type: 3}
   - {fileID: 5098236497286199025, guid: da8b1ed100f004b4586cdcf955868ff9, type: 3}
+  - {fileID: 5648722009881699255, guid: 1dd96350a25b1924aa9b515bd3fa1282, type: 3}
+  - {fileID: 8376223817459316886, guid: 02be59721dd2011488715b0c07fc4330, type: 3}
   componentNames:
   - Pin
   - Day
   - Den
   - Cong Tac
+  - Ampe Ke
+  - Von Ke
   previewAlpha: 0.5
   scaleMultiplier: 0.03
 --- !u!4 &1289296881
@@ -2174,7 +2210,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1327129852
 RectTransform:
   m_ObjectHideFlags: 0
@@ -2255,7 +2291,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1359235827
 RectTransform:
   m_ObjectHideFlags: 0
