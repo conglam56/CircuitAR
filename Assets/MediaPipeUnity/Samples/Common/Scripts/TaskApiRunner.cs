@@ -33,8 +33,18 @@ namespace Mediapipe.Unity.Sample
       bootstrap = FindBootstrap();
       yield return new WaitUntil(() => bootstrap.isFinished);
 
+      // Nếu Màn Hình Chính đang hiển thị thì không tự động bật camera/MediaPipe,
+      // chờ cho tới khi người dùng bấm 'Tự Lắp Mạch'
+      WelcomeScreenController welcome = WelcomeScreenController.EnsureInstance();
+      if (welcome != null && welcome.isWelcomeScreenActive)
+      {
+        yield return new WaitUntil(() => !welcome.isWelcomeScreenActive);
+      }
+
       Play();
     }
+
+    public bool IsPaused => isPaused;
 
     /// <summary>
     ///   Start the main program from the beginning.

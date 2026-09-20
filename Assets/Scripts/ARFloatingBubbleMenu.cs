@@ -87,6 +87,31 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         // Khởi tạo trạng thái ban đầu: Thụt vào (collapsed) để màn hình AR thoáng đãng
         SetMenuStateImmediate(isBarExpanded);
+
+        // Nếu Màn Hình Chính (Welcome Screen) đang kích hoạt lúc khởi động thì tạm ẩn menu AR
+        WelcomeScreenController welcome = WelcomeScreenController.EnsureInstance();
+        if (welcome != null && welcome.isWelcomeScreenActive)
+        {
+            SetMenuVisible(false);
+        }
+    }
+
+    public Canvas MenuCanvas => targetCanvas;
+
+    public void SetMenuVisible(bool visible)
+    {
+        if (targetCanvas != null)
+        {
+            targetCanvas.gameObject.SetActive(visible);
+        }
+        else
+        {
+            GameObject canvasObj = GameObject.Find("ARFloatingMenu_Canvas");
+            if (canvasObj != null)
+            {
+                canvasObj.SetActive(visible);
+            }
+        }
     }
 
     void Update()

@@ -96,7 +96,7 @@ namespace Mediapipe.Unity.Sample
             // dùng CustomARFrameBridge làm nguồn ảnh thay vì webcam mặc định.
             if (_useARCamera)
             {
-                var arCameraManager = Object.FindFirstObjectByType<ARCameraManager>();
+                var arCameraManager = Object.FindFirstObjectByType<ARCameraManager>(FindObjectsInactive.Include);
                 if (arCameraManager != null)
                 {
                     Debug.Log("Da tim thay ARCameraManager, dung AR Camera lam nguon anh cho MediaPipe.");

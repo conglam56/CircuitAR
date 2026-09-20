@@ -347,7 +347,6 @@ GameObject:
   - component: {fileID: 372488932}
   - component: {fileID: 372488933}
   - component: {fileID: 372488934}
-  - component: {fileID: 372488935}
   m_Layer: 0
   m_Name: GestureManager
   m_TagString: Untagged
@@ -453,39 +452,6 @@ MonoBehaviour:
   mainBubbleLabelText: {fileID: 0}
   isBarExpanded: 0
   isToolboxOpen: 0
---- !u!114 &372488935
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 372488928}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 8a2b3c4d5e6f708192a3b4c5d6e7f8a9, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::WelcomeScreenController
-  arSession: {fileID: 919076348}
-  arCameraManager: {fileID: 1222358476}
-  handLandmarkerRunner: {fileID: 1064799468}
-  buttonInteractor: {fileID: 372488933}
-  spatialCalibrator: {fileID: 1315578858}
-  bubbleMenu: {fileID: 372488934}
-  welcomeCanvas: {fileID: 0}
-  welcomeScaler: {fileID: 0}
-  welcomeCanvasGroup: {fileID: 0}
-  btnManualCircuit: {fileID: 0}
-  btnAIScan: {fileID: 0}
-  backButtonCanvas: {fileID: 0}
-  backButtonScaler: {fileID: 0}
-  btnBackToWelcome: {fileID: 0}
-  rtBackBtn: {fileID: 0}
-  modalToastRoot: {fileID: 0}
-  modalToastCard: {fileID: 0}
-  modalToastGroup: {fileID: 0}
-  btnToastDismiss: {fileID: 0}
-  autoGenerateUI: 1
-  isWelcomeScreenActive: 1
 --- !u!1 &420786853
 GameObject:
   m_ObjectHideFlags: 0
@@ -1321,7 +1287,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 919076346}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 3859a92a05d4f5d418cb6ca605290e74, type: 3}
   m_Name: 
@@ -1794,7 +1760,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1222358472}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4966719baa26e4b0e8231a24d9bd491a, type: 3}
   m_Name: 
@@ -3566,10 +3532,22 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::WireConnectionController
   buttonInteractor: {fileID: 372488933}
   menuHUD: {fileID: 372488932}
+  useLabPlugStyle: 1
   wireMaterial: {fileID: 2100000, guid: 109d10594764ba04da2ae45a146a4a82, type: 2}
   wireColor: {r: 0.1, g: 0.7, b: 1, a: 1}
-  wireWidth: 0.006
+  autoColorByTerminal: 1
+  wireRadius: 0.0022
+  archHeight: 0.025
+  archFactor: 0.22
+  radialSegments: 10
+  curveSegments: 22
+  textureTilingPerMeter: 25
   wiresContainer: {fileID: 851896553}
+  connectorPrefabA: {fileID: 3479547471518695948, guid: 98992acd82a0a604b94d9a283da9a79b, type: 3}
+  connectorPrefabB: {fileID: 4634880304706532835, guid: bf791e73cc102f94e89d652466028590, type: 3}
+  connectorScale: 0.012
+  connectorRotationOffsetA: {x: 0, y: 0, z: 0}
+  connectorRotationOffsetB: {x: 0, y: 180, z: 0}
   highlightColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
   maxRaycastDistance: 15
   activeWires: []
