@@ -48,12 +48,43 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     public RectTransform[] componentButtons;    // Các nút linh kiện trong kho
     public TextMeshProUGUI mainBubbleLabelText; // Chữ dưới bong bóng chính
 
+    [Header("--- HỘP THOẠI XÁC NHẬN AN TOÀN (CONFIRMATION MODAL) ---")]
+    public GameObject confirmationDialogRoot;
+    public RectTransform confirmationCard;
+    public CanvasGroup confirmationGroup;
+    public TextMeshProUGUI confirmTitleTMP;
+    public TextMeshProUGUI confirmMsgTMP;
+    public TextMeshProUGUI confirmActionTMP;
+    public Image confirmActionImg;
+    public Outline confirmCardOutline;
+    public Outline confirmIconOutline;
+    public TextMeshProUGUI confirmIconTMP;
+    public RectTransform btnConfirmCancel;
+    public RectTransform btnConfirmAction;
+
+    private System.Action pendingConfirmAction;
+    private Coroutine confirmAnimCoroutine;
+    private static TMP_FontAsset _safeFontAsset;
+
+    public static TMP_FontAsset GetSafeFont()
+    {
+        if (_safeFontAsset != null) return _safeFontAsset;
+        if (TMP_Settings.defaultFontAsset != null)
+        {
+            _safeFontAsset = TMP_Settings.defaultFontAsset;
+            return _safeFontAsset;
+        }
+        _safeFontAsset = Resources.Load<TMP_FontAsset>("Fonts & Materials/LiberationSans SDF");
+        return _safeFontAsset;
+    }
+
     [Header("--- TRẠNG THÁI HIỆN TẠI ---")]
     public bool isBarExpanded = false;
     public bool isToolboxOpen = false;
 
     private static Sprite circleSprite;
     private static Sprite roundedRectSprite;
+    private static Sprite ringSprite;
     private Canvas targetCanvas;
     private CanvasScaler targetScaler;
     private Coroutine animCoroutine;
@@ -69,6 +100,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     {
         AutoFindReferences();
         KillOldSpatialMenu();
+        if (confirmationDialogRoot != null) confirmationDialogRoot.SetActive(false);
     }
 
     void Start()
@@ -225,6 +257,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (mainBubbleLabelText != null) mainBubbleLabelText.text = "MENU AR";
 
         if (isToolboxOpen) ToggleToolboxDrawer();
+        if (confirmationDialogRoot != null && confirmationDialogRoot.activeSelf) DismissConfirmationDialog();
 
         if (animCoroutine != null) StopCoroutine(animCoroutine);
         animCoroutine = StartCoroutine(AnimateFanOut(false));
@@ -346,6 +379,20 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     public void OnClickScan()
     {
+        Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Yêu cầu QUÉT LẠI MẶT PHẲNG -> Mở hộp thoại xác nhận an toàn...");
+
+        ShowConfirmationDialog(
+            title: "QUÉT MẶT PHẲNG",
+            message: "Thao tác này sẽ xóa toàn bộ mạch điện và hiệu chuẩn lại mặt bàn AR.\nBạn có chắc chắn muốn quét lại không?",
+            actionButtonText: "QUÉT LẠI",
+            actionColor: new Color(0.08f, 0.55f, 0.85f, 0.98f),
+            glowColor: new Color(0f, 0.85f, 1f, 0.95f),
+            onConfirm: ExecuteScan
+        );
+    }
+
+    private void ExecuteScan()
+    {
         Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Thực hiện QUÉT LẠI toàn bộ...");
 
         if (wireConnectionController != null) wireConnectionController.ClearAllWires();
@@ -361,6 +408,20 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     }
 
     public void OnClickResetCircuit()
+    {
+        Debug.Log("<color=orange>[ARFloatingBubbleMenu]</color> Yêu cầu RESET MẠCH ĐIỆN -> Mở hộp thoại xác nhận an toàn...");
+
+        ShowConfirmationDialog(
+            title: "RESET MẠCH ĐIỆN",
+            message: "Toàn bộ linh kiện và dây nối trên bàn mạch sẽ bị xóa hoàn toàn.\nBạn có chắc chắn muốn xóa không?",
+            actionButtonText: "XÓA MẠCH",
+            actionColor: new Color(0.85f, 0.22f, 0.18f, 0.98f),
+            glowColor: new Color(1f, 0.65f, 0.1f, 0.95f),
+            onConfirm: ExecuteResetCircuit
+        );
+    }
+
+    private void ExecuteResetCircuit()
     {
         Debug.Log("<color=orange>[ARFloatingBubbleMenu]</color> Thực hiện RESET MẠCH ĐIỆN...");
 
@@ -391,8 +452,344 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             menuHUDController.Select(componentName);
         }
 
-        // Tự động đóng khay dụng cụ ngay khi chọn xong
-        if (isToolboxOpen) ToggleToolboxDrawer();
+        // GIỮ NGUYÊN KHAY DỤNG CỤ: Không tự động đóng để người dùng thoải mái chọn liên tiếp nhiều linh kiện!
+        // Người dùng có thể chủ động bấm nút 'ĐÓNG' trong khay hoặc thu gọn menu khi hoàn tất.
+    }
+
+    // =========================================================================
+    // HỘP THOẠI XÁC NHẬN AN TOÀN (CONFIRMATION MODAL) CHO RESET & QUÉT MẶT PHẲNG
+    // =========================================================================
+
+    public void ShowConfirmationDialog(
+        string title,
+        string message,
+        string actionButtonText,
+        Color actionColor,
+        Color glowColor,
+        System.Action onConfirm)
+    {
+        if (confirmationDialogRoot == null) return;
+
+        pendingConfirmAction = onConfirm;
+
+        if (confirmTitleTMP != null)
+        {
+            confirmTitleTMP.text = title;
+            confirmTitleTMP.color = glowColor;
+        }
+
+        if (confirmMsgTMP != null)
+        {
+            confirmMsgTMP.text = message;
+        }
+
+        if (confirmActionTMP != null)
+        {
+            confirmActionTMP.text = actionButtonText;
+        }
+
+        if (confirmActionImg != null)
+        {
+            confirmActionImg.color = actionColor;
+        }
+
+        if (confirmCardOutline != null)
+        {
+            confirmCardOutline.effectColor = glowColor;
+        }
+
+        if (confirmIconOutline != null)
+        {
+            confirmIconOutline.effectColor = glowColor;
+        }
+
+        if (confirmIconTMP != null)
+        {
+            confirmIconTMP.color = glowColor;
+        }
+
+        confirmationDialogRoot.SetActive(true);
+
+        if (confirmAnimCoroutine != null) StopCoroutine(confirmAnimCoroutine);
+        confirmAnimCoroutine = StartCoroutine(AnimateDialog(true));
+    }
+
+    public void DismissConfirmationDialog()
+    {
+        if (confirmationDialogRoot == null || !confirmationDialogRoot.activeSelf) return;
+
+        pendingConfirmAction = null;
+
+        if (confirmAnimCoroutine != null) StopCoroutine(confirmAnimCoroutine);
+        confirmAnimCoroutine = StartCoroutine(AnimateDialog(false));
+    }
+
+    private void OnClickConfirmAction()
+    {
+        System.Action action = pendingConfirmAction;
+        DismissConfirmationDialog();
+        action?.Invoke();
+    }
+
+    private IEnumerator AnimateDialog(bool showing)
+    {
+        float duration = 0.20f;
+        float elapsed = 0f;
+
+        Vector3 startScale = showing ? new Vector3(0.6f, 0.6f, 1f) : Vector3.one;
+        Vector3 endScale = showing ? Vector3.one : new Vector3(0.6f, 0.6f, 1f);
+
+        float startAlpha = showing ? 0f : 1f;
+        float endAlpha = showing ? 1f : 0f;
+
+        if (showing && confirmationGroup != null)
+        {
+            confirmationGroup.alpha = 0f;
+            confirmationGroup.interactable = true;
+            confirmationGroup.blocksRaycasts = true;
+        }
+
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+            float ease = showing
+                ? 1f + 1.8f * Mathf.Pow(t - 1f, 3) + 0.8f * Mathf.Pow(t - 1f, 2)
+                : Mathf.Sin(t * Mathf.PI * 0.5f);
+
+            if (confirmationCard != null) confirmationCard.localScale = Vector3.LerpUnclamped(startScale, endScale, ease);
+            if (confirmationGroup != null) confirmationGroup.alpha = Mathf.Lerp(startAlpha, endAlpha, t);
+
+            yield return null;
+        }
+
+        if (confirmationCard != null) confirmationCard.localScale = endScale;
+        if (confirmationGroup != null) confirmationGroup.alpha = endAlpha;
+
+        if (!showing)
+        {
+            if (confirmationDialogRoot != null) confirmationDialogRoot.SetActive(false);
+            if (confirmationGroup != null)
+            {
+                confirmationGroup.interactable = false;
+                confirmationGroup.blocksRaycasts = false;
+            }
+        }
+    }
+
+    private void BuildConfirmationDialog(Transform parent)
+    {
+        confirmationDialogRoot = new GameObject("ConfirmationModal_Backdrop", typeof(RectTransform), typeof(Image));
+        confirmationDialogRoot.transform.SetParent(parent, false);
+        RectTransform bdRT = confirmationDialogRoot.GetComponent<RectTransform>();
+        bdRT.anchorMin = Vector2.zero;
+        bdRT.anchorMax = Vector2.one;
+        bdRT.offsetMin = Vector2.zero;
+        bdRT.offsetMax = Vector2.zero;
+
+        Image bdImg = confirmationDialogRoot.GetComponent<Image>();
+        bdImg.color = new Color(0f, 0f, 0f, 0.76f);
+        bdImg.raycastTarget = true;
+
+        Button bdBtn = confirmationDialogRoot.AddComponent<Button>();
+        bdBtn.onClick.AddListener(DismissConfirmationDialog);
+
+        confirmationGroup = confirmationDialogRoot.AddComponent<CanvasGroup>();
+
+        // Thẻ Card thông báo ở giữa màn hình
+        GameObject cardObj = new GameObject("Confirmation_Card", typeof(RectTransform), typeof(Image));
+        cardObj.transform.SetParent(confirmationDialogRoot.transform, false);
+        confirmationCard = cardObj.GetComponent<RectTransform>();
+        confirmationCard.anchorMin = new Vector2(0.5f, 0.5f);
+        confirmationCard.anchorMax = new Vector2(0.5f, 0.5f);
+        confirmationCard.pivot = new Vector2(0.5f, 0.5f);
+        confirmationCard.sizeDelta = new Vector2(780, 440);
+        confirmationCard.anchoredPosition = new Vector2(0, 50f);
+
+        Image cardImg = cardObj.GetComponent<Image>();
+        cardImg.sprite = roundedRectSprite;
+        cardImg.type = Image.Type.Sliced;
+        cardImg.color = new Color(0.06f, 0.10f, 0.18f, 0.98f);
+        cardImg.raycastTarget = true;
+
+        confirmCardOutline = cardObj.AddComponent<Outline>();
+        confirmCardOutline.effectColor = new Color(1f, 0.65f, 0.1f, 0.95f);
+        confirmCardOutline.effectDistance = new Vector2(3.5f, -3.5f);
+
+        // Huy hiệu Icon cảnh báo tròn ở trên cùng
+        GameObject iconObj = new GameObject("Icon_Badge", typeof(RectTransform), typeof(Image));
+        iconObj.transform.SetParent(cardObj.transform, false);
+        RectTransform iconRT = iconObj.GetComponent<RectTransform>();
+        iconRT.anchorMin = new Vector2(0.5f, 1f);
+        iconRT.anchorMax = new Vector2(0.5f, 1f);
+        iconRT.pivot = new Vector2(0.5f, 0.5f);
+        iconRT.sizeDelta = new Vector2(96, 96);
+        iconRT.anchoredPosition = new Vector2(0, -22f);
+
+        Image iconImg = iconObj.GetComponent<Image>();
+        iconImg.sprite = circleSprite;
+        iconImg.color = new Color(0.04f, 0.08f, 0.15f, 0.92f);
+        iconImg.raycastTarget = false;
+
+        confirmIconOutline = iconObj.AddComponent<Outline>();
+        confirmIconOutline.effectColor = new Color(1f, 0.65f, 0.1f, 0.95f);
+        confirmIconOutline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        GameObject iconChar = new GameObject("Icon_Char", typeof(RectTransform));
+        iconChar.transform.SetParent(iconObj.transform, false);
+        RectTransform icRT = iconChar.GetComponent<RectTransform>();
+        icRT.anchorMin = Vector2.zero;
+        icRT.anchorMax = Vector2.one;
+        icRT.offsetMin = Vector2.zero;
+        icRT.offsetMax = Vector2.zero;
+
+        confirmIconTMP = iconChar.AddComponent<TextMeshProUGUI>();
+        confirmIconTMP.font = GetSafeFont();
+        confirmIconTMP.text = "!";
+        confirmIconTMP.fontSize = 58;
+        confirmIconTMP.fontStyle = FontStyles.Bold;
+        confirmIconTMP.alignment = TextAlignmentOptions.Center;
+        confirmIconTMP.color = new Color(1f, 0.65f, 0.1f, 1f);
+        confirmIconTMP.raycastTarget = false;
+
+        // Tiêu đề cảnh báo
+        GameObject titleObj = new GameObject("Title_Text", typeof(RectTransform));
+        titleObj.transform.SetParent(cardObj.transform, false);
+        RectTransform titleRT = titleObj.GetComponent<RectTransform>();
+        titleRT.anchorMin = new Vector2(0.5f, 1f);
+        titleRT.anchorMax = new Vector2(0.5f, 1f);
+        titleRT.pivot = new Vector2(0.5f, 1f);
+        titleRT.sizeDelta = new Vector2(720, 50);
+        titleRT.anchoredPosition = new Vector2(0, -85f);
+
+        confirmTitleTMP = titleObj.AddComponent<TextMeshProUGUI>();
+        confirmTitleTMP.font = GetSafeFont();
+        confirmTitleTMP.text = "RESET MẠCH ĐIỆN";
+        confirmTitleTMP.fontSize = 32;
+        confirmTitleTMP.fontStyle = FontStyles.Bold;
+        confirmTitleTMP.alignment = TextAlignmentOptions.Center;
+        confirmTitleTMP.color = new Color(1f, 0.65f, 0.1f, 1f);
+        confirmTitleTMP.characterSpacing = 2f;
+        confirmTitleTMP.raycastTarget = false;
+
+        // Nội dung chi tiết
+        GameObject msgObj = new GameObject("Message_Text", typeof(RectTransform));
+        msgObj.transform.SetParent(cardObj.transform, false);
+        RectTransform msgRT = msgObj.GetComponent<RectTransform>();
+        msgRT.anchorMin = new Vector2(0.5f, 1f);
+        msgRT.anchorMax = new Vector2(0.5f, 1f);
+        msgRT.pivot = new Vector2(0.5f, 1f);
+        msgRT.sizeDelta = new Vector2(700, 110);
+        msgRT.anchoredPosition = new Vector2(0, -145f);
+
+        confirmMsgTMP = msgObj.AddComponent<TextMeshProUGUI>();
+        confirmMsgTMP.font = GetSafeFont();
+        confirmMsgTMP.text = "Toàn bộ linh kiện và dây nối trên bàn mạch sẽ bị xóa.\nBạn có chắc chắn muốn tiếp tục không?";
+        confirmMsgTMP.fontSize = 21;
+        confirmMsgTMP.fontStyle = FontStyles.Normal;
+        confirmMsgTMP.alignment = TextAlignmentOptions.Center;
+        confirmMsgTMP.color = new Color(0.9f, 0.95f, 1f, 0.92f);
+        confirmMsgTMP.lineSpacing = 18f;
+        confirmMsgTMP.raycastTarget = false;
+
+        // Hàng 2 Nút bấm: [HỦY BỎ] và [XÁC NHẬN]
+        GameObject btnRow = new GameObject("Button_Row", typeof(RectTransform));
+        btnRow.transform.SetParent(cardObj.transform, false);
+        RectTransform rowRT = btnRow.GetComponent<RectTransform>();
+        rowRT.anchorMin = new Vector2(0.5f, 0f);
+        rowRT.anchorMax = new Vector2(0.5f, 0f);
+        rowRT.pivot = new Vector2(0.5f, 0f);
+        rowRT.sizeDelta = new Vector2(720, 100);
+        rowRT.anchoredPosition = new Vector2(0, 30f);
+
+        // 1. Nút HỦY BỎ (Bên trái)
+        GameObject cancelObj = new GameObject("Btn_Confirm_Cancel", typeof(RectTransform), typeof(Image), typeof(Button));
+        cancelObj.transform.SetParent(btnRow.transform, false);
+        btnConfirmCancel = cancelObj.GetComponent<RectTransform>();
+        btnConfirmCancel.anchorMin = new Vector2(0.5f, 0.5f);
+        btnConfirmCancel.anchorMax = new Vector2(0.5f, 0.5f);
+        btnConfirmCancel.pivot = new Vector2(0.5f, 0.5f);
+        btnConfirmCancel.sizeDelta = new Vector2(300, 85);
+        btnConfirmCancel.anchoredPosition = new Vector2(-165f, 0);
+
+        Image cancelImg = cancelObj.GetComponent<Image>();
+        cancelImg.sprite = roundedRectSprite;
+        cancelImg.type = Image.Type.Sliced;
+        cancelImg.color = new Color(0.20f, 0.25f, 0.35f, 0.96f);
+
+        Button cancelBtn = cancelObj.GetComponent<Button>();
+        cancelBtn.targetGraphic = cancelImg;
+        cancelBtn.onClick.AddListener(DismissConfirmationDialog);
+
+        Outline cancelOutline = cancelObj.AddComponent<Outline>();
+        cancelOutline.effectColor = new Color(0.40f, 0.50f, 0.65f, 0.7f);
+        cancelOutline.effectDistance = new Vector2(2f, -2f);
+
+        GameObject cancelTextObj = new GameObject("Label", typeof(RectTransform));
+        cancelTextObj.transform.SetParent(cancelObj.transform, false);
+        RectTransform cTxtRT = cancelTextObj.GetComponent<RectTransform>();
+        cTxtRT.anchorMin = Vector2.zero;
+        cTxtRT.anchorMax = Vector2.one;
+        cTxtRT.offsetMin = Vector2.zero;
+        cTxtRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI cancelTMP = cancelTextObj.AddComponent<TextMeshProUGUI>();
+        cancelTMP.font = GetSafeFont();
+        cancelTMP.text = "HỦY BỎ";
+        cancelTMP.fontSize = 25;
+        cancelTMP.fontStyle = FontStyles.Bold;
+        cancelTMP.alignment = TextAlignmentOptions.Center;
+        cancelTMP.color = Color.white;
+        cancelTMP.raycastTarget = false;
+
+        // 2. Nút XÁC NHẬN (Bên phải)
+        GameObject actionObj = new GameObject("Btn_Confirm_Action", typeof(RectTransform), typeof(Image), typeof(Button));
+        actionObj.transform.SetParent(btnRow.transform, false);
+        btnConfirmAction = actionObj.GetComponent<RectTransform>();
+        btnConfirmAction.anchorMin = new Vector2(0.5f, 0.5f);
+        btnConfirmAction.anchorMax = new Vector2(0.5f, 0.5f);
+        btnConfirmAction.pivot = new Vector2(0.5f, 0.5f);
+        btnConfirmAction.sizeDelta = new Vector2(300, 85);
+        btnConfirmAction.anchoredPosition = new Vector2(165f, 0);
+
+        confirmActionImg = actionObj.GetComponent<Image>();
+        confirmActionImg.sprite = roundedRectSprite;
+        confirmActionImg.type = Image.Type.Sliced;
+        confirmActionImg.color = new Color(0.85f, 0.22f, 0.18f, 0.98f);
+
+        Button actionBtn = actionObj.GetComponent<Button>();
+        actionBtn.targetGraphic = confirmActionImg;
+        actionBtn.onClick.AddListener(OnClickConfirmAction);
+
+        Outline actionOutline = actionObj.AddComponent<Outline>();
+        actionOutline.effectColor = new Color(1f, 1f, 1f, 0.5f);
+        actionOutline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        GameObject actionTextObj = new GameObject("Label", typeof(RectTransform));
+        actionTextObj.transform.SetParent(actionObj.transform, false);
+        RectTransform aTxtRT = actionTextObj.GetComponent<RectTransform>();
+        aTxtRT.anchorMin = Vector2.zero;
+        aTxtRT.anchorMax = Vector2.one;
+        aTxtRT.offsetMin = Vector2.zero;
+        aTxtRT.offsetMax = Vector2.zero;
+
+        confirmActionTMP = actionTextObj.AddComponent<TextMeshProUGUI>();
+        confirmActionTMP.font = GetSafeFont();
+        confirmActionTMP.text = "XÁC NHẬN";
+        confirmActionTMP.fontSize = 25;
+        confirmActionTMP.fontStyle = FontStyles.Bold;
+        confirmActionTMP.alignment = TextAlignmentOptions.Center;
+        confirmActionTMP.color = Color.white;
+        confirmActionTMP.raycastTarget = false;
+
+        // Đảm bảo Modal ẩn hoàn toàn khi vừa tạo xong
+        confirmationDialogRoot.SetActive(false);
+        if (confirmationGroup != null)
+        {
+            confirmationGroup.alpha = 0f;
+            confirmationGroup.interactable = false;
+            confirmationGroup.blocksRaycasts = false;
+        }
     }
 
     private void DestroyAllPlacedComponents()
@@ -454,6 +851,9 @@ public class ARFloatingBubbleMenu : MonoBehaviour
                 if (b != null) buttonInteractor.RegisterButton(b);
             }
         }
+
+        if (btnConfirmCancel != null) buttonInteractor.RegisterButton(btnConfirmCancel);
+        if (btnConfirmAction != null) buttonInteractor.RegisterButton(btnConfirmAction);
     }
 
     private IEnumerator AnimateScale(RectTransform target, Vector3 targetScale, float duration, System.Action onComplete = null)
@@ -510,7 +910,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Sprite toolboxSprite = UIIconAssets.GetToolboxSprite();
         Sprite mainBubbleSprite = UIIconAssets.GetMainBubbleSprite();
 
-        // 1. Ô TRÒN 1: QUÉT LẠI MẶT PHẲNG (Bên trái)
+        // 1. Ô TRÒN 1: QUÉT LẠI MẶT PHẲNG (Bên trái) - CƠ CHẾ GIỮ 1.25s ĐỂ KÍCH HOẠT AN TOÀN
         GameObject scanObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Scan",
@@ -519,11 +919,14 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             size: new Vector2(bubbleDiameter, bubbleDiameter),
             anchoredPos: posScanTarget,
             labelText: "QUÉT MẶT PHẲNG",
-            onClick: OnClickScan
+            onClick: null,
+            holdToActivate: true,
+            holdingLabelText: "GIỮ ĐỂ QUÉT",
+            onHoldComplete: ExecuteScan
         );
         btnScanBubble = scanObj.GetComponent<RectTransform>();
 
-        // 2. Ô TRÒN 2: RESET MẠCH ĐIỆN (Ở giữa trên)
+        // 2. Ô TRÒN 2: RESET MẠCH ĐIỆN (Ở giữa trên) - CƠ CHẾ GIỮ 1.25s ĐỂ KÍCH HOẠT AN TOÀN
         GameObject resetObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Reset",
@@ -532,11 +935,14 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             size: new Vector2(bubbleDiameter, bubbleDiameter),
             anchoredPos: posResetTarget,
             labelText: "RESET MẠCH",
-            onClick: OnClickResetCircuit
+            onClick: null,
+            holdToActivate: true,
+            holdingLabelText: "GIỮ ĐỂ RESET",
+            onHoldComplete: ExecuteResetCircuit
         );
         btnResetBubble = resetObj.GetComponent<RectTransform>();
 
-        // 3. Ô TRÒN 3: KHO DỤNG CỤ (Bên phải)
+        // 3. Ô TRÒN 3: KHO DỤNG CỤ (Bên phải) - Chạm / Pinch 1 lần ăn ngay
         GameObject toolObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Toolbox",
@@ -643,12 +1049,15 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         componentButtons = compBtnList.ToArray();
 
+        // Khởi tạo hộp thoại xác nhận an toàn cho Reset và Quét mặt phẳng
+        BuildConfirmationDialog(rootRT);
+
         RegisterAllButtonsToInteractor();
         Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã khởi tạo hoàn tất Menu Bong Bóng Chat với 3 ô tròn icon!");
     }
 
     /// <summary>
-    /// Tạo nút tròn có hình ảnh icon bên trong và viền phát sáng
+    /// Tạo nút tròn có hình ảnh icon bên trong và viền phát sáng, hỗ trợ tùy chọn Giữ để kích hoạt (Hold-to-Activate)
     /// </summary>
     private GameObject CreateCircularIconButton(
         Transform parent,
@@ -658,7 +1067,10 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Vector2 size,
         Vector2 anchoredPos,
         string labelText,
-        System.Action onClick)
+        System.Action onClick,
+        bool holdToActivate = false,
+        string holdingLabelText = "",
+        System.Action onHoldComplete = null)
     {
         GameObject btnObj = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
         btnObj.transform.SetParent(parent, false);
@@ -676,7 +1088,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         Button btn = btnObj.GetComponent<Button>();
         btn.targetGraphic = img;
-        if (onClick != null) btn.onClick.AddListener(() => onClick());
+        if (onClick != null && !holdToActivate) btn.onClick.AddListener(() => onClick());
 
         // Viền tròn phát sáng
         Outline outline = btnObj.AddComponent<Outline>();
@@ -700,7 +1112,36 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             iconImg.raycastTarget = false;
         }
 
+        // Vòng tròn tiến trình (Radial 360 Progress Ring) cho cơ chế Giữ để kích hoạt
+        Image progressImg = null;
+        if (holdToActivate)
+        {
+            GameObject progressObj = new GameObject("ProgressRing", typeof(RectTransform), typeof(Image));
+            progressObj.transform.SetParent(btnObj.transform, false);
+            RectTransform progRT = progressObj.GetComponent<RectTransform>();
+            progRT.anchorMin = Vector2.zero;
+            progRT.anchorMax = Vector2.one;
+            progRT.offsetMin = new Vector2(-4, -4);
+            progRT.offsetMax = new Vector2(4, 4);
+
+            progressImg = progressObj.GetComponent<Image>();
+            progressImg.sprite = ringSprite != null ? ringSprite : circleSprite;
+            progressImg.type = Image.Type.Filled;
+            progressImg.fillMethod = Image.FillMethod.Radial360;
+            progressImg.fillOrigin = (int)Image.Origin360.Top;
+            progressImg.fillClockwise = true;
+            progressImg.fillAmount = 0f;
+            progressImg.color = ringColor;
+            progressImg.raycastTarget = false;
+            progressObj.SetActive(false);
+
+            Outline ringGlow = progressObj.AddComponent<Outline>();
+            ringGlow.effectColor = new Color(ringColor.r, ringColor.g, ringColor.b, 0.95f);
+            ringGlow.effectDistance = new Vector2(2.5f, -2.5f);
+        }
+
         // Nhãn chữ bo tròn bên dưới nút (Không dùng emoji để tránh lỗi ô vuông trên Android)
+        TextMeshProUGUI labelTmp = null;
         if (!string.IsNullOrEmpty(labelText))
         {
             GameObject pillObj = new GameObject("Label_Pill", typeof(RectTransform), typeof(Image));
@@ -709,7 +1150,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             pillRT.anchorMin = new Vector2(0.5f, 0f);
             pillRT.anchorMax = new Vector2(0.5f, 0f);
             pillRT.pivot = new Vector2(0.5f, 1f);
-            pillRT.sizeDelta = new Vector2(size.x + 24, 44);
+            pillRT.sizeDelta = new Vector2(size.x + 36, 44);
             pillRT.anchoredPosition = new Vector2(0, -8);
 
             Image pillImg = pillObj.GetComponent<Image>();
@@ -730,17 +1171,29 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             textRT.offsetMin = new Vector2(4, 0);
             textRT.offsetMax = new Vector2(-4, 0);
 
-            TextMeshProUGUI tmp = textObj.AddComponent<TextMeshProUGUI>();
-            if (tmp.font == null && TMP_Settings.defaultFontAsset != null) tmp.font = TMP_Settings.defaultFontAsset;
-            tmp.text = labelText;
-            tmp.fontSize = 18;
-            tmp.enableAutoSizing = true;
-            tmp.fontSizeMin = 13;
-            tmp.fontSizeMax = 19;
-            tmp.fontStyle = FontStyles.Bold;
-            tmp.alignment = TextAlignmentOptions.Center;
-            tmp.color = Color.white;
-            tmp.raycastTarget = false;
+            labelTmp = textObj.AddComponent<TextMeshProUGUI>();
+            if (labelTmp.font == null && TMP_Settings.defaultFontAsset != null) labelTmp.font = TMP_Settings.defaultFontAsset;
+            labelTmp.text = labelText;
+            labelTmp.fontSize = 18;
+            labelTmp.enableAutoSizing = true;
+            labelTmp.fontSizeMin = 12;
+            labelTmp.fontSizeMax = 19;
+            labelTmp.fontStyle = FontStyles.Bold;
+            labelTmp.alignment = TextAlignmentOptions.Center;
+            labelTmp.color = Color.white;
+            labelTmp.raycastTarget = false;
+        }
+
+        if (holdToActivate)
+        {
+            HoldToActivateButton holdComp = btnObj.AddComponent<HoldToActivateButton>();
+            holdComp.holdDuration = 1.25f;
+            holdComp.defaultLabel = labelText;
+            holdComp.holdingLabel = string.IsNullOrEmpty(holdingLabelText) ? "GIỮ ĐỂ KÍCH HOẠT" : holdingLabelText;
+            holdComp.onHoldComplete = onHoldComplete;
+            holdComp.progressRingImage = progressImg;
+            holdComp.labelTMP = labelTmp;
+            holdComp.buttonRect = rt;
         }
 
         return btnObj;
@@ -927,6 +1380,39 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     {
         if (circleSprite == null) circleSprite = CreateProceduralCircle(128);
         if (roundedRectSprite == null) roundedRectSprite = CreateProceduralRoundedRect(128, 128, 32);
+        if (ringSprite == null) ringSprite = CreateProceduralRing(128, 0.78f);
+    }
+
+    private static Sprite CreateProceduralRing(int size, float innerRadiusRatio)
+    {
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        Color[] colors = new Color[size * size];
+        float radius = size * 0.5f;
+        float innerRadius = radius * innerRadiusRatio;
+        Vector2 center = new Vector2(radius, radius);
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                float dist = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
+                if (dist > radius || dist < innerRadius)
+                {
+                    colors[y * size + x] = Color.clear;
+                }
+                else
+                {
+                    float alphaOuter = (dist > radius - 1.5f) ? Mathf.Clamp01(radius - dist) : 1f;
+                    float alphaInner = (dist < innerRadius + 1.5f) ? Mathf.Clamp01(dist - innerRadius) : 1f;
+                    float alpha = Mathf.Min(alphaOuter, alphaInner);
+                    colors[y * size + x] = new Color(1f, 1f, 1f, alpha);
+                }
+            }
+        }
+
+        tex.SetPixels(colors);
+        tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
     }
 
     private static Sprite CreateProceduralCircle(int size)

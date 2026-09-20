@@ -116,8 +116,14 @@ public class ButtonInteractor : MonoBehaviour
         {
             foreach (var btn in interactiveButtons)
             {
-                if (btn != null && buttonImages.ContainsKey(btn))
-                    buttonImages[btn].color = originalColors[btn];
+                if (btn != null)
+                {
+                    if (buttonImages.ContainsKey(btn))
+                        buttonImages[btn].color = originalColors[btn];
+
+                    HoldToActivateButton holdBtn = btn.GetComponent<HoldToActivateButton>();
+                    if (holdBtn != null) holdBtn.ResetHoldState();
+                }
             }
             if (debugPoint != null) debugPoint.gameObject.SetActive(false);
 
@@ -167,6 +173,23 @@ public class ButtonInteractor : MonoBehaviour
             // Tính toán va chạm giữa ngón tay (2D) và nút bấm (3D)
             bool isHovering = RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam);
             Image img = buttonImages[btn];
+
+            // NẾU LÀ NÚT GIỮ ĐỂ KÍCH HOẠT (QUÉT MẶT PHẲNG, RESET MẠCH)
+            HoldToActivateButton holdComp = btn.GetComponent<HoldToActivateButton>();
+            if (holdComp != null)
+            {
+                holdComp.SetPinchHoverState(isHovering, pinch);
+                if (isHovering)
+                {
+                    anyButtonHovered = true;
+                    img.color = pinch ? pressColor : hoverColor;
+                }
+                else
+                {
+                    img.color = originalColors[btn];
+                }
+                continue;
+            }
 
             if (isHovering)
             {
