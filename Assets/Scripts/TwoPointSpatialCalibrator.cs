@@ -156,14 +156,14 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         GameObject anchorObj = new GameObject("Board_Anchor");
         anchorObj.transform.position = center;
         anchorObj.transform.rotation = rotation;
-        anchorObj.transform.localScale = Vector3.one; // Khóa tỉ lệ Anchor chuẩn 1:1:1
-        ARAnchor anchor = anchorObj.AddComponent<ARAnchor>();
+        // Khóa tỉ lệ Anchor chuẩn 1:1:1
+        anchorObj.transform.localScale = Vector3.one;
         ActiveBoardAnchor = anchorObj;
 
         if (tableBoardPrefab != null)
         {
             GameObject board = Instantiate(tableBoardPrefab, center, rotation);
-            board.transform.SetParent(anchor.transform, true);
+            board.transform.SetParent(anchorObj.transform, true);
             board.transform.localScale = new Vector3(length, thickness, depth);
             board.name = "ActiveCircuitBoard";
             ActiveBoard = board;

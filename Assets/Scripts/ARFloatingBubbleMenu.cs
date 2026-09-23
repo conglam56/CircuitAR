@@ -42,11 +42,32 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     [Header("--- THAM CHIẾU UI BONG BÓNG ---")]
     public RectTransform mainChatBubble;        // Bong bóng chat điều khiển chính
     public RectTransform btnScanBubble;         // Ô tròn 1: Quét lại
-    public RectTransform btnResetBubble;        // Ô tròn 2: Reset mạch
-    public RectTransform btnToolboxBubble;      // Ô tròn 3: Kho dụng cụ
+    public RectTransform btnUndoBubble;         // Ô tròn 2: Hoàn tác (Requirement 1 & 2)
+    public RectTransform btnRedoBubble;         // Ô tròn 3: Làm lại (Requirement 3)
+    public RectTransform btnResetBubble;        // Ô tròn 4: Reset mạch
+    public RectTransform btnWireModeBubble;     // Ô tròn 5: Chế độ Nối dây (Requirement 4)
+    public RectTransform btnToolboxBubble;      // Ô tròn 6: Kho dụng cụ
+    public RectTransform wireModeFloatingBadge; // Thẻ trạng thái nổi khi đang nối dây
     public RectTransform toolboxDrawer;         // Khay linh kiện
     public RectTransform[] componentButtons;    // Các nút linh kiện trong kho
     public TextMeshProUGUI mainBubbleLabelText; // Chữ dưới bong bóng chính
+
+    [Header("--- THAM CHIẾU UI SELECTION / DELETE ---")]
+    public RectTransform selectedComponentBadge;
+    public TextMeshProUGUI selectedCompLabelTMP;
+    public RectTransform btnDeleteComp;
+    public RectTransform btnDeselectComp;
+
+    [Header("--- THÙNG RÁC XÓA LINH KIỆN (DRAG TO TRASH) ---")]
+    public RectTransform trashZoneRoot;
+    private Image trashZoneBgImg;
+    private Outline trashZoneOutline;
+    private TextMeshProUGUI trashZoneTMP;
+    private bool isTrashHovered = false;
+
+    private TextMeshProUGUI wireModeLabelTMP;
+    private Outline wireModeRingOutline;
+    private Image wireModeBubbleImg;
 
     [Header("--- HỘP THOẠI XÁC NHẬN AN TOÀN (CONFIRMATION MODAL) ---")]
     public GameObject confirmationDialogRoot;
@@ -90,11 +111,42 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private Coroutine animCoroutine;
     private Coroutine drawerAnimCoroutine;
 
-    // Vị trí mục tiêu khi xòe ra
+    // Vị trí mục tiêu khi xòe ra (Hình cánh quạt 6 bong bóng đối xứng với MENU ở trung tâm)
     private Vector2 posScanTarget;
-    private Vector2 posResetTarget;
     private Vector2 posToolboxTarget;
+    private Vector2 posUndoTarget;
+    private Vector2 posRedoTarget;
+    private Vector2 posWireModeTarget;
+    private Vector2 posResetTarget;
     private Vector2 posMainBubble;
+
+    void OnEnable()
+    {
+        if (wireConnectionController != null)
+        {
+            wireConnectionController.OnWireModeChanged -= OnWireModeStateChanged;
+            wireConnectionController.OnWireModeChanged += OnWireModeStateChanged;
+            UpdateWireModeUI(wireConnectionController.IsWireMode);
+        }
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
+            tapToPlaceController.OnSelectedComponentChanged += UpdateSelectedComponentUI;
+            UpdateSelectedComponentUI(tapToPlaceController.SelectedComponent);
+        }
+    }
+
+    void OnDisable()
+    {
+        if (wireConnectionController != null)
+        {
+            wireConnectionController.OnWireModeChanged -= OnWireModeStateChanged;
+        }
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
+        }
+    }
 
     void Awake()
     {
@@ -108,6 +160,19 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         AutoFindReferences();
         KillOldSpatialMenu();
 
+        if (wireConnectionController != null)
+        {
+            wireConnectionController.OnWireModeChanged -= OnWireModeStateChanged;
+            wireConnectionController.OnWireModeChanged += OnWireModeStateChanged;
+        }
+
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
+            tapToPlaceController.OnSelectedComponentChanged += UpdateSelectedComponentUI;
+            UpdateSelectedComponentUI(tapToPlaceController.SelectedComponent);
+        }
+
         if (autoGenerateUI && mainChatBubble == null)
         {
             BuildChatBubbleMenuUI();
@@ -119,6 +184,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         // Khởi tạo trạng thái ban đầu: Thụt vào (collapsed) để màn hình AR thoáng đãng
         SetMenuStateImmediate(isBarExpanded);
+
+        UpdateWireModeUI(wireConnectionController != null && wireConnectionController.IsWireMode);
 
         // Nếu Màn Hình Chính (Welcome Screen) đang kích hoạt lúc khởi động thì tạm ẩn menu AR
         WelcomeScreenController welcome = WelcomeScreenController.EnsureInstance();
@@ -259,6 +326,11 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (isToolboxOpen) ToggleToolboxDrawer();
         if (confirmationDialogRoot != null && confirmationDialogRoot.activeSelf) DismissConfirmationDialog();
 
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.CancelPlacement();
+        }
+
         if (animCoroutine != null) StopCoroutine(animCoroutine);
         animCoroutine = StartCoroutine(AnimateFanOut(false));
     }
@@ -274,18 +346,30 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (expanding)
         {
             if (btnScanBubble != null) { btnScanBubble.gameObject.SetActive(true); btnScanBubble.localScale = Vector3.zero; }
-            if (btnResetBubble != null) { btnResetBubble.gameObject.SetActive(true); btnResetBubble.localScale = Vector3.zero; }
             if (btnToolboxBubble != null) { btnToolboxBubble.gameObject.SetActive(true); btnToolboxBubble.localScale = Vector3.zero; }
+            if (btnUndoBubble != null) { btnUndoBubble.gameObject.SetActive(true); btnUndoBubble.localScale = Vector3.zero; }
+            if (btnRedoBubble != null) { btnRedoBubble.gameObject.SetActive(true); btnRedoBubble.localScale = Vector3.zero; }
+            if (btnWireModeBubble != null) { btnWireModeBubble.gameObject.SetActive(true); btnWireModeBubble.localScale = Vector3.zero; }
+            if (btnResetBubble != null) { btnResetBubble.gameObject.SetActive(true); btnResetBubble.localScale = Vector3.zero; }
         }
 
         Vector2 startScan = expanding ? posMainBubble : posScanTarget;
         Vector2 endScan = expanding ? posScanTarget : posMainBubble;
 
-        Vector2 startReset = expanding ? posMainBubble : posResetTarget;
-        Vector2 endReset = expanding ? posResetTarget : posMainBubble;
-
         Vector2 startToolbox = expanding ? posMainBubble : posToolboxTarget;
         Vector2 endToolbox = expanding ? posToolboxTarget : posMainBubble;
+
+        Vector2 startUndo = expanding ? posMainBubble : posUndoTarget;
+        Vector2 endUndo = expanding ? posUndoTarget : posMainBubble;
+
+        Vector2 startRedo = expanding ? posMainBubble : posRedoTarget;
+        Vector2 endRedo = expanding ? posRedoTarget : posMainBubble;
+
+        Vector2 startWire = expanding ? posMainBubble : posWireModeTarget;
+        Vector2 endWire = expanding ? posWireModeTarget : posMainBubble;
+
+        Vector2 startReset = expanding ? posMainBubble : posResetTarget;
+        Vector2 endReset = expanding ? posResetTarget : posMainBubble;
 
         Vector3 startScale = expanding ? Vector3.zero : Vector3.one;
         Vector3 endScale = expanding ? Vector3.one : Vector3.zero;
@@ -308,26 +392,38 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             }
 
             Vector2 curScan = Vector2.LerpUnclamped(startScan, endScan, ease);
-            Vector2 curReset = Vector2.LerpUnclamped(startReset, endReset, ease);
             Vector2 curToolbox = Vector2.LerpUnclamped(startToolbox, endToolbox, ease);
+            Vector2 curUndo = Vector2.LerpUnclamped(startUndo, endUndo, ease);
+            Vector2 curRedo = Vector2.LerpUnclamped(startRedo, endRedo, ease);
+            Vector2 curWire = Vector2.LerpUnclamped(startWire, endWire, ease);
+            Vector2 curReset = Vector2.LerpUnclamped(startReset, endReset, ease);
             Vector3 curScale = Vector3.LerpUnclamped(startScale, endScale, Mathf.Clamp01(ease));
 
             if (btnScanBubble != null) { btnScanBubble.anchoredPosition = curScan; btnScanBubble.localScale = curScale; }
-            if (btnResetBubble != null) { btnResetBubble.anchoredPosition = curReset; btnResetBubble.localScale = curScale; }
             if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = curToolbox; btnToolboxBubble.localScale = curScale; }
+            if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = curUndo; btnUndoBubble.localScale = curScale; }
+            if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = curRedo; btnRedoBubble.localScale = curScale; }
+            if (btnWireModeBubble != null) { btnWireModeBubble.anchoredPosition = curWire; btnWireModeBubble.localScale = curScale; }
+            if (btnResetBubble != null) { btnResetBubble.anchoredPosition = curReset; btnResetBubble.localScale = curScale; }
 
             yield return null;
         }
 
         if (btnScanBubble != null) { btnScanBubble.anchoredPosition = endScan; btnScanBubble.localScale = endScale; }
-        if (btnResetBubble != null) { btnResetBubble.anchoredPosition = endReset; btnResetBubble.localScale = endScale; }
         if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = endToolbox; btnToolboxBubble.localScale = endScale; }
+        if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = endUndo; btnUndoBubble.localScale = endScale; }
+        if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = endRedo; btnRedoBubble.localScale = endScale; }
+        if (btnWireModeBubble != null) { btnWireModeBubble.anchoredPosition = endWire; btnWireModeBubble.localScale = endScale; }
+        if (btnResetBubble != null) { btnResetBubble.anchoredPosition = endReset; btnResetBubble.localScale = endScale; }
 
         if (!expanding)
         {
             if (btnScanBubble != null) btnScanBubble.gameObject.SetActive(false);
-            if (btnResetBubble != null) btnResetBubble.gameObject.SetActive(false);
             if (btnToolboxBubble != null) btnToolboxBubble.gameObject.SetActive(false);
+            if (btnUndoBubble != null) btnUndoBubble.gameObject.SetActive(false);
+            if (btnRedoBubble != null) btnRedoBubble.gameObject.SetActive(false);
+            if (btnWireModeBubble != null) btnWireModeBubble.gameObject.SetActive(false);
+            if (btnResetBubble != null) btnResetBubble.gameObject.SetActive(false);
         }
     }
 
@@ -336,15 +432,21 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (expanded)
         {
             if (btnScanBubble != null) { btnScanBubble.gameObject.SetActive(true); btnScanBubble.anchoredPosition = posScanTarget; btnScanBubble.localScale = Vector3.one; }
-            if (btnResetBubble != null) { btnResetBubble.gameObject.SetActive(true); btnResetBubble.anchoredPosition = posResetTarget; btnResetBubble.localScale = Vector3.one; }
             if (btnToolboxBubble != null) { btnToolboxBubble.gameObject.SetActive(true); btnToolboxBubble.anchoredPosition = posToolboxTarget; btnToolboxBubble.localScale = Vector3.one; }
+            if (btnUndoBubble != null) { btnUndoBubble.gameObject.SetActive(true); btnUndoBubble.anchoredPosition = posUndoTarget; btnUndoBubble.localScale = Vector3.one; }
+            if (btnRedoBubble != null) { btnRedoBubble.gameObject.SetActive(true); btnRedoBubble.anchoredPosition = posRedoTarget; btnRedoBubble.localScale = Vector3.one; }
+            if (btnWireModeBubble != null) { btnWireModeBubble.gameObject.SetActive(true); btnWireModeBubble.anchoredPosition = posWireModeTarget; btnWireModeBubble.localScale = Vector3.one; }
+            if (btnResetBubble != null) { btnResetBubble.gameObject.SetActive(true); btnResetBubble.anchoredPosition = posResetTarget; btnResetBubble.localScale = Vector3.one; }
             if (mainBubbleLabelText != null) mainBubbleLabelText.text = "THU GỌN";
         }
         else
         {
             if (btnScanBubble != null) { btnScanBubble.anchoredPosition = posMainBubble; btnScanBubble.localScale = Vector3.zero; btnScanBubble.gameObject.SetActive(false); }
-            if (btnResetBubble != null) { btnResetBubble.anchoredPosition = posMainBubble; btnResetBubble.localScale = Vector3.zero; btnResetBubble.gameObject.SetActive(false); }
             if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = posMainBubble; btnToolboxBubble.localScale = Vector3.zero; btnToolboxBubble.gameObject.SetActive(false); }
+            if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = posMainBubble; btnUndoBubble.localScale = Vector3.zero; btnUndoBubble.gameObject.SetActive(false); }
+            if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = posMainBubble; btnRedoBubble.localScale = Vector3.zero; btnRedoBubble.gameObject.SetActive(false); }
+            if (btnWireModeBubble != null) { btnWireModeBubble.anchoredPosition = posMainBubble; btnWireModeBubble.localScale = Vector3.zero; btnWireModeBubble.gameObject.SetActive(false); }
+            if (btnResetBubble != null) { btnResetBubble.anchoredPosition = posMainBubble; btnResetBubble.localScale = Vector3.zero; btnResetBubble.gameObject.SetActive(false); }
             if (mainBubbleLabelText != null) mainBubbleLabelText.text = "MENU AR";
         }
 
@@ -370,6 +472,10 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         else
         {
             drawerAnimCoroutine = StartCoroutine(AnimateScale(toolboxDrawer, Vector3.zero, 0.15f, () => toolboxDrawer.gameObject.SetActive(false)));
+            if (tapToPlaceController != null)
+            {
+                tapToPlaceController.CancelPlacement();
+            }
         }
     }
 
@@ -396,7 +502,11 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Thực hiện QUÉT LẠI toàn bộ...");
 
         if (wireConnectionController != null) wireConnectionController.ClearAllWires();
-        if (tapToPlaceController != null) tapToPlaceController.ClearPreview();
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.ClearPreview();
+            tapToPlaceController.History.Clear();
+        }
 
         DestroyAllPlacedComponents();
         DestroyCalibratedBoard();
@@ -426,7 +536,11 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Debug.Log("<color=orange>[ARFloatingBubbleMenu]</color> Thực hiện RESET MẠCH ĐIỆN...");
 
         if (wireConnectionController != null) wireConnectionController.ClearAllWires();
-        if (tapToPlaceController != null) tapToPlaceController.ClearPreview();
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.ClearPreview();
+            tapToPlaceController.History.Clear();
+        }
 
         DestroyAllPlacedComponents();
 
@@ -440,6 +554,20 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     public void OnSelectComponent(string componentName)
     {
+        // Nếu đang preview đúng loại linh kiện này thì bấm lại sẽ HỦY CHỌN (Toggle-off)
+        if (tapToPlaceController != null && tapToPlaceController.CurrentPrefabToPlace != null)
+        {
+            string curName = tapToPlaceController.CurrentPrefabToPlace.name.ToLower();
+            string reqName = componentName.ToLower().Replace(" ", "");
+            if (curName.Contains(reqName) || (reqName.Contains("congtac") && curName.Contains("key")) || (reqName.Contains("den") && curName.Contains("light")))
+            {
+                Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Hủy chọn linh kiện (Toggle Off): " + componentName);
+                tapToPlaceController.CancelPlacement();
+                if (menuHUDController != null) menuHUDController.ClearSelection();
+                return;
+            }
+        }
+
         Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã chọn linh kiện: " + componentName);
 
         if (tapToPlaceController != null)
@@ -841,8 +969,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (mainChatBubble != null) buttonInteractor.RegisterButton(mainChatBubble);
         if (btnScanBubble != null) buttonInteractor.RegisterButton(btnScanBubble);
-        if (btnResetBubble != null) buttonInteractor.RegisterButton(btnResetBubble);
         if (btnToolboxBubble != null) buttonInteractor.RegisterButton(btnToolboxBubble);
+        if (btnUndoBubble != null) buttonInteractor.RegisterButton(btnUndoBubble);
+        if (btnRedoBubble != null) buttonInteractor.RegisterButton(btnRedoBubble);
+        if (btnWireModeBubble != null) buttonInteractor.RegisterButton(btnWireModeBubble);
+        if (btnResetBubble != null) buttonInteractor.RegisterButton(btnResetBubble);
+        if (wireModeFloatingBadge != null) buttonInteractor.RegisterButton(wireModeFloatingBadge);
 
         if (componentButtons != null)
         {
@@ -854,6 +986,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (btnConfirmCancel != null) buttonInteractor.RegisterButton(btnConfirmCancel);
         if (btnConfirmAction != null) buttonInteractor.RegisterButton(btnConfirmAction);
+        if (btnDeleteComp != null) buttonInteractor.RegisterButton(btnDeleteComp);
+        if (btnDeselectComp != null) buttonInteractor.RegisterButton(btnDeselectComp);
     }
 
     private IEnumerator AnimateScale(RectTransform target, Vector3 targetScale, float duration, System.Action onComplete = null)
@@ -899,18 +1033,25 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         rootRT.offsetMax = Vector2.zero;
 
         // Tính toán tọa độ công thái học vùng giữa phía dưới
-        posMainBubble = new Vector2(0, menuBottomOffset);
-        posScanTarget = new Vector2(-270, menuBottomOffset + 200f);
-        posResetTarget = new Vector2(0, menuBottomOffset + 245f);
-        posToolboxTarget = new Vector2(270, menuBottomOffset + 200f);
+        // Tính toán tọa độ công thái học cánh quạt 6 bong bóng đối xứng với MENU ở trung tâm (Requirement 7)
+        posMainBubble = new Vector2(0f, menuBottomOffset);
+        posScanTarget = new Vector2(-410f, menuBottomOffset + 90f);
+        posToolboxTarget = new Vector2(-260f, menuBottomOffset + 200f);
+        posUndoTarget = new Vector2(-92f, menuBottomOffset + 270f);
+        posRedoTarget = new Vector2(92f, menuBottomOffset + 270f);
+        posWireModeTarget = new Vector2(260f, menuBottomOffset + 200f);
+        posResetTarget = new Vector2(410f, menuBottomOffset + 90f);
 
-        // Nạp các Sprite chất lượng cao trực tiếp từ UIIconAssets (nhúng Base64, 100% hoạt động trên Android)
+        // Nạp các Sprite chất lượng cao từ UIIconAssets
         Sprite scanSprite = UIIconAssets.GetScanSprite();
-        Sprite resetSprite = UIIconAssets.GetResetSprite();
         Sprite toolboxSprite = UIIconAssets.GetToolboxSprite();
+        Sprite undoSprite = UIIconAssets.GetUndoSprite();
+        Sprite redoSprite = UIIconAssets.GetRedoSprite();
+        Sprite wireSprite = UIIconAssets.GetWireModeSprite();
+        Sprite resetSprite = UIIconAssets.GetResetSprite();
         Sprite mainBubbleSprite = UIIconAssets.GetMainBubbleSprite();
 
-        // 1. Ô TRÒN 1: QUÉT LẠI MẶT PHẲNG (Bên trái) - CƠ CHẾ GIỮ 1.25s ĐỂ KÍCH HOẠT AN TOÀN
+        // 1. Ô TRÒN 1: QUÉT LẠI MẶT PHẲNG (Cánh trái ngoài cùng) - Giữ 1.25s để kích hoạt
         GameObject scanObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Scan",
@@ -926,23 +1067,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         );
         btnScanBubble = scanObj.GetComponent<RectTransform>();
 
-        // 2. Ô TRÒN 2: RESET MẠCH ĐIỆN (Ở giữa trên) - CƠ CHẾ GIỮ 1.25s ĐỂ KÍCH HOẠT AN TOÀN
-        GameObject resetObj = CreateCircularIconButton(
-            parent: rootRT,
-            name: "Btn_Bubble_Reset",
-            iconSprite: resetSprite,
-            ringColor: new Color(1f, 0.65f, 0.1f, 0.95f), // Viền cam phát sáng
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
-            anchoredPos: posResetTarget,
-            labelText: "RESET MẠCH",
-            onClick: null,
-            holdToActivate: true,
-            holdingLabelText: "GIỮ ĐỂ RESET",
-            onHoldComplete: ExecuteResetCircuit
-        );
-        btnResetBubble = resetObj.GetComponent<RectTransform>();
-
-        // 3. Ô TRÒN 3: KHO DỤNG CỤ (Bên phải) - Chạm / Pinch 1 lần ăn ngay
+        // 2. Ô TRÒN 2: KHO DỤNG CỤ (Cánh trái giữa) - Chạm / Pinch mở khay
         GameObject toolObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Toolbox",
@@ -955,7 +1080,62 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         );
         btnToolboxBubble = toolObj.GetComponent<RectTransform>();
 
-        // 4. BONG BÓNG CHAT CHÍNH (MAIN CHAT BUBBLE - NÚT BẤM ĐỂ XÒE RA / THỤT VÀO)
+        // 3. Ô TRÒN 3: HOÀN TÁC THAO TÁC (Gần trung tâm bên trái) (Requirement 1 & 2)
+        GameObject undoObj = CreateCircularIconButton(
+            parent: rootRT,
+            name: "Btn_Bubble_Undo",
+            iconSprite: undoSprite,
+            ringColor: new Color(0.95f, 0.55f, 0.15f, 0.95f), // Viền cam hổ phách
+            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            anchoredPos: posUndoTarget,
+            labelText: "HOÀN TÁC",
+            onClick: OnClickUndo
+        );
+        btnUndoBubble = undoObj.GetComponent<RectTransform>();
+
+        // 4. Ô TRÒN 4: LÀM LẠI THAO TÁC (Gần trung tâm bên phải - Cạnh nút Hoàn tác) (Requirement 3: Redo)
+        GameObject redoObj = CreateCircularIconButton(
+            parent: rootRT,
+            name: "Btn_Bubble_Redo",
+            iconSprite: redoSprite,
+            ringColor: new Color(0.95f, 0.72f, 0.15f, 0.95f), // Viền vàng hổ phách
+            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            anchoredPos: posRedoTarget,
+            labelText: "LÀM LẠI",
+            onClick: OnClickRedo
+        );
+        btnRedoBubble = redoObj.GetComponent<RectTransform>();
+
+        // 5. Ô TRÒN 5: CHẾ ĐỘ NỐI DÂY (Cánh phải giữa) (Requirement 4: Wire Mode)
+        GameObject wireObj = CreateCircularIconButton(
+            parent: rootRT,
+            name: "Btn_Bubble_WireMode",
+            iconSprite: wireSprite,
+            ringColor: new Color(0f, 0.85f, 1f, 0.95f),
+            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            anchoredPos: posWireModeTarget,
+            labelText: "NỐI DÂY",
+            onClick: OnClickWireModeToggle
+        );
+        btnWireModeBubble = wireObj.GetComponent<RectTransform>();
+
+        // 6. Ô TRÒN 6: RESET MẠCH ĐIỆN (Cánh phải ngoài cùng) - Giữ 1.25s để kích hoạt
+        GameObject resetObj = CreateCircularIconButton(
+            parent: rootRT,
+            name: "Btn_Bubble_Reset",
+            iconSprite: resetSprite,
+            ringColor: new Color(1f, 0.35f, 0.2f, 0.95f), // Viền đỏ cam phát sáng
+            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            anchoredPos: posResetTarget,
+            labelText: "RESET MẠCH",
+            onClick: null,
+            holdToActivate: true,
+            holdingLabelText: "GIỮ ĐỂ RESET",
+            onHoldComplete: ExecuteResetCircuit
+        );
+        btnResetBubble = resetObj.GetComponent<RectTransform>();
+
+        // 6. BONG BÓNG CHAT CHÍNH (MAIN CHAT BUBBLE - NÚT BẤM ĐỂ XÒE RA / THỤT VÀO)
         GameObject mainObj = CreateMainChatBubble(
             parent: rootRT,
             name: "Btn_Main_ChatBubble",
@@ -967,7 +1147,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         );
         mainChatBubble = mainObj.GetComponent<RectTransform>();
 
-        // 5. KHAY DỤNG CỤ LINH KIỆN (Bung lên phía trên khi bấm Ô Kho dụng cụ)
+        // 7. KHAY DỤNG CỤ LINH KIỆN (Bung lên phía trên khi bấm Ô Kho dụng cụ)
         GameObject drawerObj = new GameObject("Toolbox_Drawer", typeof(RectTransform), typeof(Image));
         drawerObj.transform.SetParent(rootRT, false);
         toolboxDrawer = drawerObj.GetComponent<RectTransform>();
@@ -975,7 +1155,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         toolboxDrawer.anchorMax = new Vector2(0.5f, 0f);
         toolboxDrawer.pivot = new Vector2(0.5f, 0f);
         toolboxDrawer.anchoredPosition = new Vector2(0, menuBottomOffset + 380f);
-        toolboxDrawer.sizeDelta = new Vector2(900, 280);
+        toolboxDrawer.sizeDelta = new Vector2(920, 280);
 
         Image drawerImg = drawerObj.GetComponent<Image>();
         drawerImg.sprite = roundedRectSprite;
@@ -986,7 +1166,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         drawerOutline.effectColor = new Color(0.1f, 0.9f, 0.7f, 0.8f);
         drawerOutline.effectDistance = new Vector2(3f, -3f);
 
-        // Lưới 3x2 các linh kiện - Dùng tiếng Việt chuẩn, không dùng emoji tránh lỗi ô vuông
+        // Lưới linh kiện - Dùng tiếng Việt chuẩn
         string[] compNames = new string[] { "Pin", "Den", "Cong Tac", "Ampe Ke", "Von Ke" };
         string[] compLabels = new string[] { "PIN", "ĐÈN", "KHÓA K", "AMPE KẾ", "VÔN KẾ" };
         Color[] compColors = new Color[]
@@ -999,11 +1179,11 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         };
 
         List<RectTransform> compBtnList = new List<RectTransform>();
-        float[] colX = new float[] { -285f, 0f, 285f };
+        float[] row1X = new float[] { -285f, 0f, 285f };
         float row1Y = 60f;
         float row2Y = -60f;
 
-        // Hàng 1
+        // Hàng 1 (3 linh kiện cơ bản)
         for (int i = 0; i < 3; i++)
         {
             string comp = compNames[i];
@@ -1012,36 +1192,48 @@ public class ARFloatingBubbleMenu : MonoBehaviour
                 name: "Btn_Comp_" + comp,
                 bgColor: compColors[i],
                 size: new Vector2(270, 115),
-                anchoredPos: new Vector2(colX[i], row1Y),
+                anchoredPos: new Vector2(row1X[i], row1Y),
                 label: compLabels[i],
                 onClick: () => OnSelectComponent(comp)
             );
             compBtnList.Add(itemObj.GetComponent<RectTransform>());
         }
 
-        // Hàng 2
-        for (int i = 3; i < 5; i++)
-        {
-            string comp = compNames[i];
-            GameObject itemObj = CreateComponentButton(
-                parent: toolboxDrawer,
-                name: "Btn_Comp_" + comp,
-                bgColor: compColors[i],
-                size: new Vector2(270, 115),
-                anchoredPos: new Vector2(colX[i - 3], row2Y),
-                label: compLabels[i],
-                onClick: () => OnSelectComponent(comp)
-            );
-            compBtnList.Add(itemObj.GetComponent<RectTransform>());
-        }
+        // Hàng 2: [AMPE KẾ] [VÔN KẾ] [ĐÓNG] - Đã xóa nút Hoàn Tác thừa trong khay (Requirement 1)
+        float[] row2X = new float[] { -285f, 0f, 285f };
+        Vector2 row2Size = new Vector2(270, 115);
+
+        // Ampe kế
+        GameObject ampeObj = CreateComponentButton(
+            parent: toolboxDrawer,
+            name: "Btn_Comp_" + compNames[3],
+            bgColor: compColors[3],
+            size: row2Size,
+            anchoredPos: new Vector2(row2X[0], row2Y),
+            label: compLabels[3],
+            onClick: () => OnSelectComponent(compNames[3])
+        );
+        compBtnList.Add(ampeObj.GetComponent<RectTransform>());
+
+        // Vôn kế
+        GameObject voltObj = CreateComponentButton(
+            parent: toolboxDrawer,
+            name: "Btn_Comp_" + compNames[4],
+            bgColor: compColors[4],
+            size: row2Size,
+            anchoredPos: new Vector2(row2X[1], row2Y),
+            label: compLabels[4],
+            onClick: () => OnSelectComponent(compNames[4])
+        );
+        compBtnList.Add(voltObj.GetComponent<RectTransform>());
 
         // Nút Đóng khay dụng cụ
         GameObject closeDrawerObj = CreateComponentButton(
             parent: toolboxDrawer,
             name: "Btn_Close_Drawer",
             bgColor: new Color(0.40f, 0.20f, 0.25f, 0.96f),
-            size: new Vector2(270, 115),
-            anchoredPos: new Vector2(colX[2], row2Y),
+            size: row2Size,
+            anchoredPos: new Vector2(row2X[2], row2Y),
             label: "ĐÓNG",
             onClick: ToggleToolboxDrawer
         );
@@ -1049,10 +1241,21 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         componentButtons = compBtnList.ToArray();
 
+        // 8. Huy hiệu nổi Wire Mode hiển thị trên đầu màn hình (Requirement 3)
+        BuildWireModeFloatingBadge(rootRT);
+
+        // 9. Huy hiệu thông tin cho linh kiện đang được chọn
+        BuildSelectedComponentBadge(rootRT);
+
+        // 10. Khu vực Thùng Rác (Drag-to-Trash Zone) khi kéo linh kiện
+        BuildTrashZoneUI(rootRT);
+
         // Khởi tạo hộp thoại xác nhận an toàn cho Reset và Quét mặt phẳng
         BuildConfirmationDialog(rootRT);
 
         RegisterAllButtonsToInteractor();
+        UpdateWireModeUI(wireConnectionController != null && wireConnectionController.IsWireMode);
+        Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã khởi tạo hoàn tất Menu Bong Bóng Chat với 5 ô tròn!");
         Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã khởi tạo hoàn tất Menu Bong Bóng Chat với 3 ô tròn icon!");
     }
 
@@ -1184,6 +1387,13 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             labelTmp.raycastTarget = false;
         }
 
+        if (name == "Btn_Bubble_WireMode")
+        {
+            wireModeBubbleImg = img;
+            wireModeRingOutline = outline;
+            wireModeLabelTMP = labelTmp;
+        }
+
         if (holdToActivate)
         {
             HoldToActivateButton holdComp = btnObj.AddComponent<HoldToActivateButton>();
@@ -1198,6 +1408,391 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         return btnObj;
     }
+
+    /// <summary>
+    /// Xử lý bấm nút Hoàn tác linh kiện vừa đặt (Requirement 1)
+    /// </summary>
+    public void OnClickUndo()
+    {
+        if (tapToPlaceController == null) AutoFindReferences();
+        if (tapToPlaceController != null)
+        {
+            bool success = tapToPlaceController.UndoLastPlacedComponent();
+            if (success)
+            {
+                Debug.Log("<color=cyan>[ARFloatingBubbleMenu]</color> Đã hoàn tác (Undo) thao tác thành công!");
+            }
+            else
+            {
+                Debug.LogWarning("<color=orange>[ARFloatingBubbleMenu]</color> Không có thao tác nào trong lịch sử để hoàn tác.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Xử lý bấm nút Làm lại thao tác vừa hoàn tác (Requirement 3: Redo)
+    /// </summary>
+    public void OnClickRedo()
+    {
+        if (tapToPlaceController == null) AutoFindReferences();
+        if (tapToPlaceController != null)
+        {
+            bool success = tapToPlaceController.RedoLastAction();
+            if (success)
+            {
+                Debug.Log("<color=cyan>[ARFloatingBubbleMenu]</color> Đã làm lại (Redo) thao tác thành công!");
+            }
+            else
+            {
+                Debug.LogWarning("<color=orange>[ARFloatingBubbleMenu]</color> Không có thao tác nào trong lịch sử để làm lại.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Bật/tắt chế độ nối dây (Requirement 3: Wire Mode)
+    /// </summary>
+    public void OnClickWireModeToggle()
+    {
+        if (wireConnectionController == null) AutoFindReferences();
+        if (wireConnectionController != null)
+        {
+            wireConnectionController.ToggleWireMode();
+        }
+    }
+
+    private void OnWireModeStateChanged(bool isWire)
+    {
+        UpdateWireModeUI(isWire);
+        if (isWire && tapToPlaceController != null)
+        {
+            tapToPlaceController.CancelPlacement();
+        }
+        if (tapToPlaceController != null)
+        {
+            UpdateSelectedComponentUI(tapToPlaceController.SelectedComponent);
+        }
+    }
+
+    /// <summary>
+    /// Đồng bộ hiển thị giao diện khi Chế độ Nối Dây bật/tắt (Requirement 3)
+    /// </summary>
+    public void UpdateWireModeUI(bool isWire)
+    {
+        if (wireModeLabelTMP != null)
+        {
+            wireModeLabelTMP.text = isWire ? "ĐANG NỐI DÂY" : "NỐI DÂY";
+            wireModeLabelTMP.color = isWire ? new Color(1f, 0.95f, 0.25f, 1f) : Color.white;
+        }
+
+        if (wireModeRingOutline != null)
+        {
+            wireModeRingOutline.effectColor = isWire
+                ? new Color(1f, 0.8f, 0.1f, 1f) // Vàng cam phát sáng rực rỡ khi Active
+                : new Color(0f, 0.85f, 1f, 0.95f);
+        }
+
+        if (wireModeBubbleImg != null)
+        {
+            wireModeBubbleImg.color = isWire
+                ? new Color(0.20f, 0.15f, 0.05f, 0.98f)
+                : new Color(0.08f, 0.12f, 0.20f, 0.96f);
+        }
+
+        if (wireModeFloatingBadge != null)
+        {
+            wireModeFloatingBadge.gameObject.SetActive(isWire);
+        }
+    }
+
+    /// <summary>
+    /// Dựng thanh hiển thị trạng thái nổi trên đầu màn hình khi Chế độ Nối Dây đang hoạt động
+    /// </summary>
+    private void BuildWireModeFloatingBadge(Transform parent)
+    {
+        GameObject badgeObj = new GameObject("WireMode_FloatingBadge", typeof(RectTransform), typeof(Image), typeof(Button));
+        badgeObj.transform.SetParent(parent, false);
+        wireModeFloatingBadge = badgeObj.GetComponent<RectTransform>();
+        wireModeFloatingBadge.anchorMin = new Vector2(0.5f, 1f);
+        wireModeFloatingBadge.anchorMax = new Vector2(0.5f, 1f);
+        wireModeFloatingBadge.pivot = new Vector2(0.5f, 1f);
+        wireModeFloatingBadge.sizeDelta = new Vector2(620, 70);
+        wireModeFloatingBadge.anchoredPosition = new Vector2(0, -50);
+
+        Image badgeImg = badgeObj.GetComponent<Image>();
+        badgeImg.sprite = roundedRectSprite;
+        badgeImg.type = Image.Type.Sliced;
+        badgeImg.color = new Color(0.16f, 0.12f, 0.03f, 0.95f);
+
+        Button badgeBtn = badgeObj.GetComponent<Button>();
+        badgeBtn.targetGraphic = badgeImg;
+        badgeBtn.onClick.AddListener(OnClickWireModeToggle);
+
+        Outline outline = badgeObj.AddComponent<Outline>();
+        outline.effectColor = new Color(1f, 0.8f, 0.15f, 0.95f);
+        outline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        GameObject txtObj = new GameObject("Text", typeof(RectTransform));
+        txtObj.transform.SetParent(badgeObj.transform, false);
+        RectTransform txtRT = txtObj.GetComponent<RectTransform>();
+        txtRT.anchorMin = Vector2.zero;
+        txtRT.anchorMax = Vector2.one;
+        txtRT.offsetMin = Vector2.zero;
+        txtRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI tmp = txtObj.AddComponent<TextMeshProUGUI>();
+        tmp.font = GetSafeFont();
+        tmp.text = "ĐANG NỐI DÂY (BẤM ĐỂ THOÁT)";
+        tmp.fontSize = 22;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.color = new Color(1f, 0.95f, 0.3f, 1f);
+        tmp.raycastTarget = false;
+
+        wireModeFloatingBadge.gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Dựng thanh hiển thị linh kiện đang chọn và nút Xóa / Bỏ chọn
+    /// </summary>
+    private void BuildSelectedComponentBadge(Transform parent)
+    {
+        GameObject badgeObj = new GameObject("SelectedComp_FloatingBadge", typeof(RectTransform), typeof(Image));
+        badgeObj.transform.SetParent(parent, false);
+        selectedComponentBadge = badgeObj.GetComponent<RectTransform>();
+        selectedComponentBadge.anchorMin = new Vector2(0.5f, 1f);
+        selectedComponentBadge.anchorMax = new Vector2(0.5f, 1f);
+        selectedComponentBadge.pivot = new Vector2(0.5f, 1f);
+        selectedComponentBadge.sizeDelta = new Vector2(720, 70);
+        selectedComponentBadge.anchoredPosition = new Vector2(0, -50);
+
+        Image badgeImg = badgeObj.GetComponent<Image>();
+        badgeImg.sprite = roundedRectSprite;
+        badgeImg.type = Image.Type.Sliced;
+        badgeImg.color = new Color(0.06f, 0.10f, 0.18f, 0.96f);
+
+        Outline outline = badgeObj.AddComponent<Outline>();
+        outline.effectColor = new Color(0f, 0.85f, 1f, 0.95f);
+        outline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        // Text nhãn: ĐANG CHỌN: [TÊN]
+        GameObject txtObj = new GameObject("Label_SelectedComp", typeof(RectTransform));
+        txtObj.transform.SetParent(badgeObj.transform, false);
+        RectTransform txtRT = txtObj.GetComponent<RectTransform>();
+        txtRT.anchorMin = new Vector2(0f, 0f);
+        txtRT.anchorMax = new Vector2(0.55f, 1f);
+        txtRT.offsetMin = new Vector2(25, 0);
+        txtRT.offsetMax = new Vector2(0, 0);
+
+        selectedCompLabelTMP = txtObj.AddComponent<TextMeshProUGUI>();
+        selectedCompLabelTMP.font = GetSafeFont();
+        selectedCompLabelTMP.text = "ĐANG CHỌN: LINH KIỆN";
+        selectedCompLabelTMP.fontSize = 20;
+        selectedCompLabelTMP.fontStyle = FontStyles.Bold;
+        selectedCompLabelTMP.alignment = TextAlignmentOptions.MidlineLeft;
+        selectedCompLabelTMP.color = Color.white;
+        selectedCompLabelTMP.raycastTarget = false;
+
+        // Nút BỎ CHỌN
+        GameObject deselectObj = new GameObject("Btn_Deselect_Comp", typeof(RectTransform), typeof(Image), typeof(Button));
+        deselectObj.transform.SetParent(badgeObj.transform, false);
+        btnDeselectComp = deselectObj.GetComponent<RectTransform>();
+        btnDeselectComp.anchorMin = new Vector2(0.55f, 0.5f);
+        btnDeselectComp.anchorMax = new Vector2(0.55f, 0.5f);
+        btnDeselectComp.pivot = new Vector2(0f, 0.5f);
+        btnDeselectComp.sizeDelta = new Vector2(130, 48);
+        btnDeselectComp.anchoredPosition = new Vector2(10, 0);
+
+        Image deselectImg = deselectObj.GetComponent<Image>();
+        deselectImg.sprite = roundedRectSprite;
+        deselectImg.type = Image.Type.Sliced;
+        deselectImg.color = new Color(0.25f, 0.30f, 0.40f, 0.95f);
+
+        Button deselectBtn = deselectObj.GetComponent<Button>();
+        deselectBtn.targetGraphic = deselectImg;
+        deselectBtn.onClick.AddListener(() =>
+        {
+            if (tapToPlaceController != null) tapToPlaceController.ClearSelectedComponent();
+        });
+
+        GameObject deselectTxtObj = new GameObject("Text", typeof(RectTransform));
+        deselectTxtObj.transform.SetParent(deselectObj.transform, false);
+        RectTransform deselectTxtRT = deselectTxtObj.GetComponent<RectTransform>();
+        deselectTxtRT.anchorMin = Vector2.zero;
+        deselectTxtRT.anchorMax = Vector2.one;
+        deselectTxtRT.offsetMin = Vector2.zero;
+        deselectTxtRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI deselectTMP = deselectTxtObj.AddComponent<TextMeshProUGUI>();
+        deselectTMP.font = GetSafeFont();
+        deselectTMP.text = "BỎ CHỌN";
+        deselectTMP.fontSize = 18;
+        deselectTMP.fontStyle = FontStyles.Bold;
+        deselectTMP.alignment = TextAlignmentOptions.Center;
+        deselectTMP.color = Color.white;
+        deselectTMP.raycastTarget = false;
+
+        // Nút XÓA
+        GameObject deleteObj = new GameObject("Btn_Delete_Comp", typeof(RectTransform), typeof(Image), typeof(Button));
+        deleteObj.transform.SetParent(badgeObj.transform, false);
+        btnDeleteComp = deleteObj.GetComponent<RectTransform>();
+        btnDeleteComp.anchorMin = new Vector2(0.55f, 0.5f);
+        btnDeleteComp.anchorMax = new Vector2(0.55f, 0.5f);
+        btnDeleteComp.pivot = new Vector2(0f, 0.5f);
+        btnDeleteComp.sizeDelta = new Vector2(150, 48);
+        btnDeleteComp.anchoredPosition = new Vector2(155, 0);
+
+        Image deleteImg = deleteObj.GetComponent<Image>();
+        deleteImg.sprite = roundedRectSprite;
+        deleteImg.type = Image.Type.Sliced;
+        deleteImg.color = new Color(0.85f, 0.20f, 0.20f, 0.98f);
+
+        Outline deleteOutline = deleteObj.AddComponent<Outline>();
+        deleteOutline.effectColor = new Color(1f, 0.4f, 0.3f, 0.95f);
+        deleteOutline.effectDistance = new Vector2(2f, -2f);
+
+        Button deleteBtn = deleteObj.GetComponent<Button>();
+        deleteBtn.targetGraphic = deleteImg;
+        deleteBtn.onClick.AddListener(() =>
+        {
+            if (tapToPlaceController != null) tapToPlaceController.DeleteSelectedComponent();
+        });
+
+        GameObject deleteTxtObj = new GameObject("Text", typeof(RectTransform));
+        deleteTxtObj.transform.SetParent(deleteObj.transform, false);
+        RectTransform deleteTxtRT = deleteTxtObj.GetComponent<RectTransform>();
+        deleteTxtRT.anchorMin = Vector2.zero;
+        deleteTxtRT.anchorMax = Vector2.one;
+        deleteTxtRT.offsetMin = Vector2.zero;
+        deleteTxtRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI deleteTMP = deleteTxtObj.AddComponent<TextMeshProUGUI>();
+        deleteTMP.font = GetSafeFont();
+        deleteTMP.text = "XÓA";
+        deleteTMP.fontSize = 18;
+        deleteTMP.fontStyle = FontStyles.Bold;
+        deleteTMP.alignment = TextAlignmentOptions.Center;
+        deleteTMP.color = Color.white;
+        deleteTMP.raycastTarget = false;
+
+        selectedComponentBadge.gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Dựng khu vực Thùng Rác (Drag-to-Trash Zone) hiển thị ở đầu màn hình khi người dùng pinch-kéo linh kiện
+    /// </summary>
+    private void BuildTrashZoneUI(Transform parent)
+    {
+        GameObject trashObj = new GameObject("DragToTrash_Zone", typeof(RectTransform), typeof(Image));
+        trashObj.transform.SetParent(parent, false);
+        trashZoneRoot = trashObj.GetComponent<RectTransform>();
+        trashZoneRoot.anchorMin = new Vector2(0.5f, 1f);
+        trashZoneRoot.anchorMax = new Vector2(0.5f, 1f);
+        trashZoneRoot.pivot = new Vector2(0.5f, 1f);
+        trashZoneRoot.sizeDelta = new Vector2(460, 80);
+        trashZoneRoot.anchoredPosition = new Vector2(0, -35);
+
+        trashZoneBgImg = trashObj.GetComponent<Image>();
+        trashZoneBgImg.sprite = roundedRectSprite;
+        trashZoneBgImg.type = Image.Type.Sliced;
+        trashZoneBgImg.color = new Color(0.20f, 0.05f, 0.08f, 0.94f);
+        trashZoneBgImg.raycastTarget = false;
+
+        trashZoneOutline = trashObj.AddComponent<Outline>();
+        trashZoneOutline.effectColor = new Color(1f, 0.25f, 0.25f, 0.95f);
+        trashZoneOutline.effectDistance = new Vector2(3f, -3f);
+
+        GameObject txtObj = new GameObject("TrashLabel", typeof(RectTransform));
+        txtObj.transform.SetParent(trashObj.transform, false);
+        RectTransform txtRT = txtObj.GetComponent<RectTransform>();
+        txtRT.anchorMin = Vector2.zero;
+        txtRT.anchorMax = Vector2.one;
+        txtRT.offsetMin = Vector2.zero;
+        txtRT.offsetMax = Vector2.zero;
+
+        trashZoneTMP = txtObj.AddComponent<TextMeshProUGUI>();
+        trashZoneTMP.font = GetSafeFont();
+        trashZoneTMP.text = "🗑  KÉO VÀO ĐÂY ĐỂ XÓA";
+        trashZoneTMP.fontSize = 20;
+        trashZoneTMP.fontStyle = FontStyles.Bold;
+        trashZoneTMP.alignment = TextAlignmentOptions.Center;
+        trashZoneTMP.color = new Color(1f, 0.88f, 0.88f, 1f);
+        trashZoneTMP.raycastTarget = false;
+
+        trashZoneRoot.gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Bật/Tắt hiển thị Thùng Rác (Drag-to-Trash)
+    /// </summary>
+    public void SetTrashZoneVisible(bool visible)
+    {
+        if (trashZoneRoot != null)
+        {
+            trashZoneRoot.gameObject.SetActive(visible);
+            if (!visible) SetTrashZoneHovered(false);
+        }
+    }
+
+    /// <summary>
+    /// Thay đổi phản hồi thị giác khi con trỏ di chuyển vào/ra khỏi Thùng Rác
+    /// </summary>
+    public void SetTrashZoneHovered(bool hovered)
+    {
+        if (isTrashHovered == hovered) return;
+        isTrashHovered = hovered;
+
+        if (trashZoneRoot == null) return;
+
+        if (hovered)
+        {
+            trashZoneRoot.localScale = Vector3.one * 1.08f;
+            if (trashZoneBgImg != null) trashZoneBgImg.color = new Color(0.80f, 0.12f, 0.16f, 0.98f);
+            if (trashZoneOutline != null) trashZoneOutline.effectColor = new Color(1f, 0.85f, 0.2f, 1f);
+            if (trashZoneTMP != null)
+            {
+                trashZoneTMP.text = "⚠️  THẢ RA ĐỂ XÓA!";
+                trashZoneTMP.color = Color.white;
+            }
+        }
+        else
+        {
+            trashZoneRoot.localScale = Vector3.one;
+            if (trashZoneBgImg != null) trashZoneBgImg.color = new Color(0.20f, 0.05f, 0.08f, 0.94f);
+            if (trashZoneOutline != null) trashZoneOutline.effectColor = new Color(1f, 0.25f, 0.25f, 0.95f);
+            if (trashZoneTMP != null)
+            {
+                trashZoneTMP.text = "🗑  KÉO VÀO ĐÂY ĐỂ XÓA";
+                trashZoneTMP.color = new Color(1f, 0.88f, 0.88f, 1f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Kiểm tra xem vị trí màn hình (screenPos) có nằm trong vùng Thùng Rác không
+    /// </summary>
+    public bool IsPointerOverTrashZone(Vector2 screenPos)
+    {
+        if (trashZoneRoot == null || !trashZoneRoot.gameObject.activeInHierarchy) return false;
+        Camera cam = targetCanvas != null ? targetCanvas.worldCamera : null;
+        return RectTransformUtility.RectangleContainsScreenPoint(trashZoneRoot, screenPos, cam);
+    }
+
+    /// <summary>
+    /// Cập nhật hiển thị huy hiệu linh kiện được chọn (Đã thay bằng Drag-to-Trash)
+    /// </summary>
+    public void UpdateSelectedComponentUI(GameObject comp)
+    {
+        // Cơ chế xóa đã được thay thế hoàn toàn bằng Drag-to-Trash (Requirement 4)
+        if (selectedComponentBadge != null)
+        {
+            selectedComponentBadge.gameObject.SetActive(false);
+        }
+    }
+
+    public static Sprite GetUndoSprite() => UIIconAssets.GetUndoSprite();
+    public static Sprite GetRedoSprite() => UIIconAssets.GetRedoSprite();
+    public static Sprite GetWireModeSprite() => UIIconAssets.GetWireModeSprite();
 
     /// <summary>
     /// Tạo Bong bóng chat chính (Toggle Button)
@@ -1531,6 +2126,127 @@ public static class UIIconAssets
     {
         if (_toolboxSprite == null) _toolboxSprite = CreateSpriteFromBase64(ToolboxBase64);
         return _toolboxSprite;
+    }
+
+    private static Sprite _undoSprite;
+    private static Sprite _redoSprite;
+    private static Sprite _wireSprite;
+
+    public static Sprite GetUndoSprite()
+    {
+        if (_undoSprite != null) return _undoSprite;
+        int size = 96;
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        Color[] colors = new Color[size * size];
+        for (int i = 0; i < colors.Length; i++) colors[i] = Color.clear;
+
+        Vector2 center = new Vector2(48f, 44f);
+        float r = 24f;
+        float thick = 4.5f;
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                Vector2 pt = new Vector2(x, y);
+                float distToCenter = Vector2.Distance(pt, center);
+                float angle = Mathf.Atan2(y - center.y, x - center.x) * Mathf.Rad2Deg;
+                if (angle < -40f) angle += 360f;
+
+                if (distToCenter >= r - thick && distToCenter <= r + thick && angle >= 0f && angle <= 190f)
+                {
+                    float alpha = 1f - Mathf.Abs(distToCenter - r) / thick;
+                    colors[y * size + x] = new Color(1f, 1f, 1f, Mathf.Clamp01(alpha));
+                }
+
+                if (x >= 14 && x <= 26 && y >= 32 && y <= 56)
+                {
+                    float dy = Mathf.Abs(y - 44f);
+                    if ((26 - x) >= dy * 0.9f)
+                    {
+                        colors[y * size + x] = Color.white;
+                    }
+                }
+            }
+        }
+
+        tex.SetPixels(colors);
+        tex.Apply();
+        _undoSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+        return _undoSprite;
+    }
+
+    public static Sprite GetRedoSprite()
+    {
+        if (_redoSprite != null) return _redoSprite;
+        Sprite undo = GetUndoSprite();
+        Texture2D undoTex = undo.texture;
+        int size = undoTex.width;
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        Color[] origColors = undoTex.GetPixels();
+        Color[] redoColors = new Color[size * size];
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                redoColors[y * size + (size - 1 - x)] = origColors[y * size + x];
+            }
+        }
+
+        tex.SetPixels(redoColors);
+        tex.Apply();
+        _redoSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+        return _redoSprite;
+    }
+
+    public static Sprite GetWireModeSprite()
+    {
+        if (_wireSprite != null) return _wireSprite;
+        int size = 96;
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        Color[] colors = new Color[size * size];
+        for (int i = 0; i < colors.Length; i++) colors[i] = Color.clear;
+
+        Vector2 p1 = new Vector2(24f, 36f);
+        Vector2 p2 = new Vector2(72f, 60f);
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                Vector2 pt = new Vector2(x, y);
+                float d1 = Vector2.Distance(pt, p1);
+                float d2 = Vector2.Distance(pt, p2);
+
+                if (d1 <= 12f)
+                {
+                    if (d1 >= 5.5f) colors[y * size + x] = Color.white;
+                    else colors[y * size + x] = new Color(0.2f, 0.8f, 1f, 1f);
+                }
+                else if (d2 <= 12f)
+                {
+                    if (d2 >= 5.5f) colors[y * size + x] = Color.white;
+                    else colors[y * size + x] = new Color(1f, 0.8f, 0.2f, 1f);
+                }
+                else if (x >= 24 && x <= 72)
+                {
+                    float u = (x - 24f) / 48f;
+                    float targetY = Mathf.Lerp(p1.y, p2.y, u * u * (3f - 2f * u));
+                    float distWire = Mathf.Abs(y - targetY);
+                    if (distWire <= 3.5f)
+                    {
+                        float alpha = 1f - distWire / 3.5f;
+                        colors[y * size + x] = new Color(1f, 0.95f, 0.7f, Mathf.Clamp01(alpha));
+                    }
+                }
+            }
+        }
+
+        tex.SetPixels(colors);
+        tex.Apply();
+        _wireSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+        return _wireSprite;
     }
 
     public static Sprite GetMainBubbleSprite()

@@ -9,8 +9,11 @@ public class ButtonInteractor : MonoBehaviour
     [Header("KÉO OBJECT 'Screen' VÀO ĐÂY")]
     public RectTransform videoPanel;
 
-    [Header("Kéo Nút Vàng (Debug Point) vào đây")]
+    [Header("Kéo Nút Vàng (Debug Point - Ngón Trỏ) vào đây")]
     public RectTransform debugPoint;
+
+    [Header("Kéo Nút Ngón Cái (Thumb Point) vào đây (Tự động tạo nếu để trống)")]
+    public RectTransform thumbPoint;
 
     [Header("Tham chiếu Hệ thống")]
     public HandLandmarkerRunner handRunner;
@@ -21,12 +24,21 @@ public class ButtonInteractor : MonoBehaviour
     [Header("Danh sách Nút tương tác")]
     public List<RectTransform> interactiveButtons;
 
-    [Header("Cấu hình màu sắc")]
+    [Header("Cấu hình màu sắc con trỏ")]
     public Color hoverColor = new Color(0.7f, 0.9f, 1f);
     public Color pressColor = Color.green;
+    public Color indexNormalColor = new Color(1f, 0.88f, 0.1f, 0.95f); // Vàng tươi ngón trỏ
+    public Color thumbNormalColor = new Color(0.15f, 0.85f, 1f, 0.95f); // Cyan ngón cái
 
-    [Header("Cấu hình Pinch & Chống Spam")]
-    [Range(0.02f, 0.08f)] public float pinchThreshold = 0.042f;
+    [Header("Cấu hình Pinch Hysteresis, Ổn định & Chống Spam")]
+    [Tooltip("Ngưỡng khoảng cách bắt đầu chụm ngón tay (Pinch ON)")]
+    [Range(0.02f, 0.08f)] public float pinchThreshold = 0.040f; // pinchEnterThreshold
+    [Tooltip("Ngưỡng khoảng cách nhả ngón tay (Pinch OFF - Hysteresis chống rung mép)")]
+    [Range(0.03f, 0.10f)] public float pinchExitThreshold = 0.052f;
+    [Tooltip("Số frame liên tục phải thỏa điều kiện để xác nhận trạng thái (chống nhiễu 1 frame)")]
+    public int minStablePinchFrames = 2;
+    [Tooltip("Thời gian giãn cách tối thiểu giữa 2 lần kích hoạt Pinch (giây)")]
+    public float pinchDebounceTime = 0.25f;
     public float clickCooldown = 0.45f;
 
     [Header("Bảng Điều Khiển Trục Tọa Độ")]
@@ -34,9 +46,9 @@ public class ButtonInteractor : MonoBehaviour
     public bool latNguocTrucX = false;
     public bool latNguocTrucY = false;
 
-    // MỚI THÊM: để các script khác (ví dụ TapToPlaceController) đọc được toạ độ tay
-    // và trạng thái pinch, không phụ thuộc việc có đang hover nút menu hay không.
+    // Tọa độ màn hình ngón trỏ và ngón cái cho các hệ thống khác sử dụng
     public Vector2 CurrentScreenPos { get; private set; }
+    public Vector2 CurrentThumbScreenPos { get; private set; }
     public bool JustPinched { get; private set; }
 
     private Dictionary<RectTransform, Image> buttonImages = new Dictionary<RectTransform, Image>();
@@ -44,12 +56,21 @@ public class ButtonInteractor : MonoBehaviour
 
     private float targetX = 0f;
     private float targetY = 0f;
+    private float targetThumbX = 0f;
+    private float targetThumbY = 0f;
+    private float rawDistance = 1f;
     private bool isHandVisible = false;
     public bool isPinching = false;
-    private bool wasPinching = false;       // dùng riêng cho logic click nút menu (giữ nguyên như cũ)
-    private bool wasPinchingGlobal = false; // MỚI: dùng riêng cho JustPinched, không phụ thuộc hover nút nào
+    private bool wasPinching = false;       // dùng riêng cho logic click nút menu
+    private bool wasPinchingGlobal = false; // dùng riêng cho JustPinched
+    private int consecutivePinchFrames = 0;
+    private int consecutiveReleaseFrames = 0;
+    private float lastGlobalPinchTime = 0f;
     private float lastClickTime = 0f;
     private object _lock = new object();
+
+    private Image debugPointImage;
+    private Image thumbPointImage;
 
     void Start()
     {
@@ -60,6 +81,42 @@ public class ButtonInteractor : MonoBehaviour
             {
                 RegisterButton(btn);
             }
+        }
+
+        SetupFingerPointVisuals();
+    }
+
+    /// <summary>
+    /// Thiết lập kích thước và tự động tạo chấm ngón cái nếu chưa có
+    /// </summary>
+    private void SetupFingerPointVisuals()
+    {
+        if (debugPoint != null)
+        {
+            debugPoint.sizeDelta = new Vector2(28f, 28f);
+            debugPointImage = debugPoint.GetComponent<Image>();
+            if (debugPointImage != null) debugPointImage.color = indexNormalColor;
+        }
+
+        if (thumbPoint == null && videoPanel != null)
+        {
+            GameObject thumbObj = new GameObject("ThumbPoint_Auto", typeof(RectTransform), typeof(Image));
+            thumbObj.transform.SetParent(videoPanel, false);
+            thumbPoint = thumbObj.GetComponent<RectTransform>();
+            thumbPoint.sizeDelta = new Vector2(24f, 24f);
+
+            thumbPointImage = thumbObj.GetComponent<Image>();
+            if (debugPointImage != null && debugPointImage.sprite != null)
+            {
+                thumbPointImage.sprite = debugPointImage.sprite;
+            }
+            thumbPointImage.color = thumbNormalColor;
+        }
+        else if (thumbPoint != null)
+        {
+            thumbPoint.sizeDelta = new Vector2(24f, 24f);
+            thumbPointImage = thumbPoint.GetComponent<Image>();
+            if (thumbPointImage != null) thumbPointImage.color = thumbNormalColor;
         }
     }
 
@@ -101,15 +158,17 @@ public class ButtonInteractor : MonoBehaviour
 
     void Update()
     {
-        float x, y;
-        bool visible, pinch;
+        float x, y, tx, ty, dist;
+        bool visible;
 
         lock (_lock)
         {
             x = targetX;
             y = targetY;
+            tx = targetThumbX;
+            ty = targetThumbY;
+            dist = rawDistance;
             visible = isHandVisible;
-            pinch = isPinching;
         }
 
         if (!visible || videoPanel == null)
@@ -126,35 +185,87 @@ public class ButtonInteractor : MonoBehaviour
                 }
             }
             if (debugPoint != null) debugPoint.gameObject.SetActive(false);
+            if (thumbPoint != null) thumbPoint.gameObject.SetActive(false);
 
             JustPinched = false;
             wasPinchingGlobal = false;
+            consecutivePinchFrames = 0;
+            consecutiveReleaseFrames = 0;
+            isPinching = false;
             return;
         }
 
-        Vector2 screenPos = Vector2.zero;
+        // --- 1. HYSTERESIS VÀ TEMPORAL STABILITY CHO PINCH DETECTION ---
+        if (dist < pinchThreshold)
+        {
+            consecutivePinchFrames++;
+            consecutiveReleaseFrames = 0;
+        }
+        else if (dist > pinchExitThreshold)
+        {
+            consecutiveReleaseFrames++;
+            consecutivePinchFrames = 0;
+        }
 
+        if (!isPinching && consecutivePinchFrames >= minStablePinchFrames)
+        {
+            isPinching = true;
+        }
+        else if (isPinching && consecutiveReleaseFrames >= minStablePinchFrames)
+        {
+            isPinching = false;
+        }
+
+        // --- 2. CẬP NHẬT TỌA ĐỘ VÀ VISUAL CHO 2 ĐẦU NGÓN TAY (INDEX + THUMB) ---
+        Vector2 screenPos = Vector2.zero;
+        Vector2 thumbScreenPos = Vector2.zero;
+        Canvas videoCanvas = videoPanel.GetComponentInParent<Canvas>();
+        Camera uiCam = (videoCanvas != null && videoCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? videoCanvas.worldCamera : null;
+
+        // Cập nhật chấm ngón trỏ
         if (debugPoint != null)
         {
             debugPoint.gameObject.SetActive(true);
-
-            if (debugPoint.parent != videoPanel)
-            {
-                debugPoint.SetParent(videoPanel);
-            }
-
+            if (debugPoint.parent != videoPanel) debugPoint.SetParent(videoPanel);
             debugPoint.anchorMin = new Vector2(x, 1.0f - y);
             debugPoint.anchorMax = new Vector2(x, 1.0f - y);
             debugPoint.anchoredPosition = Vector2.zero;
 
-            Canvas videoCanvas = videoPanel.GetComponentInParent<Canvas>();
-            Camera uiCam = (videoCanvas != null && videoCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? videoCanvas.worldCamera : null;
+            // Visual feedback khi pinch: phóng to 1.3x và đổi màu rực rỡ
+            float indexScale = isPinching ? 1.32f : 1f;
+            debugPoint.localScale = Vector3.one * indexScale;
+            if (debugPointImage != null)
+            {
+                debugPointImage.color = isPinching ? pressColor : indexNormalColor;
+            }
+
             screenPos = RectTransformUtility.WorldToScreenPoint(uiCam, debugPoint.position);
         }
 
+        // Cập nhật chấm ngón cái
+        if (thumbPoint != null)
+        {
+            thumbPoint.gameObject.SetActive(true);
+            if (thumbPoint.parent != videoPanel) thumbPoint.SetParent(videoPanel);
+            thumbPoint.anchorMin = new Vector2(tx, 1.0f - ty);
+            thumbPoint.anchorMax = new Vector2(tx, 1.0f - ty);
+            thumbPoint.anchoredPosition = Vector2.zero;
+
+            float thumbScale = isPinching ? 1.32f : 1f;
+            thumbPoint.localScale = Vector3.one * thumbScale;
+            if (thumbPointImage != null)
+            {
+                thumbPointImage.color = isPinching ? pressColor : thumbNormalColor;
+            }
+
+            thumbScreenPos = RectTransformUtility.WorldToScreenPoint(uiCam, thumbPoint.position);
+        }
+
         CurrentScreenPos = screenPos;
+        CurrentThumbScreenPos = thumbScreenPos;
         bool anyButtonHovered = false;
 
+        // --- 3. TƯƠNG TÁC GIAO DIỆN UI (HOVER / CLICK / HOLD) ---
         foreach (var btn in interactiveButtons)
         {
             if (btn == null || !btn.gameObject.activeInHierarchy || !buttonImages.ContainsKey(btn)) continue;
@@ -162,27 +273,22 @@ public class ButtonInteractor : MonoBehaviour
             Canvas btnCanvas = btn.GetComponentInParent<Canvas>();
             Camera btnCam = (btnCanvas != null && btnCanvas.renderMode != RenderMode.ScreenSpaceOverlay) ? btnCanvas.worldCamera : null;
 
-            // ĐOẠN CẬP NHẬT QUAN TRỌNG: 
-            // Nếu menu là 3D (World Space) mà bạn quên chưa gán Event Camera trên Unity, 
-            // code sẽ tự động dùng Camera AR chính để tính toán góc nhìn.
             if (btnCam == null && btnCanvas != null && btnCanvas.renderMode == RenderMode.WorldSpace)
             {
                 btnCam = Camera.main;
             }
 
-            // Tính toán va chạm giữa ngón tay (2D) và nút bấm (3D)
             bool isHovering = RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam);
             Image img = buttonImages[btn];
 
-            // NẾU LÀ NÚT GIỮ ĐỂ KÍCH HOẠT (QUÉT MẶT PHẲNG, RESET MẠCH)
             HoldToActivateButton holdComp = btn.GetComponent<HoldToActivateButton>();
             if (holdComp != null)
             {
-                holdComp.SetPinchHoverState(isHovering, pinch);
+                holdComp.SetPinchHoverState(isHovering, isPinching);
                 if (isHovering)
                 {
                     anyButtonHovered = true;
-                    img.color = pinch ? pressColor : hoverColor;
+                    img.color = isPinching ? pressColor : hoverColor;
                 }
                 else
                 {
@@ -194,9 +300,9 @@ public class ButtonInteractor : MonoBehaviour
             if (isHovering)
             {
                 anyButtonHovered = true;
-                img.color = pinch ? pressColor : hoverColor;
+                img.color = isPinching ? pressColor : hoverColor;
 
-                if (pinch && !wasPinching && Time.time - lastClickTime > clickCooldown)
+                if (isPinching && !wasPinching && Time.time - lastClickTime > clickCooldown)
                 {
                     Button uiBtn = btn.GetComponent<Button>();
                     if (uiBtn != null && uiBtn.interactable)
@@ -213,18 +319,27 @@ public class ButtonInteractor : MonoBehaviour
             }
         }
 
-        if (pinch && !wasPinching && anyButtonHovered) wasPinching = true;
-        else if (!pinch) wasPinching = false;
+        if (isPinching && !wasPinching && anyButtonHovered) wasPinching = true;
+        else if (!isPinching) wasPinching = false;
 
-        if (pinch && !wasPinchingGlobal)
+        // --- 4. TÍNH TOÁN JUST PINCHED VỚI DEBOUNCE CHỐNG DOUBLE CLICK ---
+        if (isPinching && !wasPinchingGlobal)
         {
-            JustPinched = true;
-            wasPinchingGlobal = true;
+            if (Time.time - lastGlobalPinchTime >= pinchDebounceTime)
+            {
+                JustPinched = true;
+                wasPinchingGlobal = true;
+                lastGlobalPinchTime = Time.time;
+            }
+            else
+            {
+                JustPinched = false;
+            }
         }
         else
         {
             JustPinched = false;
-            if (!pinch) wasPinchingGlobal = false;
+            if (!isPinching) wasPinchingGlobal = false;
         }
     }
 
@@ -242,6 +357,8 @@ public class ButtonInteractor : MonoBehaviour
 
         float rawX = indexTip.x;
         float rawY = indexTip.y;
+        float rawThumbX = thumbTip.x;
+        float rawThumbY = thumbTip.y;
 
         // Xử lý hoán đổi trục X và Y khi camera bị xoay 90 độ
         if (hoanDoiTrucXY)
@@ -249,12 +366,24 @@ public class ButtonInteractor : MonoBehaviour
             float temp = rawX;
             rawX = rawY;
             rawY = temp;
+
+            float tempT = rawThumbX;
+            rawThumbX = rawThumbY;
+            rawThumbY = tempT;
         }
 
-        if (latNguocTrucX) rawX = 1.0f - rawX;
-        if (latNguocTrucY) rawY = 1.0f - rawY;
+        if (latNguocTrucX)
+        {
+            rawX = 1.0f - rawX;
+            rawThumbX = 1.0f - rawThumbX;
+        }
+        if (latNguocTrucY)
+        {
+            rawY = 1.0f - rawY;
+            rawThumbY = 1.0f - rawThumbY;
+        }
 
-        // Tính khoảng cách pinch (chỉ dùng tọa độ nguyên bản để tránh sai số khi xoay lật)
+        // Tính khoảng cách pinch (dùng tọa độ nguyên bản để tránh sai số khi xoay lật)
         float dx = thumbTip.x - indexTip.x;
         float dy = thumbTip.y - indexTip.y;
         float distance = Mathf.Sqrt(dx * dx + dy * dy);
@@ -263,7 +392,9 @@ public class ButtonInteractor : MonoBehaviour
         {
             targetX = rawX;
             targetY = rawY;
-            isPinching = (distance < pinchThreshold);
+            targetThumbX = rawThumbX;
+            targetThumbY = rawThumbY;
+            rawDistance = distance;
             isHandVisible = true;
         }
     }
