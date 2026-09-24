@@ -1783,10 +1783,22 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     /// </summary>
     public void UpdateSelectedComponentUI(GameObject comp)
     {
-        // Cơ chế xóa đã được thay thế hoàn toàn bằng Drag-to-Trash (Requirement 4)
+        // [FIX LOI 3] Hien thi badge voi nut XOA khi co linh kien duoc chon
         if (selectedComponentBadge != null)
         {
-            selectedComponentBadge.gameObject.SetActive(false);
+            if (comp != null)
+            {
+                selectedComponentBadge.gameObject.SetActive(true);
+                if (selectedCompLabelTMP != null)
+                {
+                    string displayName = comp.name.Replace("Placed_", "").Replace("(Clone)", "").Trim();
+                    selectedCompLabelTMP.text = "DANG CHON: " + displayName.ToUpper();
+                }
+            }
+            else
+            {
+                selectedComponentBadge.gameObject.SetActive(false);
+            }
         }
     }
 

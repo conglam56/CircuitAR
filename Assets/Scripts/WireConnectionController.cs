@@ -605,9 +605,8 @@ public class WireConnectionController : MonoBehaviour
         float dist = Vector3.Distance(p0, p3);
         if (dist < 0.005f) return;
 
-        // Tính toán các điểm nút phân nhánh nếu có nhiều nhánh dây cùng cắm vào 1 cực
-        Vector3 jA = GetSharedJunctionPoint(wire.terminalA, wire.terminalB, p0, out bool isBranchA);
-        Vector3 jB = GetSharedJunctionPoint(wire.terminalB, wire.terminalA, p3, out bool isBranchB);
+        // [FIX LOI 2] Moi day luon render Bezier truc tiep giua dung 2 endpoint rieng cua no.
+        // Khong chia se stem/junction voi day khac. Tranh hinh chu H khi 1 cuc noi nhieu day.
 
         int N = Mathf.Max(12, curveSegments);
         int K = Mathf.Max(6, radialSegments);
@@ -615,81 +614,22 @@ public class WireConnectionController : MonoBehaviour
         Vector3[] curvePoints = new Vector3[N + 1];
         Vector3[] tangents = new Vector3[N + 1];
 
-        // 1. TÍNH TOÁN CÁC ĐIỂM DỌC THÂN DÂY
-        if (!isBranchA && !isBranchB)
+        float dynamicArch = Mathf.Clamp(dist * archFactor, archHeight * 0.6f, archHeight * 2.5f);
+        Vector3 dir = (p3 - p0).normalized;
+        Vector3 p1 = p0 + Vector3.up * dynamicArch + dir * (dist * 0.25f);
+        Vector3 p2 = p3 + Vector3.up * dynamicArch - dir * (dist * 0.25f);
+
+        for (int i = 0; i <= N; i++)
         {
-            // Trường hợp A: Dây đơn thông thường giữa 2 cực (Direct Bézier)
-            float dynamicArch = Mathf.Clamp(dist * archFactor, archHeight * 0.6f, archHeight * 2.5f);
-            Vector3 dir = (p3 - p0).normalized;
-            Vector3 p1 = p0 + Vector3.up * dynamicArch + dir * (dist * 0.25f);
-            Vector3 p2 = p3 + Vector3.up * dynamicArch - dir * (dist * 0.25f);
+            float t = (float)i / N;
+            float u = 1f - t;
+            curvePoints[i] = u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3;
 
-            for (int i = 0; i <= N; i++)
-            {
-                float t = (float)i / N;
-                float u = 1f - t;
-                curvePoints[i] = u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3;
-
-                Vector3 tan = 3f * u * u * (p1 - p0) + 6f * u * t * (p2 - p1) + 3f * t * t * (p3 - p2);
-                if (tan.sqrMagnitude < 0.0001f) tan = dir;
-                tangents[i] = tan.normalized;
-            }
+            Vector3 tan = 3f * u * u * (p1 - p0) + 6f * u * t * (p2 - p1) + 3f * t * t * (p3 - p2);
+            if (tan.sqrMagnitude < 0.0001f) tan = dir;
+            tangents[i] = tan.normalized;
         }
-        else
-        {
-            // Trường hợp B: Dây phân nhánh chữ Y (Y-Branch Split)
-            // Đoạn thân chung nhô ra từ cọc A -> ngã ba jA -> uốn cong sang B
-            int splitIndexA = isBranchA ? Mathf.Max(3, N / 4) : 0;
-            int splitIndexB = isBranchB ? Mathf.Min(N - 3, N - (N / 4)) : N;
 
-            // Tính điểm kiểm soát cho phần cung ở giữa
-            Vector3 midStart = isBranchA ? jA : p0;
-            Vector3 midEnd = isBranchB ? jB : p3;
-            float midDist = Vector3.Distance(midStart, midEnd);
-            float midArch = Mathf.Clamp(midDist * archFactor, archHeight * 0.5f, archHeight * 2.2f);
-            Vector3 midDir = (midEnd - midStart).normalized;
-            Vector3 mp1 = midStart + Vector3.up * midArch + midDir * (midDist * 0.25f);
-            Vector3 mp2 = midEnd + Vector3.up * midArch - midDir * (midDist * 0.25f);
-
-            for (int i = 0; i <= N; i++)
-            {
-                if (isBranchA && i <= splitIndexA)
-                {
-                    // Thân chung từ cọc A đến nút ngã ba jA
-                    float tLocal = (float)i / splitIndexA;
-                    float smoothT = Mathf.SmoothStep(0f, 1f, tLocal);
-                    curvePoints[i] = Vector3.Lerp(p0, jA, smoothT) + Vector3.up * (0.005f * Mathf.Sin(tLocal * Mathf.PI));
-                    tangents[i] = (jA - p0).normalized;
-                }
-                else if (isBranchB && i >= splitIndexB)
-                {
-                    // Thân chung từ nút ngã ba jB đến cọc B
-                    float tLocal = (float)(i - splitIndexB) / (N - splitIndexB);
-                    float smoothT = Mathf.SmoothStep(0f, 1f, tLocal);
-                    curvePoints[i] = Vector3.Lerp(jB, p3, smoothT) + Vector3.up * (0.005f * Mathf.Sin(tLocal * Mathf.PI));
-                    tangents[i] = (p3 - jB).normalized;
-                }
-                else
-                {
-                    // Nhánh vòng cung uốn lượn ở giữa
-                    int midStartIdx = isBranchA ? splitIndexA : 0;
-                    int midEndIdx = isBranchB ? splitIndexB : N;
-                    float tLocal = (float)(i - midStartIdx) / (midEndIdx - midStartIdx);
-                    float uLocal = 1f - tLocal;
-
-                    curvePoints[i] = uLocal * uLocal * uLocal * midStart 
-                                   + 3f * uLocal * uLocal * tLocal * mp1 
-                                   + 3f * uLocal * tLocal * tLocal * mp2 
-                                   + tLocal * tLocal * tLocal * midEnd;
-
-                    Vector3 tan = 3f * uLocal * uLocal * (mp1 - midStart) 
-                                + 6f * uLocal * tLocal * (mp2 - mp1) 
-                                + 3f * tLocal * tLocal * (midEnd - mp2);
-                    if (tan.sqrMagnitude < 0.0001f) tan = midDir;
-                    tangents[i] = tan.normalized;
-                }
-            }
-        }
 
         // 2. HỆ TRỤC TỌA ĐỘ QUAY (Parallel Transport Frame) chống xoắn vặn
         Vector3[] normals = new Vector3[N + 1];

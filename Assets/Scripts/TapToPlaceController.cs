@@ -1046,6 +1046,11 @@ public class TapToPlaceController : MonoBehaviour
     {
         overlappingObject = null;
 
+        // Collision skin: lề an toàn tối thiểu 3mm bao quanh footprint OBB để bù sai lệch nhỏ
+        // giữa BoxCollider và mép thực tế của mesh model linh kiện (tránh overlap mép do phần mesh nhô ra ngoài BoxCollider).
+        const float collisionSkin = 0.003f;
+        float effectiveMargin = Mathf.Max(marginOffset, collisionSkin);
+
         // 1. Xác định GameObject gốc đại diện cho linh kiện đang được kiểm tra (previewAnchor hoặc draggedObject)
         GameObject candidateObj = (previewAnchor != null)
             ? previewAnchor
@@ -1057,7 +1062,7 @@ public class TapToPlaceController : MonoBehaviour
 
         if (candidateObj == null) return false;
 
-        if (!GetFootprintOBB(candidateObj, candidatePosition, candidateRot, out FootprintOBB2D candidateOBB, marginOffset))
+        if (!GetFootprintOBB(candidateObj, candidatePosition, candidateRot, out FootprintOBB2D candidateOBB, effectiveMargin))
         {
             return false;
         }
@@ -1106,7 +1111,7 @@ public class TapToPlaceController : MonoBehaviour
                 continue;
             }
 
-            if (GetFootprintOBB(placed, placed.transform.position, placed.transform.rotation, out FootprintOBB2D placedOBB, 0f))
+            if (GetFootprintOBB(placed, placed.transform.position, placed.transform.rotation, out FootprintOBB2D placedOBB, collisionSkin))
             {
                 if (CheckOBBOverlapSAT(candidateOBB, placedOBB, out int separatingAxisIndex))
                 {
