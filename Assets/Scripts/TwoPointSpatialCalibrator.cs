@@ -35,6 +35,20 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     [Tooltip("Độ dày mặt bàn. Mặc định 1cm")]
     public float defaultBoardThickness = 0.01f;
 
+    [Header("--- BOARD ORIENTATION LOCK ---")]
+    [Tooltip("Use the user's horizontal viewing direction at placement, instead of the AR plane's changing axis.")]
+    public bool alignBoardToUserOnPlacement = true;
+    [Tooltip("Keep the board parallel to the user and disable rotation gestures after placement.")]
+    public bool lockBoardOrientationToUser = true;
+
+    [Header("--- ANCHOR STABILIZATION ---")]
+    [Tooltip("Ignore tiny anchor position changes to prevent visible micro-jitter.")]
+    [Min(0f)] public float anchorPositionDeadband = 0.002f;
+    [Tooltip("Maximum world-space correction speed after AR relocalization.")]
+    [Min(0.01f)] public float maxAnchorCorrectionSpeed = 0.20f;
+    [Tooltip("Maximum yaw correction speed after AR relocalization.")]
+    [Min(1f)] public float maxAnchorRotationSpeed = 30f;
+
     [Header("--- UI VÀ TÂM NGẮM ---")]
     public GameObject spatialCalibrationUI;
     public GameObject reticleUI;
@@ -68,6 +82,10 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     private Quaternion lockedWorldRot = Quaternion.identity;
     private bool isPermanentlyLocked = false;
     private ARAnchor nativeAnchor = null;
+    private int anchorRequestVersion = 0;
+    private Vector3 anchorToBoardLocalPosition = Vector3.zero;
+    private Quaternion anchorToBoardLocalRotation = Quaternion.identity;
+    private bool hasAnchorBinding = false;
 
     void Awake()
     {
@@ -120,30 +138,18 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         // 1. KHI BÀN MẠCH ĐÃ ĐƯỢC ĐẶT:
         if (isPlaced && ActiveBoardAnchor != null)
         {
-            // Bám sát theo ARAnchor của ARCore để triệt tiêu 100% hiện tượng trôi / xê dịch (Drift)
+            // Follow a standalone world anchor. It survives plane subsumption and also
+            // receives ARCore relocalization corrections after rapid camera movement.
             if (nativeAnchor != null && nativeAnchor.trackingState == TrackingState.Tracking)
             {
-                Vector3 anchorPos = nativeAnchor.transform.position;
-                float dist = Vector3.Distance(lockedWorldPos, anchorPos);
-
-                // Lọc chống rung vi mô (Deadband filter):
-                // - Dưới 2mm: Giữ nguyên để triệt tiêu rung giật bàn tay
-                // - Từ 2mm đến 25cm: Bám mượt mà theo ARAnchor để sửa trôi SLAM
-                if (dist > 0.002f && dist < 0.25f)
-                {
-                    lockedWorldPos = Vector3.Lerp(lockedWorldPos, anchorPos, Time.deltaTime * 8f);
-                }
-                else if (dist >= 0.25f)
-                {
-                    lockedWorldPos = anchorPos;
-                }
+                UpdateLockedPoseFromAnchor();
             }
 
             // Luôn giữ vững toạ độ Y và XZ trên mặt bàn (chống tụt xuống theo camera khi cúi máy)
             ActiveBoardAnchor.transform.position = lockedWorldPos;
 
             // KHI ĐANG Ở GIAI ĐOẠN ĐIỀU CHỈNH (CHƯA BẤM XÁC NHẬN KHÓA):
-            if (!isPermanentlyLocked && isAdjusting)
+            if (!isPermanentlyLocked && isAdjusting && !lockBoardOrientationToUser)
             {
                 HandleScreenRotationGestures();
             }
@@ -380,12 +386,14 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         currentPlaneId = planeId;
 
         // 1. TỰ ĐỘNG CĂN CHÍNH DIỆN VÀ HÍT KHỚP VUÔNG GÓC VỚI CẠNH BÀN THẬT:
-        Vector3 camFwd = Camera.main != null ? Camera.main.transform.forward : Vector3.forward;
-        Vector3 userForwardFlat = new Vector3(camFwd.x, 0f, camFwd.z).normalized;
-        if (userForwardFlat.sqrMagnitude < 0.001f) userForwardFlat = Vector3.forward;
+        // Use the line from the user to the placement point. This stays front-facing
+        // even when the user taps away from the exact screen center.
+        Vector3 userForwardFlat = GetHorizontalDirectionFromUser(hitPose.position);
 
         // Tự động tìm cạnh bàn từ ARPlane và "hít" vuông góc, triệt tiêu 100% tình trạng bàn bị chéo xiên
-        Vector3 alignedForward = GetTableAlignedForward(userForwardFlat, hitPlane);
+        Vector3 alignedForward = alignBoardToUserOnPlacement
+            ? userForwardFlat
+            : GetTableAlignedForward(userForwardFlat, hitPlane);
 
         // Góc xoay PHẲNG TUYỆT ĐỐI (Pitch=0, Roll=0) & SONG SONG CẠNH BÀN GỖ THẬT:
         Quaternion rotation = Quaternion.LookRotation(alignedForward, Vector3.up);
@@ -409,7 +417,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         lockedWorldRot = rotation;
 
         // Tạo neo vật lý ARCore để triệt tiêu 100% trôi / xê dịch khi camera di chuyển
-        CreateARAnchor(new Pose(center, rotation), hitPlane);
+        CreateARAnchor(new Pose(center, rotation));
 
         // 4. Khởi tạo Prefab bàn mạch
         if (tableBoardPrefab != null)
@@ -570,11 +578,11 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     {
         if (ActiveBoardAnchor == null) return;
         ARPlane plane = planeManager != null ? planeManager.GetPlane(currentPlaneId) : null;
-        Vector3 camFwd = Camera.main != null ? Camera.main.transform.forward : Vector3.forward;
-        Vector3 userForwardFlat = new Vector3(camFwd.x, 0f, camFwd.z).normalized;
-        if (userForwardFlat.sqrMagnitude < 0.001f) userForwardFlat = Vector3.forward;
+        Vector3 userForwardFlat = GetHorizontalDirectionFromUser(ActiveBoardAnchor.transform.position);
 
-        Vector3 alignedForward = GetTableAlignedForward(userForwardFlat, plane);
+        Vector3 alignedForward = lockBoardOrientationToUser
+            ? userForwardFlat
+            : GetTableAlignedForward(userForwardFlat, plane);
         lockedWorldRot = Quaternion.LookRotation(alignedForward, Vector3.up);
         ActiveBoardAnchor.transform.rotation = lockedWorldRot;
         Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã tự động hít bàn mạch song song với cạnh bàn.");
@@ -586,41 +594,65 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// - Nếu không đính được, tạo neo tự do trong không gian (TryAddAnchorAsync).
     /// - Nhờ ARAnchor, ARCore sẽ tự động bù trừ sai số trôi dạt (Drift correction) khi người dùng di chuyển quanh bàn.
     /// </summary>
-    private async void CreateARAnchor(Pose pose, ARPlane hitPlane)
+    private async void CreateARAnchor(Pose pose)
     {
         if (anchorManager == null) return;
 
-        // Ưu tiên 1: Đính neo trực tiếp vào ARPlane mặt bàn (bền vững nhất)
-        if (hitPlane != null)
-        {
-            try
-            {
-                nativeAnchor = anchorManager.AttachAnchor(hitPlane, pose);
-                if (nativeAnchor != null)
-                {
-                    Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã tạo ARAnchor đính chặt vào ARPlane mặt bàn thành công!");
-                    return;
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning("[TwoPointSpatialCalibrator] AttachAnchor plane không khả dụng: " + ex.Message);
-            }
-        }
+        int requestVersion = ++anchorRequestVersion;
 
-        // Ưu tiên 2: Tạo neo tự do trong không gian AR (World Space Anchor)
+        // Always create an independent world anchor. A plane-attached anchor inherits
+        // the detected plane's lifecycle and can become unstable when that plane is
+        // subsumed or no longer observed.
         try
         {
             var result = await anchorManager.TryAddAnchorAsync(pose);
             if (result.status.IsSuccess() && result.value != null)
             {
+                if (requestVersion != anchorRequestVersion || !isPlaced)
+                {
+                    Destroy(result.value.gameObject);
+                    return;
+                }
+
                 nativeAnchor = result.value;
+                BindBoardToAnchor();
                 Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã tạo ARAnchor tự do trong không gian thành công!");
             }
         }
         catch (System.Exception ex)
         {
             Debug.LogWarning("[TwoPointSpatialCalibrator] TryAddAnchorAsync không khả dụng: " + ex.Message);
+        }
+    }
+
+    private void BindBoardToAnchor()
+    {
+        if (nativeAnchor == null || ActiveBoardAnchor == null) return;
+
+        anchorToBoardLocalPosition = nativeAnchor.transform.InverseTransformPoint(lockedWorldPos);
+        anchorToBoardLocalRotation = Quaternion.Inverse(nativeAnchor.transform.rotation) * lockedWorldRot;
+        hasAnchorBinding = true;
+    }
+
+    private void UpdateLockedPoseFromAnchor()
+    {
+        if (nativeAnchor == null || !hasAnchorBinding) return;
+
+        Vector3 targetPosition = nativeAnchor.transform.TransformPoint(anchorToBoardLocalPosition);
+        Quaternion targetRotation = FlattenRotation(nativeAnchor.transform.rotation * anchorToBoardLocalRotation);
+
+        float distance = Vector3.Distance(lockedWorldPos, targetPosition);
+        if (distance > Mathf.Max(0f, anchorPositionDeadband))
+        {
+            float positionStep = Mathf.Max(0.01f, maxAnchorCorrectionSpeed) * Time.deltaTime;
+            lockedWorldPos = Vector3.MoveTowards(lockedWorldPos, targetPosition, positionStep);
+        }
+
+        float angle = Quaternion.Angle(lockedWorldRot, targetRotation);
+        if (angle > 0.2f)
+        {
+            float rotationStep = Mathf.Max(1f, maxAnchorRotationSpeed) * Time.deltaTime;
+            lockedWorldRot = Quaternion.RotateTowards(lockedWorldRot, targetRotation, rotationStep);
         }
     }
 
@@ -671,7 +703,9 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         GameObject headerObj = new GameObject("Header");
         headerObj.transform.SetParent(panelObj.transform, false);
         sizeLabelText = headerObj.AddComponent<Text>();
-        sizeLabelText.text = "📏 KÍCH THƯỚC BÀN MẠCH (VUỐT MÀN HÌNH ĐỂ XOAY)";
+        sizeLabelText.text = lockBoardOrientationToUser
+            ? "📏 KÍCH THƯỚC BÀN MẠCH (ĐÃ KHÓA HƯỚNG)"
+            : "📏 KÍCH THƯỚC BÀN MẠCH (XOAY 2 NGÓN TAY ĐỂ CĂN)";
         sizeLabelText.fontSize = 20;
         sizeLabelText.fontStyle = FontStyle.Bold;
         sizeLabelText.alignment = TextAnchor.MiddleCenter;
@@ -875,6 +909,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     public void AdjustRoll(float deltaDegrees) { }
     public void AdjustYaw(float deltaDegrees)
     {
+        if (lockBoardOrientationToUser) return;
+
         if (ActiveBoardAnchor != null)
         {
             lockedWorldRot = Quaternion.AngleAxis(deltaDegrees, Vector3.up) * lockedWorldRot;
@@ -896,18 +932,17 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         if (ActiveBoardAnchor != null)
         {
             lockedWorldPos = ActiveBoardAnchor.transform.position;
-            lockedWorldRot = ActiveBoardAnchor.transform.rotation;
+            lockedWorldRot = FlattenRotation(ActiveBoardAnchor.transform.rotation);
 
-            // Nếu có ARAnchor theo dõi mặt bàn, gắn bàn mạch làm con của ARAnchor để duy trì bám dính vật lý
-            if (nativeAnchor != null)
-            {
-                ActiveBoardAnchor.transform.SetParent(nativeAnchor.transform, true);
-            }
-            else
-            {
-                ActiveBoardAnchor.transform.SetParent(null, true);
-            }
+            // Keep content outside the AR trackable hierarchy. A detected plane can be
+            // subsumed or removed while it is outside the camera's field of view.
+            ActiveBoardAnchor.transform.SetParent(null, true);
+            ActiveBoardAnchor.transform.SetPositionAndRotation(lockedWorldPos, lockedWorldRot);
         }
+
+        // Keep the standalone anchor alive after confirmation. ARCore can then apply
+        // the same relocalization correction to the board when tracking recovers.
+        if (nativeAnchor != null && !hasAnchorBinding) BindBoardToAnchor();
 
         if (lockController != null)
         {
@@ -920,7 +955,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             fineTuneUIRoot = null;
         }
 
-        enabled = false;
         Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> ĐÃ XÁC NHẬN VÀ KHÓA VĨNH VIỄN BÀN MẠCH Ở TOẠ ĐỘ THẾ GIỚI!");
     }
 
@@ -951,6 +985,10 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     public void RestartCalibration()
     {
         isPermanentlyLocked = false;
+        anchorRequestVersion++;
+        if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+        nativeAnchor = null;
+        hasAnchorBinding = false;
         if (ActiveBoard != null) Destroy(ActiveBoard);
         if (ActiveBoardAnchor != null) Destroy(ActiveBoardAnchor);
         if (fineTuneUIRoot != null) Destroy(fineTuneUIRoot);
@@ -981,5 +1019,31 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
 
         SetText("HÃY HƯỚNG CAMERA VÀO MẶT BÀN ĐỂ QUÉT...");
         Debug.Log("<color=cyan>[TwoPointSpatialCalibrator]</color> Đã khởi động lại chế độ quét mặt bàn.");
+    }
+
+    private static Quaternion FlattenRotation(Quaternion rotation)
+    {
+        Vector3 forward = rotation * Vector3.forward;
+        forward.y = 0f;
+        if (forward.sqrMagnitude < 0.0001f) forward = Vector3.forward;
+        return Quaternion.LookRotation(forward.normalized, Vector3.up);
+    }
+
+    private static Vector3 GetHorizontalDirectionFromUser(Vector3 targetPosition)
+    {
+        Camera camera = Camera.main;
+        Vector3 direction = camera != null
+            ? targetPosition - camera.transform.position
+            : Vector3.forward;
+        direction.y = 0f;
+
+        if (direction.sqrMagnitude < 0.0001f && camera != null)
+        {
+            direction = camera.transform.forward;
+            direction.y = 0f;
+        }
+
+        if (direction.sqrMagnitude < 0.0001f) direction = Vector3.forward;
+        return direction.normalized;
     }
 }
