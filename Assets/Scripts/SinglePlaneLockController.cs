@@ -10,25 +10,38 @@ public class SinglePlaneLockController : MonoBehaviour
 
     void Awake()
     {
+        if (planeManager == null) planeManager = FindFirstObjectByType<ARPlaneManager>();
         if (planeManager == null) planeManager = FindObjectOfType<ARPlaneManager>();
     }
 
-    // Hàm này chỉ chạy khi nút 3D TwoPointSpatialCalibrator hoàn thành đặt 2 điểm
+    /// <summary>
+    /// Khóa mặt phẳng mục tiêu: Ẩn visual các mặt phẳng khác và dừng quét mặt phẳng mới
+    /// nhưng DUY TRÌ BÁM mặt phẳng hiện tại để triệt tiêu 100% hiện tượng trôi hoặc bay theo camera.
+    /// </summary>
     public void SetManualLocked(TrackableId planeId)
     {
         LockedPlaneId = planeId;
         HasLockedPlane = true;
 
-        // Ẩn tất cả các mặt phẳng thừa
         if (planeManager != null)
         {
+            // Yêu cầu ARCore dừng phát hiện mặt phẳng mới nhưng KHÔNG TẮT planeManager
+            // để duy trì tracking SLAM bám chặt vào mặt bàn thật
+            planeManager.requestedDetectionMode = PlaneDetectionMode.None;
+
             foreach (var plane in planeManager.trackables)
             {
-                plane.gameObject.SetActive(false);
+                if (plane.trackableId != planeId)
+                {
+                    plane.gameObject.SetActive(false);
+                }
+                else
+                {
+                    plane.gameObject.SetActive(true);
+                }
             }
-            // TẮT HOÀN TOÀN ARPlaneManager để dừng tạo mặt phẳng mới
-            planeManager.enabled = false;
         }
+        Debug.Log("<color=cyan>[SinglePlaneLockController]</color> Đã khóa thành công bàn mạch và duy trì bám mặt bàn thật.");
     }
 
     /// <summary>
@@ -41,12 +54,12 @@ public class SinglePlaneLockController : MonoBehaviour
 
         if (planeManager != null)
         {
-            planeManager.enabled = true;
+            planeManager.requestedDetectionMode = PlaneDetectionMode.Horizontal;
             foreach (var plane in planeManager.trackables)
             {
                 plane.gameObject.SetActive(true);
             }
         }
-        Debug.Log("<color=cyan>[SinglePlaneLock]</color> Đã mở khóa mặt phẳng và kích hoạt lại quét AR.");
+        Debug.Log("<color=cyan>[SinglePlaneLockController]</color> Đã mở khóa mặt phẳng và kích hoạt lại quét AR.");
     }
 }
