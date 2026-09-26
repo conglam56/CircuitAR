@@ -594,11 +594,11 @@ public class WelcomeScreenController : MonoBehaviour
     {
         EnsureSprites();
 
-        // Canvas riêng cho thanh điều hướng AR (SortingOrder = 998, dưới Bubble Menu 999)
+        // Canvas riêng cho thanh điều hướng AR (SortingOrder = 1000, luôn nổi trên cùng)
         GameObject canvasObj = new GameObject("ARBackButton_Canvas");
         backButtonCanvas = canvasObj.AddComponent<Canvas>();
         backButtonCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        backButtonCanvas.sortingOrder = 998;
+        backButtonCanvas.sortingOrder = 1000;
 
         backButtonScaler = canvasObj.AddComponent<CanvasScaler>();
         backButtonScaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
