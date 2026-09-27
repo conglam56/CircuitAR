@@ -37,7 +37,6 @@ public class TapToPlaceController : MonoBehaviour
     public GameObject DraggedObject => draggedObject;
     private bool isDragging = false;
     public bool IsDragging => isDragging;
-    private bool isHoveringTrash = false;
     private ARFloatingBubbleMenu floatingMenu = null;
     private float unpinchGraceTimer = 0f;
     private Vector3 lastValidDragPos = Vector3.zero;
@@ -413,10 +412,6 @@ public class TapToPlaceController : MonoBehaviour
                         isDragBlocked = false;
                         unpinchGraceTimer = 0f;
 
-                        // Kích hoạt Drag-to-Trash UI trên màn hình
-                        if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
-                        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(true);
-
                         SelectComponent(draggedObject);
                         hitPlaced = true;
                         break;
@@ -429,6 +424,13 @@ public class TapToPlaceController : MonoBehaviour
             // Nếu pinch vào mặt bàn trống không trúng linh kiện nào -> Bỏ chọn linh kiện hiện tại
             if (!hitPlaced)
             {
+                // Nếu đang pinch vào nút Xóa ở trên màn hình, không bỏ chọn linh kiện
+                if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
+                if (floatingMenu != null && floatingMenu.IsPointerOverDeleteButton(screenPos))
+                {
+                    return;
+                }
+
                 for (int i = 0; i < allHits.Length; i++)
                 {
                     if (allHits[i].collider.CompareTag("CircuitBoard") || allHits[i].collider.name.Contains("Board"))
@@ -466,13 +468,7 @@ public class TapToPlaceController : MonoBehaviour
                     }
                 }
 
-                // Kiểm tra xem con trỏ kéo có đang nằm trên Thùng Rác (Drag-to-Trash) không
-                if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
-                bool overTrash = (floatingMenu != null && floatingMenu.IsPointerOverTrashZone(screenPos));
-                isHoveringTrash = overTrash;
-                if (floatingMenu != null) floatingMenu.SetTrashZoneHovered(overTrash);
-
-                if (foundBoard && !overTrash)
+                if (foundBoard)
                 {
                     // Bộ lọc làm mượt di chuyển:
                     // Bỏ qua micro-jitter (< 1.5mm) từ landmark MediaPipe để tránh rung vật
@@ -509,11 +505,6 @@ public class TapToPlaceController : MonoBehaviour
                         wireConnectionController.UpdateActiveWirePositionsExternal();
                     }
                 }
-                else if (overTrash)
-                {
-                    // Khi đang rê trên thùng rác: giữ nguyên vị trí trước đó
-                    draggedObject.transform.position = lastValidDragPos;
-                }
             }
             else
             {
@@ -531,24 +522,7 @@ public class TapToPlaceController : MonoBehaviour
     {
         if (draggedObject != null)
         {
-            // Trường hợp 1: Nhả tay trên Thùng Rác -> XÓA LINH KIỆN (Drag-to-Trash)
-            if (isHoveringTrash)
-            {
-                GameObject objToDelete = draggedObject;
-                isDragging = false;
-                draggedObject = null;
-                isHoveringTrash = false;
-                if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
-
-                DeletePlacedComponent(objToDelete);
-                ClearSelectedComponent();
-                Debug.Log($"<color=red>[TapToPlace]</color> Đã kéo linh kiện [{objToDelete.name}] vào thùng rác để xóa thành công.");
-                return;
-            }
-
-            if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
-
-            // Trường hợp 2: Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
+            // Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
             bool isOverlapping = CheckOverlap(draggedObject.transform.position, draggedObject, out _);
             if (isOverlapping && lastValidDragPos != Vector3.zero)
             {
@@ -571,10 +545,8 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
-        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
         isDragging = false;
         draggedObject = null;
-        isHoveringTrash = false;
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
     }
@@ -647,8 +619,6 @@ public class TapToPlaceController : MonoBehaviour
         canPlace = false;
         isDragging = false;
         draggedObject = null;
-        isHoveringTrash = false;
-        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
         Debug.Log("<color=yellow>[TapToPlace]</color> Đã hủy chế độ đặt linh kiện (Placement Cancelled).");
     }
 
