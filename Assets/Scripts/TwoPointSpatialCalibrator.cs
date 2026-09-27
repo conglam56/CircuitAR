@@ -41,14 +41,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     [Tooltip("Keep the board parallel to the user and disable rotation gestures after placement.")]
     public bool lockBoardOrientationToUser = true;
 
-    [Header("--- ANCHOR STABILIZATION ---")]
-    [Tooltip("Ignore tiny anchor position changes to prevent visible micro-jitter.")]
-    [Min(0f)] public float anchorPositionDeadband = 0.002f;
-    [Tooltip("Maximum world-space correction speed after AR relocalization.")]
-    [Min(0.01f)] public float maxAnchorCorrectionSpeed = 0.20f;
-    [Tooltip("Maximum yaw correction speed after AR relocalization.")]
-    [Min(1f)] public float maxAnchorRotationSpeed = 30f;
-
     [Header("--- UI VÀ TÂM NGẮM ---")]
     public GameObject spatialCalibrationUI;
     public GameObject reticleUI;
@@ -61,6 +53,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     // Quản lý bàn mạch trong không gian
     public GameObject ActiveBoardAnchor { get; private set; }
     public GameObject ActiveBoard { get; private set; }
+    public bool IsBoardTracking => boardTrackingVisible && CanTrackBoard();
+    private bool boardTrackingVisible;
 
     private bool isPlaced = false;
     private bool isAdjusting = false;
@@ -101,6 +95,11 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     private Vector3 anchorToBoardLocalPosition = Vector3.zero;
     private Quaternion anchorToBoardLocalRotation = Quaternion.identity;
     private bool hasAnchorBinding = false;
+    private ARCameraManager trackingCamera;
+    private bool applicationPaused;
+    private bool applicationFocused = true;
+    private int recoveryCameraFrames;
+    private const int RequiredRecoveryCameraFrames = 2;
 
     void Awake()
     {
@@ -125,6 +124,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
 
         if (anchorManager == null) anchorManager = FindFirstObjectByType<ARAnchorManager>();
         if (anchorManager == null) anchorManager = FindObjectOfType<ARAnchorManager>();
+        trackingCamera = FindFirstObjectByType<ARCameraManager>();
 
         if (lockController == null) lockController = FindFirstObjectByType<SinglePlaneLockController>();
         if (lockController == null) lockController = FindObjectOfType<SinglePlaneLockController>();
@@ -163,6 +163,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     void OnEnable()
     {
         ARSession.stateChanged += OnARSessionStateChanged;
+        if (trackingCamera != null) trackingCamera.frameReceived += OnTrackingCameraFrame;
+        if (isPlaced) SuspendBoardTracking();
         if (!isPlaced)
         {
             if (floatingHUD == null) floatingHUD = ARScanFloatingHUD.EnsureInstance();
@@ -173,6 +175,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     void OnDisable()
     {
         ARSession.stateChanged -= OnARSessionStateChanged;
+        if (trackingCamera != null) trackingCamera.frameReceived -= OnTrackingCameraFrame;
+        SuspendBoardTracking();
         if (holographicReticle != null) holographicReticle.Hide();
         if (floatingHUD != null) floatingHUD.Hide();
     }
@@ -192,23 +196,26 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         // 1. KHI BÀN MẠCH ĐÃ ĐƯỢC ĐẶT:
         if (isPlaced && ActiveBoardAnchor != null)
         {
-            // Follow a standalone world anchor. It survives plane subsumption and also
-            // receives ARCore relocalization corrections after rapid camera movement.
-            if (nativeAnchor != null && nativeAnchor.trackingState == TrackingState.Tracking)
+            if (!CanTrackBoard() || recoveryCameraFrames < RequiredRecoveryCameraFrames)
             {
-                UpdateLockedPoseFromAnchor();
+                if (!CanTrackBoard()) recoveryCameraFrames = 0;
+                SetBoardTrackingVisible(false);
+                return;
             }
 
-            // Luôn giữ vững toạ độ Y và XZ trên mặt bàn (chống tụt xuống theo camera khi cúi máy)
-            ActiveBoardAnchor.transform.position = lockedWorldPos;
+            // Apply the provider's current pose before showing content. Smoothing this
+            // correction independently of the camera makes the board slide after recovery.
+            UpdateLockedPoseFromAnchor();
 
             // KHI ĐANG Ở GIAI ĐOẠN ĐIỀU CHỈNH (CHƯA BẤM XÁC NHẬN KHÓA):
             if (!isPermanentlyLocked && isAdjusting && !lockBoardOrientationToUser)
             {
                 HandleScreenRotationGestures();
+                UpdateAnchorRotationOffset();
             }
 
-            ActiveBoardAnchor.transform.rotation = lockedWorldRot;
+            ActiveBoardAnchor.transform.SetPositionAndRotation(lockedWorldPos, lockedWorldRot);
+            SetBoardTrackingVisible(true);
             return;
         }
 
@@ -486,8 +493,10 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         lockedWorldPos = center;
         lockedWorldRot = rotation;
 
-        // Tạo neo vật lý ARCore để triệt tiêu 100% trôi / xê dịch khi camera di chuyển
-        CreateARAnchor(new Pose(center, rotation));
+        // Keep content hidden until the native anchor and camera are tracking.
+        recoveryCameraFrames = 0;
+        boardTrackingVisible = false;
+        anchorObj.SetActive(false);
 
         // 4. Khởi tạo Prefab bàn mạch
         if (tableBoardPrefab != null)
@@ -533,28 +542,66 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
 
         // 6. Hiển thị thanh công cụ điều chỉnh kích thước tinh gọn
         ShowFineTuneToolbar();
+        if (floatingHUD != null)
+            floatingHUD.ShowWarning("Đang neo bàn mạch", "Giữ camera hướng về mặt bàn");
+        CreateARAnchor(new Pose(center, rotation));
         Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã đặt bàn mạch chính diện. Có thể vuốt 1 hoặc 2 ngón tay trên màn hình để xoay khớp mép bàn.");
     }
 
     /// <summary>
-    /// Giám sát sự kiện trạng thái của ARSession:
-    /// Nếu camera cúi xuống gầm bàn tối (TrackingState.Limited / Lost), tự động đóng băng toạ độ thế giới
+    /// Hide stale poses while the session is initializing or recovering tracking.
     /// </summary>
     private void OnARSessionStateChanged(ARSessionStateChangedEventArgs args)
     {
-        if (args.state == ARSessionState.SessionTracking)
+        if (args.state != ARSessionState.SessionTracking) SuspendBoardTracking();
+    }
+
+    private bool CanTrackBoard()
+    {
+        return isActiveAndEnabled && !applicationPaused && applicationFocused
+            && ARSession.state == ARSessionState.SessionTracking
+            && nativeAnchor != null && !nativeAnchor.pending && hasAnchorBinding
+            && nativeAnchor.trackingState == TrackingState.Tracking;
+    }
+
+    private void OnTrackingCameraFrame(ARCameraFrameEventArgs args)
+    {
+        // Require new camera frames after resume, not cached pre-pause tracking state.
+        if (!CanTrackBoard())
         {
-            // SLAM tracking bình thường
+            SuspendBoardTracking();
+            return;
         }
-        else if (args.state == ARSessionState.Ready || args.state == ARSessionState.SessionInitializing)
-        {
-            // Đang tái định vị hoặc mất tracking nhẹ: Giữ vững vị trí đã khóa
-            if (isPlaced && ActiveBoardAnchor != null)
-            {
-                ActiveBoardAnchor.transform.position = lockedWorldPos;
-                ActiveBoardAnchor.transform.rotation = lockedWorldRot;
-            }
-        }
+        recoveryCameraFrames = Mathf.Min(recoveryCameraFrames + 1, RequiredRecoveryCameraFrames);
+    }
+
+    private void OnApplicationPause(bool paused)
+    {
+        applicationPaused = paused;
+        SuspendBoardTracking();
+    }
+
+    private void OnApplicationFocus(bool focused)
+    {
+        applicationFocused = focused;
+        SuspendBoardTracking();
+    }
+
+    private void SuspendBoardTracking()
+    {
+        recoveryCameraFrames = 0;
+        SetBoardTrackingVisible(false);
+    }
+
+    private void SetBoardTrackingVisible(bool visible)
+    {
+        boardTrackingVisible = visible;
+        if (ActiveBoardAnchor == null) return;
+        bool changed = ActiveBoardAnchor.activeSelf != visible;
+        ActiveBoardAnchor.SetActive(visible);
+        if (!changed || floatingHUD == null) return;
+        if (visible) floatingHUD.Hide();
+        else floatingHUD.ShowWarning("Đang tìm lại vị trí bàn", "Hướng camera về vùng bàn đã quét, giữ máy ổn định");
     }
 
     /// <summary>
@@ -657,18 +704,20 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             : GetTableAlignedForward(userForwardFlat, plane);
         lockedWorldRot = Quaternion.LookRotation(alignedForward, Vector3.up);
         ActiveBoardAnchor.transform.rotation = lockedWorldRot;
+        UpdateAnchorRotationOffset();
         Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã tự động hít bàn mạch song song với cạnh bàn.");
     }
 
     /// <summary>
-    /// Tạo neo AR vật lý với ARCore:
-    /// - Ưu tiên đính trực tiếp vào ARPlane của mặt bàn (AttachAnchor) để khóa chặt với mặt bàn.
-    /// - Nếu không đính được, tạo neo tự do trong không gian (TryAddAnchorAsync).
-    /// - Nhờ ARAnchor, ARCore sẽ tự động bù trừ sai số trôi dạt (Drift correction) khi người dùng di chuyển quanh bàn.
+    /// Create a session anchor independent of the detected plane's lifecycle.
     /// </summary>
     private async void CreateARAnchor(Pose pose)
     {
-        if (anchorManager == null) return;
+        if (anchorManager == null)
+        {
+            ShowAnchorCreationFailure();
+            return;
+        }
 
         int requestVersion = ++anchorRequestVersion;
 
@@ -680,7 +729,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             var result = await anchorManager.TryAddAnchorAsync(pose);
             if (result.status.IsSuccess() && result.value != null)
             {
-                if (requestVersion != anchorRequestVersion || !isPlaced)
+                if (this == null || requestVersion != anchorRequestVersion || !isPlaced)
                 {
                     Destroy(result.value.gameObject);
                     return;
@@ -690,11 +739,23 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
                 BindBoardToAnchor();
                 Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã tạo ARAnchor tự do trong không gian thành công!");
             }
+            else if (this != null && requestVersion == anchorRequestVersion)
+            {
+                ShowAnchorCreationFailure();
+            }
         }
         catch (System.Exception ex)
         {
             Debug.LogWarning("[TwoPointSpatialCalibrator] TryAddAnchorAsync không khả dụng: " + ex.Message);
+            if (this != null && requestVersion == anchorRequestVersion) ShowAnchorCreationFailure();
         }
+    }
+
+    private void ShowAnchorCreationFailure()
+    {
+        Debug.LogWarning("[TwoPointSpatialCalibrator] Cannot track board: AR anchor creation failed.");
+        if (floatingHUD != null)
+            floatingHUD.ShowWarning("Chưa neo được bàn mạch", "Chọn quét lại và đặt bàn khi camera đã ổn định");
     }
 
     private void BindBoardToAnchor()
@@ -710,22 +771,14 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     {
         if (nativeAnchor == null || !hasAnchorBinding) return;
 
-        Vector3 targetPosition = nativeAnchor.transform.TransformPoint(anchorToBoardLocalPosition);
-        Quaternion targetRotation = FlattenRotation(nativeAnchor.transform.rotation * anchorToBoardLocalRotation);
+        lockedWorldPos = nativeAnchor.transform.TransformPoint(anchorToBoardLocalPosition);
+        lockedWorldRot = FlattenRotation(nativeAnchor.transform.rotation * anchorToBoardLocalRotation);
+    }
 
-        float distance = Vector3.Distance(lockedWorldPos, targetPosition);
-        if (distance > Mathf.Max(0f, anchorPositionDeadband))
-        {
-            float positionStep = Mathf.Max(0.01f, maxAnchorCorrectionSpeed) * Time.deltaTime;
-            lockedWorldPos = Vector3.MoveTowards(lockedWorldPos, targetPosition, positionStep);
-        }
-
-        float angle = Quaternion.Angle(lockedWorldRot, targetRotation);
-        if (angle > 0.2f)
-        {
-            float rotationStep = Mathf.Max(1f, maxAnchorRotationSpeed) * Time.deltaTime;
-            lockedWorldRot = Quaternion.RotateTowards(lockedWorldRot, targetRotation, rotationStep);
-        }
+    private void UpdateAnchorRotationOffset()
+    {
+        if (nativeAnchor != null && hasAnchorBinding)
+            anchorToBoardLocalRotation = Quaternion.Inverse(nativeAnchor.transform.rotation) * lockedWorldRot;
     }
 
     /// <summary>
@@ -1656,6 +1709,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         {
             lockedWorldRot = Quaternion.AngleAxis(deltaDegrees, Vector3.up) * lockedWorldRot;
             ActiveBoardAnchor.transform.rotation = lockedWorldRot;
+            UpdateAnchorRotationOffset();
         }
     }
 
@@ -1667,6 +1721,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// </summary>
     public void ConfirmAndLockPlacement()
     {
+        if (!IsBoardTracking) return;
         isPermanentlyLocked = true;
         isAdjusting = false;
 
@@ -1729,6 +1784,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// </summary>
     public void RestartCalibration()
     {
+        boardTrackingVisible = false;
+        recoveryCameraFrames = 0;
         isPermanentlyLocked = false;
         anchorRequestVersion++;
         if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
