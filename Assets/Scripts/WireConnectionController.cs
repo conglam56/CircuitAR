@@ -138,9 +138,42 @@ public class WireConnectionController : MonoBehaviour
     }
     public event System.Action<bool> OnWireModeChanged;
 
+    public enum WireSubMode
+    {
+        Connect, // Chế độ Nối Dây
+        Delete   // Chế độ Xóa Dây
+    }
+
+    [Header("--- PHÂN LOẠI CHẾ ĐỘ DÂY (NỐI DÂY / XÓA DÂY) ---")]
+    public WireSubMode currentSubMode = WireSubMode.Connect;
+    public WireSubMode CurrentSubMode
+    {
+        get => currentSubMode;
+        set
+        {
+            if (currentSubMode != value)
+            {
+                currentSubMode = value;
+                CancelSelection();
+                OnWireSubModeChanged?.Invoke(currentSubMode);
+                Debug.Log($"<color=cyan>[WireConnectionController]</color> Đã chuyển chế độ dây: {(currentSubMode == WireSubMode.Connect ? "NỐI DÂY" : "XÓA DÂY")}");
+            }
+        }
+    }
+    public event System.Action<WireSubMode> OnWireSubModeChanged;
+
+    [Tooltip("Tham chiếu tới ARFloatingBubbleMenu để hiển thị thông báo toast")]
+    public ARFloatingBubbleMenu floatingMenu;
+
     public void ToggleWireMode()
     {
         IsWireMode = !IsWireMode;
+    }
+
+    public void SetWireSubMode(WireSubMode mode)
+    {
+        CurrentSubMode = mode;
+        if (!IsWireMode) IsWireMode = true;
     }
 
     // Trạng thái nội bộ
@@ -288,7 +321,7 @@ public class WireConnectionController : MonoBehaviour
     }
 
     /// <summary>
-    /// Xử lý logic máy trạng thái nối dây giữa 2 cực
+    /// Xử lý logic máy trạng thái nối dây / xóa dây giữa 2 cực
     /// </summary>
     private void OnTerminalPinched(Transform terminal)
     {
@@ -313,30 +346,86 @@ public class WireConnectionController : MonoBehaviour
         if (GetRootPlacedName(firstSelectedTerminal) == GetRootPlacedName(terminal))
         {
             Debug.LogWarning($"<color=orange>[WireConnection]</color> Hai cực thuộc cùng linh kiện [{GetRootPlacedName(terminal)}]. Thao tác bị từ chối.");
+            if (currentSubMode == WireSubMode.Delete)
+            {
+                CancelSelection();
+                ShowNoWireNotification();
+            }
             return;
         }
 
-        // Trường hợp 4: Kiểm tra xem 2 cực này đã có dây nối chưa
-        if (IsAlreadyConnected(firstSelectedTerminal, terminal))
-        {
-            Debug.LogWarning($"<color=orange>[WireConnection]</color> Hai cực [{firstSelectedTerminal.name}] và [{terminal.name}] đã được nối dây từ trước!");
-            CancelSelection();
-            return;
-        }
-
-        // Trường hợp 5: Hợp lệ -> Tiến hành nối dây trực tiếp (Multi-connection cho phép nối nhiều dây vào cùng 1 cực)
         Transform terminalA = firstSelectedTerminal;
         Transform terminalB = terminal;
 
-        CancelSelection();
-
-        CreateWire(terminalA, terminalB);
-
-        // Ghi nhận vào lịch sử Undo/Redo độc lập cho dây vừa tạo (Requirement 2 & 3)
-        if (tapToPlaceController == null) AutoResolveReferences();
-        if (tapToPlaceController != null && tapToPlaceController.History != null)
+        if (currentSubMode == WireSubMode.Connect)
         {
-            tapToPlaceController.History.RecordAction(new ConnectWireAction(terminalA, terminalB, this));
+            // === CHẾ ĐỘ NỐI DÂY (GIỮ NGUYÊN 100% NHƯ CŨ) ===
+            // Trường hợp 4: Kiểm tra xem 2 cực này đã có dây nối chưa
+            if (IsAlreadyConnected(terminalA, terminalB))
+            {
+                Debug.LogWarning($"<color=orange>[WireConnection]</color> Hai cực [{terminalA.name}] và [{terminalB.name}] đã được nối dây từ trước!");
+                CancelSelection();
+                return;
+            }
+
+            // Trường hợp 5: Hợp lệ -> Tiến hành nối dây trực tiếp (Multi-connection cho phép nối nhiều dây vào cùng 1 cực)
+            CancelSelection();
+
+            CreateWire(terminalA, terminalB);
+
+            // Ghi nhận vào lịch sử Undo/Redo độc lập cho dây vừa tạo (Requirement 2 & 3)
+            if (tapToPlaceController == null) AutoResolveReferences();
+            if (tapToPlaceController != null && tapToPlaceController.History != null)
+            {
+                tapToPlaceController.History.RecordAction(new ConnectWireAction(terminalA, terminalB, this));
+            }
+        }
+        else // currentSubMode == WireSubMode.Delete
+        {
+            // === CHẾ ĐỘ XÓA DÂY ===
+            // Reset selection ngay để người dùng sẵn sàng cho thao tác tiếp theo
+            CancelSelection();
+
+            // Tìm và xóa đúng duy nhất connection A-B (các dây khác như A-C, A-D giữ nguyên)
+            bool wireFound = RemoveWire(terminalA, terminalB);
+            if (wireFound)
+            {
+                // Nếu connection A-B tồn tại:
+                // -> Xóa đúng connection A-B
+                // -> Không hỏi xác nhận
+                // -> Không hiện thông báo thành công
+                // -> Ghi nhận vào lịch sử Undo/Redo (DisconnectWireAction)
+                if (tapToPlaceController == null) AutoResolveReferences();
+                if (tapToPlaceController != null && tapToPlaceController.History != null)
+                {
+                    tapToPlaceController.History.RecordAction(new DisconnectWireAction(terminalA, terminalB, this));
+                }
+                Debug.Log($"<color=green>[WireConnection]</color> Đã xóa kết nối dây giữa [{terminalA.name}] và [{terminalB.name}].");
+            }
+            else
+            {
+                // Nếu connection A-B KHÔNG tồn tại:
+                // -> Không thay đổi gì
+                // -> Hiện thông báo: "Không có dây, vui lòng chọn lại"
+                ShowNoWireNotification();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hiển thị thông báo khi không tìm thấy dây nối giữa 2 cực được chọn trong Chế độ Xóa Dây
+    /// </summary>
+    public void ShowNoWireNotification()
+    {
+        if (floatingMenu == null) AutoResolveReferences();
+        if (floatingMenu != null)
+        {
+            floatingMenu.ShowToastNotification("Không có dây, vui lòng chọn lại");
+            floatingMenu.FlashWireModeBadgeMessage("KHÔNG CÓ DÂY, VUI LÒNG CHỌN LẠI");
+        }
+        else
+        {
+            Debug.LogWarning("<color=orange>[WireConnection]</color> Không có dây, vui lòng chọn lại");
         }
     }
 
@@ -1041,6 +1130,15 @@ public class WireConnectionController : MonoBehaviour
             tapToPlaceController = FindFirstObjectByType<TapToPlaceController>();
 #else
             tapToPlaceController = FindObjectOfType<TapToPlaceController>();
+#endif
+        }
+
+        if (floatingMenu == null)
+        {
+#if UNITY_2023_1_OR_NEWER
+            floatingMenu = FindFirstObjectByType<ARFloatingBubbleMenu>();
+#else
+            floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
 #endif
         }
     }

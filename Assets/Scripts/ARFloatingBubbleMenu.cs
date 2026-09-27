@@ -60,6 +60,25 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private Outline wireModeRingOutline;
     private Image wireModeBubbleImg;
 
+    [Header("--- CÔNG CỤ DÂY (NỐI DÂY / XÓA DÂY) ---")]
+    public RectTransform wireToolDrawer;
+    public RectTransform btnDrawerConnectWire;
+    public RectTransform btnDrawerDeleteWire;
+    public bool isWireDrawerOpen = false;
+    private Coroutine wireDrawerAnimCoroutine;
+
+    private Image wireModeBadgeImg;
+    private Outline wireModeBadgeOutline;
+    private TextMeshProUGUI wireModeBadgeTMP;
+    private Coroutine badgeFlashCoroutine;
+
+    [Header("--- THÔNG BÁO NỔI TOAST ---")]
+    public RectTransform toastNotificationRoot;
+    public TextMeshProUGUI toastNotificationTMP;
+    public Image toastNotificationBg;
+    public Outline toastNotificationOutline;
+    private Coroutine toastNotificationCoroutine;
+
     [Header("--- HỘP THOẠI XÁC NHẬN AN TOÀN (CONFIRMATION MODAL) ---")]
     public GameObject confirmationDialogRoot;
     public RectTransform confirmationCard;
@@ -119,6 +138,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         {
             wireConnectionController.OnWireModeChanged -= OnWireModeStateChanged;
             wireConnectionController.OnWireModeChanged += OnWireModeStateChanged;
+            wireConnectionController.OnWireSubModeChanged -= OnWireSubModeStateChanged;
+            wireConnectionController.OnWireSubModeChanged += OnWireSubModeStateChanged;
             UpdateWireModeUI(wireConnectionController.IsWireMode);
         }
         if (tapToPlaceController != null)
@@ -134,6 +155,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (wireConnectionController != null)
         {
             wireConnectionController.OnWireModeChanged -= OnWireModeStateChanged;
+            wireConnectionController.OnWireSubModeChanged -= OnWireSubModeStateChanged;
         }
         if (tapToPlaceController != null)
         {
@@ -318,6 +340,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (mainBubbleLabelText != null) mainBubbleLabelText.text = "MENU AR";
 
         if (isToolboxOpen) ToggleToolboxDrawer();
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
         if (confirmationDialogRoot != null && confirmationDialogRoot.activeSelf) DismissConfirmationDialog();
 
         if (tapToPlaceController != null)
@@ -470,6 +493,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (isToolboxOpen)
         {
+            if (isWireDrawerOpen) ToggleWireToolDrawer();
             toolboxDrawer.gameObject.SetActive(true);
             drawerAnimCoroutine = StartCoroutine(AnimateScale(toolboxDrawer, Vector3.one, 0.18f));
         }
@@ -519,6 +543,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (spatialCalibrator != null) spatialCalibrator.RestartCalibration();
 
         if (isToolboxOpen) ToggleToolboxDrawer();
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
     }
 
     /// <summary>
@@ -528,6 +553,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     {
         Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Mở thanh công cụ CHỈNH KÍCH THƯỚC MẶT BÀN...");
         if (isToolboxOpen) ToggleToolboxDrawer();
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
         RetractMenu();
 
         if (spatialCalibrator == null)
@@ -566,6 +592,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         DestroyAllPlacedComponents();
 
         if (isToolboxOpen) ToggleToolboxDrawer();
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
     }
 
     public void OnClickToolbox()
@@ -1009,6 +1036,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (btnConfirmCancel != null) buttonInteractor.RegisterButton(btnConfirmCancel);
         if (btnConfirmAction != null) buttonInteractor.RegisterButton(btnConfirmAction);
         if (btnDeleteComp != null) buttonInteractor.RegisterButton(btnDeleteComp);
+        if (btnDrawerConnectWire != null) buttonInteractor.RegisterButton(btnDrawerConnectWire);
+        if (btnDrawerDeleteWire != null) buttonInteractor.RegisterButton(btnDrawerDeleteWire);
     }
 
     private IEnumerator AnimateScale(RectTransform target, Vector3 targetScale, float duration, System.Action onComplete = null)
@@ -1158,8 +1187,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             ringColor: new Color(0f, 0.85f, 1f, 0.95f),
             size: new Vector2(bubbleDiameter, bubbleDiameter),
             anchoredPos: posWireModeTarget,
-            labelText: "NỐI DÂY",
-            onClick: OnClickWireModeToggle
+            labelText: "DÂY",
+            onClick: OnClickWireModeButton
         );
         btnWireModeBubble = wireObj.GetComponent<RectTransform>();
 
@@ -1290,6 +1319,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         // 9. Nút XÓA hình tròn ở phía trên màn hình khi chọn linh kiện
         BuildTopDeleteButton(rootRT);
+
+        // 10. Khay lựa chọn Chế độ Dây (Nối Dây / Xóa Dây)
+        BuildWireToolDrawer(rootRT);
+
+        // 11. Toast thông báo nổi khi thao tác lỗi hoặc nhắc nhở
+        BuildToastNotificationUI(rootRT);
 
         // Khởi tạo hộp thoại xác nhận an toàn cho Reset và Quét mặt phẳng
         BuildConfirmationDialog(rootRT);
@@ -1492,14 +1527,82 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     }
 
     /// <summary>
-    /// Bật/tắt chế độ nối dây (Requirement 3: Wire Mode)
+    /// Bấm nút "DÂY" trên Bubble Menu -> Mở khay chọn: NỐI DÂY hoặc XÓA DÂY
+    /// </summary>
+    public void OnClickWireModeButton()
+    {
+        ToggleWireToolDrawer();
+    }
+
+    /// <summary>
+    /// Bật/Tắt hiển thị khay lựa chọn công cụ Dây (NỐI DÂY / XÓA DÂY)
+    /// </summary>
+    public void ToggleWireToolDrawer()
+    {
+        if (wireToolDrawer == null) return;
+
+        isWireDrawerOpen = !isWireDrawerOpen;
+        if (wireDrawerAnimCoroutine != null) StopCoroutine(wireDrawerAnimCoroutine);
+
+        if (isWireDrawerOpen)
+        {
+            if (isToolboxOpen) ToggleToolboxDrawer();
+            wireToolDrawer.gameObject.SetActive(true);
+            wireDrawerAnimCoroutine = StartCoroutine(AnimateScale(wireToolDrawer, Vector3.one, 0.18f));
+        }
+        else
+        {
+            wireDrawerAnimCoroutine = StartCoroutine(AnimateScale(wireToolDrawer, Vector3.zero, 0.15f, () => wireToolDrawer.gameObject.SetActive(false)));
+        }
+    }
+
+    public void OnClickSelectConnectWireMode()
+    {
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
+        if (wireConnectionController == null) AutoFindReferences();
+        if (wireConnectionController != null)
+        {
+            if (wireConnectionController.IsWireMode && wireConnectionController.CurrentSubMode == WireConnectionController.WireSubMode.Connect)
+            {
+                wireConnectionController.IsWireMode = false;
+            }
+            else
+            {
+                wireConnectionController.IsWireMode = true;
+                wireConnectionController.CurrentSubMode = WireConnectionController.WireSubMode.Connect;
+            }
+        }
+        RetractMenu();
+    }
+
+    public void OnClickSelectDeleteWireMode()
+    {
+        if (isWireDrawerOpen) ToggleWireToolDrawer();
+        if (wireConnectionController == null) AutoFindReferences();
+        if (wireConnectionController != null)
+        {
+            if (wireConnectionController.IsWireMode && wireConnectionController.CurrentSubMode == WireConnectionController.WireSubMode.Delete)
+            {
+                wireConnectionController.IsWireMode = false;
+            }
+            else
+            {
+                wireConnectionController.IsWireMode = true;
+                wireConnectionController.CurrentSubMode = WireConnectionController.WireSubMode.Delete;
+            }
+        }
+        RetractMenu();
+    }
+
+    /// <summary>
+    /// Bấm vào huy hiệu trên đỉnh màn hình để thoát Chế độ Dây
     /// </summary>
     public void OnClickWireModeToggle()
     {
         if (wireConnectionController == null) AutoFindReferences();
         if (wireConnectionController != null)
         {
-            wireConnectionController.ToggleWireMode();
+            wireConnectionController.IsWireMode = false;
         }
     }
 
@@ -1509,6 +1612,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (isWire && tapToPlaceController != null)
         {
             tapToPlaceController.CancelPlacement();
+            tapToPlaceController.ClearSelectedComponent();
         }
         if (tapToPlaceController != null)
         {
@@ -1516,34 +1620,67 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         }
     }
 
+    private void OnWireSubModeStateChanged(WireConnectionController.WireSubMode subMode)
+    {
+        UpdateWireModeUI(wireConnectionController != null && wireConnectionController.IsWireMode);
+    }
+
     /// <summary>
-    /// Đồng bộ hiển thị giao diện khi Chế độ Nối Dây bật/tắt (Requirement 3)
+    /// Đồng bộ hiển thị giao diện khi Chế độ Dây (Nối dây / Xóa dây) thay đổi
     /// </summary>
     public void UpdateWireModeUI(bool isWire)
     {
+        bool isDeleteMode = (wireConnectionController != null && wireConnectionController.CurrentSubMode == WireConnectionController.WireSubMode.Delete);
+
         if (wireModeLabelTMP != null)
         {
-            wireModeLabelTMP.text = isWire ? "ĐANG NỐI DÂY" : "NỐI DÂY";
-            wireModeLabelTMP.color = isWire ? new Color(1f, 0.95f, 0.25f, 1f) : Color.white;
+            wireModeLabelTMP.text = isWire ? (isDeleteMode ? "XÓA DÂY" : "NỐI DÂY") : "DÂY";
+            wireModeLabelTMP.color = isWire
+                ? (isDeleteMode ? new Color(1f, 0.45f, 0.45f, 1f) : new Color(1f, 0.95f, 0.25f, 1f))
+                : Color.white;
         }
 
         if (wireModeRingOutline != null)
         {
             wireModeRingOutline.effectColor = isWire
-                ? new Color(1f, 0.8f, 0.1f, 1f) // Vàng cam phát sáng rực rỡ khi Active
+                ? (isDeleteMode ? new Color(1f, 0.28f, 0.28f, 1f) : new Color(1f, 0.8f, 0.1f, 1f))
                 : new Color(0f, 0.85f, 1f, 0.95f);
         }
 
         if (wireModeBubbleImg != null)
         {
             wireModeBubbleImg.color = isWire
-                ? new Color(0.20f, 0.15f, 0.05f, 0.98f)
+                ? (isDeleteMode ? new Color(0.22f, 0.05f, 0.08f, 0.98f) : new Color(0.20f, 0.15f, 0.05f, 0.98f))
                 : new Color(0.08f, 0.12f, 0.20f, 0.96f);
         }
 
         if (wireModeFloatingBadge != null)
         {
             wireModeFloatingBadge.gameObject.SetActive(isWire);
+            if (isWire)
+            {
+                if (wireModeBadgeTMP != null)
+                {
+                    wireModeBadgeTMP.text = isDeleteMode
+                        ? "CHẾ ĐỘ: XÓA DÂY  (BẤM ĐỂ THOÁT)"
+                        : "CHẾ ĐỘ: NỐI DÂY  (BẤM ĐỂ THOÁT)";
+                    wireModeBadgeTMP.color = isDeleteMode
+                        ? new Color(1f, 0.5f, 0.5f, 1f)
+                        : new Color(1f, 0.95f, 0.3f, 1f);
+                }
+                if (wireModeBadgeOutline != null)
+                {
+                    wireModeBadgeOutline.effectColor = isDeleteMode
+                        ? new Color(1f, 0.3f, 0.3f, 0.95f)
+                        : new Color(1f, 0.8f, 0.15f, 0.95f);
+                }
+                if (wireModeBadgeImg != null)
+                {
+                    wireModeBadgeImg.color = isDeleteMode
+                        ? new Color(0.22f, 0.05f, 0.08f, 0.95f)
+                        : new Color(0.16f, 0.12f, 0.03f, 0.95f);
+                }
+            }
         }
     }
 
@@ -1565,6 +1702,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         badgeImg.sprite = roundedRectSprite;
         badgeImg.type = Image.Type.Sliced;
         badgeImg.color = new Color(0.16f, 0.12f, 0.03f, 0.95f);
+        wireModeBadgeImg = badgeImg;
 
         Button badgeBtn = badgeObj.GetComponent<Button>();
         badgeBtn.targetGraphic = badgeImg;
@@ -1573,6 +1711,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Outline outline = badgeObj.AddComponent<Outline>();
         outline.effectColor = new Color(1f, 0.8f, 0.15f, 0.95f);
         outline.effectDistance = new Vector2(2.5f, -2.5f);
+        wireModeBadgeOutline = outline;
 
         GameObject txtObj = new GameObject("Text", typeof(RectTransform));
         txtObj.transform.SetParent(badgeObj.transform, false);
@@ -1584,14 +1723,267 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         TextMeshProUGUI tmp = txtObj.AddComponent<TextMeshProUGUI>();
         tmp.font = GetSafeFont();
-        tmp.text = "ĐANG NỐI DÂY (BẤM ĐỂ THOÁT)";
+        tmp.text = "CHẾ ĐỘ: NỐI DÂY  (BẤM ĐỂ THOÁT)";
         tmp.fontSize = 22;
         tmp.fontStyle = FontStyles.Bold;
         tmp.alignment = TextAlignmentOptions.Center;
         tmp.color = new Color(1f, 0.95f, 0.3f, 1f);
         tmp.raycastTarget = false;
+        wireModeBadgeTMP = tmp;
 
         wireModeFloatingBadge.gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Khay lựa chọn Chế độ Dây: NỐI DÂY hoặc XÓA DÂY
+    /// </summary>
+    private void BuildWireToolDrawer(Transform parent)
+    {
+        GameObject drawerObj = new GameObject("WireTool_Drawer", typeof(RectTransform), typeof(Image));
+        drawerObj.transform.SetParent(parent, false);
+        wireToolDrawer = drawerObj.GetComponent<RectTransform>();
+        wireToolDrawer.anchorMin = new Vector2(0.5f, 0f);
+        wireToolDrawer.anchorMax = new Vector2(0.5f, 0f);
+        wireToolDrawer.pivot = new Vector2(0.5f, 0f);
+        wireToolDrawer.anchoredPosition = new Vector2(0, menuBottomOffset + 310f);
+        wireToolDrawer.sizeDelta = new Vector2(640, 185);
+
+        Image drawerImg = drawerObj.GetComponent<Image>();
+        drawerImg.sprite = roundedRectSprite;
+        drawerImg.type = Image.Type.Sliced;
+        drawerImg.color = new Color(0.04f, 0.07f, 0.14f, 0.97f);
+
+        Outline drawerOutline = drawerObj.AddComponent<Outline>();
+        drawerOutline.effectColor = new Color(0f, 0.85f, 1f, 0.9f);
+        drawerOutline.effectDistance = new Vector2(3f, -3f);
+
+        // Tiêu đề: CÔNG CỤ DÂY
+        GameObject titleObj = new GameObject("Title", typeof(RectTransform));
+        titleObj.transform.SetParent(drawerObj.transform, false);
+        RectTransform titleRT = titleObj.GetComponent<RectTransform>();
+        titleRT.anchorMin = new Vector2(0.5f, 1f);
+        titleRT.anchorMax = new Vector2(0.5f, 1f);
+        titleRT.pivot = new Vector2(0.5f, 1f);
+        titleRT.sizeDelta = new Vector2(500, 40);
+        titleRT.anchoredPosition = new Vector2(0, -12);
+
+        TextMeshProUGUI titleTMP = titleObj.AddComponent<TextMeshProUGUI>();
+        titleTMP.font = GetSafeFont();
+        titleTMP.text = "CÔNG CỤ DÂY";
+        titleTMP.fontSize = 20;
+        titleTMP.fontStyle = FontStyles.Bold;
+        titleTMP.alignment = TextAlignmentOptions.Center;
+        titleTMP.color = new Color(0.35f, 0.9f, 1f, 1f);
+        titleTMP.raycastTarget = false;
+
+        // 1. Nút NỐI DÂY (Bên trái)
+        GameObject connectBtnObj = CreateModeButton(
+            parent: drawerObj.transform,
+            name: "Btn_Mode_ConnectWire",
+            bgColor: new Color(0.06f, 0.20f, 0.32f, 0.98f),
+            outlineColor: new Color(0f, 0.9f, 1f, 0.95f),
+            size: new Vector2(260, 95),
+            anchoredPos: new Vector2(-145f, -22f),
+            label: "NỐI DÂY",
+            labelColor: new Color(0.85f, 0.97f, 1f, 1f),
+            onClick: OnClickSelectConnectWireMode
+        );
+        btnDrawerConnectWire = connectBtnObj.GetComponent<RectTransform>();
+
+        // 2. Nút XÓA DÂY (Bên phải)
+        GameObject deleteBtnObj = CreateModeButton(
+            parent: drawerObj.transform,
+            name: "Btn_Mode_DeleteWire",
+            bgColor: new Color(0.28f, 0.06f, 0.10f, 0.98f),
+            outlineColor: new Color(1f, 0.3f, 0.3f, 0.95f),
+            size: new Vector2(260, 95),
+            anchoredPos: new Vector2(145f, -22f),
+            label: "XÓA DÂY",
+            labelColor: new Color(1f, 0.88f, 0.88f, 1f),
+            onClick: OnClickSelectDeleteWireMode
+        );
+        btnDrawerDeleteWire = deleteBtnObj.GetComponent<RectTransform>();
+
+        wireToolDrawer.gameObject.SetActive(false);
+        wireToolDrawer.localScale = Vector3.zero;
+    }
+
+    /// <summary>
+    /// Tạo nút bấm chuyển chế độ trong khay công cụ Dây
+    /// </summary>
+    private GameObject CreateModeButton(
+        Transform parent,
+        string name,
+        Color bgColor,
+        Color outlineColor,
+        Vector2 size,
+        Vector2 anchoredPos,
+        string label,
+        Color labelColor,
+        System.Action onClick)
+    {
+        GameObject obj = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
+        obj.transform.SetParent(parent, false);
+
+        RectTransform rt = obj.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0.5f);
+        rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = size;
+        rt.anchoredPosition = anchoredPos;
+
+        Image img = obj.GetComponent<Image>();
+        img.sprite = roundedRectSprite;
+        img.type = Image.Type.Sliced;
+        img.color = bgColor;
+
+        Button btn = obj.GetComponent<Button>();
+        btn.targetGraphic = img;
+        if (onClick != null) btn.onClick.AddListener(() => onClick());
+
+        Outline outline = obj.AddComponent<Outline>();
+        outline.effectColor = outlineColor;
+        outline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        GameObject textObj = new GameObject("Label", typeof(RectTransform));
+        textObj.transform.SetParent(obj.transform, false);
+        RectTransform textRT = textObj.GetComponent<RectTransform>();
+        textRT.anchorMin = Vector2.zero;
+        textRT.anchorMax = Vector2.one;
+        textRT.offsetMin = Vector2.zero;
+        textRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI tmp = textObj.AddComponent<TextMeshProUGUI>();
+        tmp.font = GetSafeFont();
+        tmp.text = label;
+        tmp.fontSize = 22;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.color = labelColor;
+        tmp.raycastTarget = false;
+
+        return obj;
+    }
+
+    /// <summary>
+    /// Khởi tạo Toast thông báo nổi ở giữa/trên màn hình
+    /// </summary>
+    private void BuildToastNotificationUI(Transform parent)
+    {
+        GameObject toastObj = new GameObject("Toast_Notification", typeof(RectTransform), typeof(Image), typeof(CanvasGroup));
+        toastObj.transform.SetParent(parent, false);
+
+        toastNotificationRoot = toastObj.GetComponent<RectTransform>();
+        toastNotificationRoot.anchorMin = new Vector2(0.5f, 1f);
+        toastNotificationRoot.anchorMax = new Vector2(0.5f, 1f);
+        toastNotificationRoot.pivot = new Vector2(0.5f, 1f);
+        toastNotificationRoot.sizeDelta = new Vector2(580f, 68f);
+        toastNotificationRoot.anchoredPosition = new Vector2(0f, -255f);
+
+        toastNotificationBg = toastObj.GetComponent<Image>();
+        toastNotificationBg.sprite = roundedRectSprite;
+        toastNotificationBg.type = Image.Type.Sliced;
+        toastNotificationBg.color = new Color(0.18f, 0.05f, 0.06f, 0.96f);
+        toastNotificationBg.raycastTarget = false;
+
+        toastNotificationOutline = toastObj.AddComponent<Outline>();
+        toastNotificationOutline.effectColor = new Color(1f, 0.42f, 0.2f, 0.98f);
+        toastNotificationOutline.effectDistance = new Vector2(2.5f, -2.5f);
+
+        GameObject txtObj = new GameObject("Text", typeof(RectTransform));
+        txtObj.transform.SetParent(toastObj.transform, false);
+        RectTransform txtRT = txtObj.GetComponent<RectTransform>();
+        txtRT.anchorMin = Vector2.zero;
+        txtRT.anchorMax = Vector2.one;
+        txtRT.offsetMin = new Vector2(16, 0);
+        txtRT.offsetMax = new Vector2(-16, 0);
+
+        toastNotificationTMP = txtObj.AddComponent<TextMeshProUGUI>();
+        toastNotificationTMP.font = GetSafeFont();
+        toastNotificationTMP.text = "Không có dây, vui lòng chọn lại";
+        toastNotificationTMP.fontSize = 21;
+        toastNotificationTMP.fontStyle = FontStyles.Bold;
+        toastNotificationTMP.alignment = TextAlignmentOptions.Center;
+        toastNotificationTMP.color = new Color(1f, 0.92f, 0.88f, 1f);
+        toastNotificationTMP.raycastTarget = false;
+
+        toastNotificationRoot.gameObject.SetActive(false);
+    }
+
+    /// <summary>
+    /// Hiển thị thông báo Toast với nội dung cụ thể trong thời gian duration giây
+    /// </summary>
+    public void ShowToastNotification(string message, float duration = 2.5f)
+    {
+        if (toastNotificationRoot == null) return;
+        if (toastNotificationTMP != null) toastNotificationTMP.text = message;
+
+        if (toastNotificationCoroutine != null) StopCoroutine(toastNotificationCoroutine);
+        toastNotificationCoroutine = StartCoroutine(AnimateToastNotification(duration));
+    }
+
+    private IEnumerator AnimateToastNotification(float duration)
+    {
+        toastNotificationRoot.gameObject.SetActive(true);
+        CanvasGroup cg = toastNotificationRoot.GetComponent<CanvasGroup>();
+        if (cg == null) cg = toastNotificationRoot.gameObject.AddComponent<CanvasGroup>();
+
+        cg.alpha = 0f;
+        toastNotificationRoot.localScale = new Vector3(0.85f, 0.85f, 1f);
+
+        float inTime = 0.18f;
+        float elapsed = 0f;
+        while (elapsed < inTime)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / inTime);
+            cg.alpha = t;
+            toastNotificationRoot.localScale = Vector3.Lerp(new Vector3(0.85f, 0.85f, 1f), Vector3.one, t);
+            yield return null;
+        }
+        cg.alpha = 1f;
+        toastNotificationRoot.localScale = Vector3.one;
+
+        yield return new WaitForSeconds(duration);
+
+        float outTime = 0.22f;
+        elapsed = 0f;
+        while (elapsed < outTime)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / outTime);
+            cg.alpha = 1f - t;
+            yield return null;
+        }
+
+        toastNotificationRoot.gameObject.SetActive(false);
+        toastNotificationCoroutine = null;
+    }
+
+    /// <summary>
+    /// Tạm thời nhấp nháy dòng chữ thông báo trên huy hiệu trạng thái Wire Mode
+    /// </summary>
+    public void FlashWireModeBadgeMessage(string message, float duration = 2.5f)
+    {
+        if (wireModeBadgeTMP == null || wireModeFloatingBadge == null || !wireModeFloatingBadge.gameObject.activeInHierarchy) return;
+        if (badgeFlashCoroutine != null) StopCoroutine(badgeFlashCoroutine);
+        badgeFlashCoroutine = StartCoroutine(AnimateBadgeFlash(message, duration));
+    }
+
+    private IEnumerator AnimateBadgeFlash(string message, float duration)
+    {
+        wireModeBadgeTMP.text = message;
+        wireModeBadgeTMP.color = new Color(1f, 0.35f, 0.25f, 1f);
+
+        yield return new WaitForSeconds(duration);
+
+        if (wireModeBadgeTMP != null && wireConnectionController != null && wireConnectionController.IsWireMode)
+        {
+            bool isDelete = (wireConnectionController.CurrentSubMode == WireConnectionController.WireSubMode.Delete);
+            wireModeBadgeTMP.text = isDelete ? "CHẾ ĐỘ: XÓA DÂY  (BẤM ĐỂ THOÁT)" : "CHẾ ĐỘ: NỐI DÂY  (BẤM ĐỂ THOÁT)";
+            wireModeBadgeTMP.color = isDelete ? new Color(1f, 0.5f, 0.5f, 1f) : new Color(1f, 0.95f, 0.3f, 1f);
+        }
+        badgeFlashCoroutine = null;
     }
 
     /// <summary>
