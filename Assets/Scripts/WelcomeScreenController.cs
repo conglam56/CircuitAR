@@ -64,6 +64,13 @@ public class WelcomeScreenController : MonoBehaviour
     public Button btnBackToWelcome;     // Nút "‹ QUAY LẠI"
     public RectTransform rtBackBtn;
 
+    [Header("--- NÚT MÔ PHỎNG (GÓC TRÊN BÊN PHẢI) ---")]
+    public Button btnSimulate;          // Nút "MÔ PHỎNG ▶"
+    public RectTransform rtSimulateBtn;
+    private TextMeshProUGUI tmpSimulateLabel;
+    private Outline outlineSimulate;
+    private Image imgSimulateBg;
+
     [Header("--- POPUP TOAST 'TÍNH NĂNG ĐANG PHÁT TRIỂN' ---")]
     public GameObject modalToastRoot;   // Lớp phủ mờ toàn màn hình
     public RectTransform modalToastCard;// Thẻ thông báo ở giữa
@@ -148,6 +155,11 @@ public class WelcomeScreenController : MonoBehaviour
             BuildBackButtonUI();
         }
 
+        if (btnSimulate == null && autoGenerateUI)
+        {
+            BuildSimulateButtonUI();
+        }
+
         // 2. TRIỆT ĐỂ: Tắt toàn bộ Camera & ARSession ngay trong Awake để điện thoại
         // KHÔNG truy cập camera hay hỏi quyền lúc vừa bật app!
         StopARAndCamera();
@@ -188,6 +200,11 @@ public class WelcomeScreenController : MonoBehaviour
         if (backButtonCanvas == null && autoGenerateUI)
         {
             BuildBackButtonUI();
+        }
+
+        if (btnSimulate == null && autoGenerateUI)
+        {
+            BuildSimulateButtonUI();
         }
 
         if (isWelcomeScreenActive)
@@ -482,6 +499,13 @@ public class WelcomeScreenController : MonoBehaviour
             welcomeCanvasGroup.blocksRaycasts = true;
         }
 
+        // 6. Tắt chế độ Mô phỏng nếu đang bật
+        if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
+        {
+            CircuitSimulationManager.Instance.SetSimulationMode(false);
+            UpdateSimulateButtonState(false);
+        }
+
         // Bật lại khả năng bấm các nút
         if (btnManualCircuit != null) btnManualCircuit.interactable = true;
         if (btnAIScan != null) btnAIScan.interactable = true;
@@ -657,6 +681,117 @@ public class WelcomeScreenController : MonoBehaviour
         }
 
         Debug.Log("<color=cyan>[WelcomeScreenController]</color> Đã dựng hoàn tất Nút Quay Lại tại góc trên bên trái.");
+    }
+
+    /// <summary>
+    /// DỰNG NÚT "MÔ PHỎNG" Ở GÓC TRÊN BÊN PHẢI (ĐỐI XỨNG HOÀN HẢO VỚI NÚT QUAY LẠI)
+    /// </summary>
+    private void BuildSimulateButtonUI()
+    {
+        if (backButtonCanvas == null) return;
+
+        // 1. Dọn dẹp nút cũ nếu đã tồn tại để tránh đè chồng nhiều nút
+        Transform oldBtn = backButtonCanvas.transform.Find("Btn_SimulateMode");
+        if (oldBtn != null)
+        {
+            Destroy(oldBtn.gameObject);
+        }
+
+        // 2. Tạo GameObject nút tại góc trên bên phải
+        GameObject btnObj = new GameObject("Btn_SimulateMode", typeof(RectTransform), typeof(Image), typeof(Button));
+        btnObj.transform.SetParent(backButtonCanvas.transform, false);
+        rtSimulateBtn = btnObj.GetComponent<RectTransform>();
+
+        // Anchor & Pivot cố định ở góc trên - phải (1, 1)
+        rtSimulateBtn.anchorMin = new Vector2(1f, 1f);
+        rtSimulateBtn.anchorMax = new Vector2(1f, 1f);
+        rtSimulateBtn.pivot = new Vector2(1f, 1f);
+        rtSimulateBtn.sizeDelta = new Vector2(230f, 80f);
+        rtSimulateBtn.anchoredPosition = new Vector2(-40f, -65f);
+
+        imgSimulateBg = btnObj.GetComponent<Image>();
+        imgSimulateBg.sprite = roundedRectSprite;
+        imgSimulateBg.type = Image.Type.Sliced;
+        imgSimulateBg.color = new Color(0.05f, 0.09f, 0.16f, 0.92f);
+        imgSimulateBg.raycastTarget = true; // Chỉ nhận click trong phạm vi 230x80px
+
+        outlineSimulate = btnObj.AddComponent<Outline>();
+        outlineSimulate.effectColor = new Color(0f, 0.9f, 1f, 0.95f);
+        outlineSimulate.effectDistance = new Vector2(2f, -2f);
+
+        btnSimulate = btnObj.GetComponent<Button>();
+        btnSimulate.targetGraphic = imgSimulateBg;
+        btnSimulate.onClick.RemoveAllListeners();
+        btnSimulate.onClick.AddListener(OnClickToggleSimulateButton);
+
+        // 3. Tạo chữ bên trong nút
+        GameObject textObj = new GameObject("Text", typeof(RectTransform));
+        textObj.transform.SetParent(btnObj.transform, false);
+        RectTransform textRT = textObj.GetComponent<RectTransform>();
+        textRT.anchorMin = Vector2.zero;
+        textRT.anchorMax = Vector2.one;
+        textRT.offsetMin = Vector2.zero;
+        textRT.offsetMax = Vector2.zero;
+
+        tmpSimulateLabel = textObj.AddComponent<TextMeshProUGUI>();
+        tmpSimulateLabel.font = GetSafeFont();
+        tmpSimulateLabel.text = "MÔ PHỎNG >";
+        tmpSimulateLabel.fontSize = 22;
+        tmpSimulateLabel.fontStyle = FontStyles.Bold;
+        tmpSimulateLabel.alignment = TextAlignmentOptions.Center;
+        tmpSimulateLabel.color = Color.white;
+        tmpSimulateLabel.raycastTarget = false; // Không chặn raycast của nút
+
+        // 4. Đăng ký cử chỉ với ButtonInteractor nếu có
+        if (buttonInteractor != null)
+        {
+            buttonInteractor.RegisterButton(rtSimulateBtn);
+        }
+
+        Debug.Log("<color=green>[WelcomeScreenController]</color> Đã dựng hoàn tất Nút Mô Phỏng chuẩn kích thước 230x80 tại góc trên bên phải.");
+    }
+    /// <summary>
+    /// Xử lý bấm nút Mô phỏng
+    /// </summary>
+    public void OnClickToggleSimulateButton()
+    {
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.ToggleSimulationMode();
+            UpdateSimulateButtonState(CircuitSimulationManager.Instance.isSimulationMode);
+        }
+    }
+
+    /// <summary>
+    /// Cập nhật hiển thị nút khi Bật/Tắt mô phỏng
+    /// </summary>
+    public void UpdateSimulateButtonState(bool isSimulating)
+    {
+        if (tmpSimulateLabel != null)
+        {
+            tmpSimulateLabel.text = isSimulating ? "DỪNG LẠI ■" : "MÔ PHỎNG >";
+            tmpSimulateLabel.color = isSimulating ? new Color(1f, 0.45f, 0.45f, 1f) : Color.white;
+        }
+
+        if (outlineSimulate != null)
+        {
+            outlineSimulate.effectColor = isSimulating
+                ? new Color(1f, 0.35f, 0.2f, 0.95f) // Đổi viền sang cam đỏ cảnh báo đang đóng điện
+                : new Color(0f, 0.9f, 1f, 0.95f);  // Viền Cyan mặc định
+        }
+
+        if (imgSimulateBg != null)
+        {
+            imgSimulateBg.color = isSimulating
+                ? new Color(0.25f, 0.08f, 0.08f, 0.94f)
+                : new Color(0.05f, 0.09f, 0.16f, 0.92f);
+        }
+
+        // Tự động thu gọn menu bong bóng khi bật mô phỏng để màn hình thoáng
+        if (isSimulating && bubbleMenu != null && bubbleMenu.isBarExpanded)
+        {
+            bubbleMenu.RetractMenu();
+        }
     }
 
     // =========================================================================
