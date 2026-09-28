@@ -53,7 +53,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     public RectTransform[] componentButtons;    // Các nút linh kiện trong kho
     public TextMeshProUGUI mainBubbleLabelText; // Chữ dưới bong bóng chính
 
-    [Header("--- NÚT XÓA LINH KIỆN ĐANG CHỌN (TOP DELETE BUTTON) ---")]
+    [Header("--- NÚT XOAY VÀ XÓA LINH KIỆN ĐANG CHỌN (TOP ACTIONS) ---")]
+    public RectTransform btnRotateComp;
     public RectTransform btnDeleteComp;
 
     private TextMeshProUGUI wireModeLabelTMP;
@@ -117,6 +118,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private static Sprite roundedRectSprite;
     private static Sprite ringSprite;
     private static Sprite trashSprite;
+    private static Sprite rotateSprite;
     private Canvas targetCanvas;
     private CanvasScaler targetScaler;
     private Coroutine animCoroutine;
@@ -1036,6 +1038,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (btnConfirmCancel != null) buttonInteractor.RegisterButton(btnConfirmCancel);
         if (btnConfirmAction != null) buttonInteractor.RegisterButton(btnConfirmAction);
         if (btnDeleteComp != null) buttonInteractor.RegisterButton(btnDeleteComp);
+        if (btnRotateComp != null) buttonInteractor.RegisterButton(btnRotateComp);
         if (btnDrawerConnectWire != null) buttonInteractor.RegisterButton(btnDrawerConnectWire);
         if (btnDrawerDeleteWire != null) buttonInteractor.RegisterButton(btnDrawerDeleteWire);
     }
@@ -1317,7 +1320,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         // 8. Huy hiệu nổi Wire Mode hiển thị trên đầu màn hình (Requirement 3)
         BuildWireModeFloatingBadge(rootRT);
 
-        // 9. Nút XÓA hình tròn ở phía trên màn hình khi chọn linh kiện
+        // 9. Cặp nút XOAY và XÓA ở phía trên màn hình khi chọn linh kiện
+        BuildTopRotateButton(rootRT);
         BuildTopDeleteButton(rootRT);
 
         // 10. Khay lựa chọn Chế độ Dây (Nối Dây / Xóa Dây)
@@ -1987,6 +1991,95 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     }
 
     /// <summary>
+    /// <summary>
+    /// Tạo nút XOAY hình tròn ở phía trên màn hình (bên cạnh nút XÓA) khi có linh kiện được chọn.
+    /// Thiết kế, kích thước và style đồng bộ với các nút tròn trong Bubble Menu.
+    /// </summary>
+    private void BuildTopRotateButton(Transform parent)
+    {
+        GameObject btnObj = new GameObject("Btn_Top_Rotate_Comp", typeof(RectTransform), typeof(Image), typeof(Button));
+        btnObj.transform.SetParent(parent, false);
+
+        float gap = 24f;
+        float halfSpan = (bubbleDiameter + gap) * 0.5f;
+
+        btnRotateComp = btnObj.GetComponent<RectTransform>();
+        btnRotateComp.anchorMin = new Vector2(0.5f, 1f);
+        btnRotateComp.anchorMax = new Vector2(0.5f, 1f);
+        btnRotateComp.pivot = new Vector2(0.5f, 1f);
+        btnRotateComp.sizeDelta = new Vector2(bubbleDiameter, bubbleDiameter);
+        btnRotateComp.anchoredPosition = new Vector2(-halfSpan, -140f);
+
+        Image img = btnObj.GetComponent<Image>();
+        img.sprite = circleSprite;
+        img.color = new Color(0.06f, 0.12f, 0.22f, 0.96f);
+
+        Button btn = btnObj.GetComponent<Button>();
+        btn.targetGraphic = img;
+        btn.onClick.AddListener(OnClickRotateSelected);
+
+        // Viền tròn phát sáng neon xanh cyan
+        Outline outline = btnObj.AddComponent<Outline>();
+        outline.effectColor = new Color(0f, 0.85f, 1f, 0.98f);
+        outline.effectDistance = new Vector2(3.5f, -3.5f);
+
+        // Icon xoay ở giữa
+        GameObject iconObj = new GameObject("Icon", typeof(RectTransform), typeof(Image));
+        iconObj.transform.SetParent(btnObj.transform, false);
+        RectTransform iconRT = iconObj.GetComponent<RectTransform>();
+        iconRT.anchorMin = Vector2.zero;
+        iconRT.anchorMax = Vector2.one;
+        iconRT.offsetMin = new Vector2(18, 18);
+        iconRT.offsetMax = new Vector2(-18, -18);
+
+        Image iconImg = iconObj.GetComponent<Image>();
+        iconImg.sprite = GetRotateIconSprite();
+        iconImg.color = new Color(0.85f, 0.96f, 1f, 1f);
+        iconImg.preserveAspect = true;
+        iconImg.raycastTarget = false;
+
+        // Nhãn chữ bo tròn bên dưới nút
+        GameObject pillObj = new GameObject("Label_Pill", typeof(RectTransform), typeof(Image));
+        pillObj.transform.SetParent(btnObj.transform, false);
+        RectTransform pillRT = pillObj.GetComponent<RectTransform>();
+        pillRT.anchorMin = new Vector2(0.5f, 0f);
+        pillRT.anchorMax = new Vector2(0.5f, 0f);
+        pillRT.pivot = new Vector2(0.5f, 1f);
+        pillRT.sizeDelta = new Vector2(100, 32);
+        pillRT.anchoredPosition = new Vector2(0, -6);
+
+        Image pillImg = pillObj.GetComponent<Image>();
+        pillImg.sprite = roundedRectSprite;
+        pillImg.type = Image.Type.Sliced;
+        pillImg.color = new Color(0.06f, 0.12f, 0.22f, 0.96f);
+        pillImg.raycastTarget = false;
+
+        Outline pillOutline = pillObj.AddComponent<Outline>();
+        pillOutline.effectColor = new Color(0f, 0.85f, 1f, 0.98f);
+        pillOutline.effectDistance = new Vector2(2f, -2f);
+
+        GameObject textObj = new GameObject("Text", typeof(RectTransform));
+        textObj.transform.SetParent(pillObj.transform, false);
+        RectTransform textRT = textObj.GetComponent<RectTransform>();
+        textRT.anchorMin = Vector2.zero;
+        textRT.anchorMax = Vector2.one;
+        textRT.offsetMin = Vector2.zero;
+        textRT.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI labelTmp = textObj.AddComponent<TextMeshProUGUI>();
+        labelTmp.font = GetSafeFont();
+        labelTmp.text = "XOAY";
+        labelTmp.fontSize = 17;
+        labelTmp.fontStyle = FontStyles.Bold;
+        labelTmp.alignment = TextAlignmentOptions.Center;
+        labelTmp.color = new Color(0.3f, 0.9f, 1f, 1f);
+        labelTmp.raycastTarget = false;
+
+        // Mặc định ẩn, chỉ hiển thị khi có linh kiện được chọn
+        btnRotateComp.gameObject.SetActive(false);
+    }
+
+    /// <summary>
     /// Tạo đúng 1 nút XÓA hình tròn ở phía trên màn hình khi có linh kiện được chọn.
     /// Thiết kế, kích thước và style đồng bộ với các nút tròn trong Bubble Menu.
     /// </summary>
@@ -1995,12 +2088,15 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         GameObject btnObj = new GameObject("Btn_Top_Delete_Comp", typeof(RectTransform), typeof(Image), typeof(Button));
         btnObj.transform.SetParent(parent, false);
 
+        float gap = 24f;
+        float halfSpan = (bubbleDiameter + gap) * 0.5f;
+
         btnDeleteComp = btnObj.GetComponent<RectTransform>();
         btnDeleteComp.anchorMin = new Vector2(0.5f, 1f);
         btnDeleteComp.anchorMax = new Vector2(0.5f, 1f);
         btnDeleteComp.pivot = new Vector2(0.5f, 1f);
         btnDeleteComp.sizeDelta = new Vector2(bubbleDiameter, bubbleDiameter);
-        btnDeleteComp.anchoredPosition = new Vector2(0f, -140f);
+        btnDeleteComp.anchoredPosition = new Vector2(halfSpan, -140f);
 
         Image img = btnObj.GetComponent<Image>();
         img.sprite = circleSprite;
@@ -2082,6 +2178,16 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     }
 
     /// <summary>
+    /// Kiểm tra xem vị trí màn hình (screenPos) có nằm trên nút Xoay trên đỉnh không
+    /// </summary>
+    public bool IsPointerOverRotateButton(Vector2 screenPos)
+    {
+        if (btnRotateComp == null || !btnRotateComp.gameObject.activeInHierarchy) return false;
+        Camera cam = targetCanvas != null && targetCanvas.renderMode != RenderMode.ScreenSpaceOverlay ? targetCanvas.worldCamera : null;
+        return RectTransformUtility.RectangleContainsScreenPoint(btnRotateComp, screenPos, cam);
+    }
+
+    /// <summary>
     /// Xóa ngay lập tức linh kiện đang được chọn (không hỏi modal)
     /// </summary>
     public void OnClickDeleteSelected()
@@ -2094,13 +2200,30 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     }
 
     /// <summary>
-    /// Cập nhật hiển thị nút XÓA phía trên màn hình khi linh kiện được chọn hoặc bỏ chọn.
+    /// Xoay linh kiện đang được chọn đúng 90 độ (không deselect, không ẩn nút)
+    /// </summary>
+    public void OnClickRotateSelected()
+    {
+        Debug.Log("<color=cyan>[ARFloatingBubbleMenu]</color> Bấm nút XOAY 90° linh kiện đang chọn.");
+        if (tapToPlaceController != null)
+        {
+            tapToPlaceController.RotateSelectedComponent();
+        }
+    }
+
+    /// <summary>
+    /// Cập nhật hiển thị cặp nút XOAY và XÓA phía trên màn hình khi linh kiện được chọn hoặc bỏ chọn.
     /// </summary>
     public void UpdateSelectedComponentUI(GameObject comp)
     {
+        bool hasSelection = (comp != null);
         if (btnDeleteComp != null)
         {
-            btnDeleteComp.gameObject.SetActive(comp != null);
+            btnDeleteComp.gameObject.SetActive(hasSelection);
+        }
+        if (btnRotateComp != null)
+        {
+            btnRotateComp.gameObject.SetActive(hasSelection);
         }
     }
 
@@ -2108,6 +2231,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     {
         if (trashSprite == null) trashSprite = CreateProceduralTrashIcon(128);
         return trashSprite;
+    }
+
+    public static Sprite GetRotateIconSprite()
+    {
+        if (rotateSprite == null) rotateSprite = CreateProceduralRotateIcon(128);
+        return rotateSprite;
     }
 
     public static Sprite GetUndoSprite() => UIIconAssets.GetUndoSprite();
@@ -2440,6 +2569,57 @@ public class ARFloatingBubbleMenu : MonoBehaviour
                                 fill = false;
                             }
                         }
+                    }
+                }
+
+                colors[y * size + x] = fill ? Color.white : Color.clear;
+            }
+        }
+
+        tex.SetPixels(colors);
+        tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+    }
+
+    private static Sprite CreateProceduralRotateIcon(int size)
+    {
+        Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        Color[] colors = new Color[size * size];
+
+        float cx = size * 0.5f;
+        float cy = size * 0.5f;
+        float outerR = size * 0.36f;
+        float innerR = size * 0.24f;
+
+        for (int y = 0; y < size; y++)
+        {
+            float dy = y + 0.5f - cy;
+            for (int x = 0; x < size; x++)
+            {
+                float dx = x + 0.5f - cx;
+                float r = Mathf.Sqrt(dx * dx + dy * dy);
+                float angle = Mathf.Atan2(dy, dx) * Mathf.Rad2Deg;
+                if (angle < 0f) angle += 360f;
+
+                bool fill = false;
+
+                // 1. Cung tròn xoay ~275 độ (từ 65 độ đến 340 độ)
+                if (r >= innerR && r <= outerR && (angle >= 65f && angle <= 340f))
+                {
+                    fill = true;
+                }
+
+                // 2. Mũi tên chỉ hướng theo chiều kim đồng hồ ở đỉnh
+                float arrowMidY = cy + (outerR + innerR) * 0.5f;
+                float arrowTipX = cx + size * 0.14f;
+                float arrowBaseX = cx - size * 0.02f;
+                if (x + 0.5f >= arrowBaseX && x + 0.5f <= arrowTipX)
+                {
+                    float progress = (arrowTipX - (x + 0.5f)) / (arrowTipX - arrowBaseX);
+                    float halfH = progress * size * 0.14f;
+                    if (Mathf.Abs((y + 0.5f) - arrowMidY) <= halfH)
+                    {
+                        fill = true;
                     }
                 }
 
