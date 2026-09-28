@@ -23,18 +23,38 @@ public class AmmeterComponent : CircuitComponent
 
     public override void UpdateVisuals()
     {
-        float currentVal = Mathf.Abs(currentPassing);
+        // Giữ nguyên dấu để biết dòng đi xuôi hay ngược
+        bool isReversePolarity = currentPassing < -0.001f;
+        float absVal = Mathf.Abs(currentPassing);
 
         if (readingText != null)
         {
-            readingText.text = currentVal > 0.001f ? $"{currentVal:F2} A" : "0.00 A";
+            if (isReversePolarity)
+            {
+                // Hiển thị số âm cảnh báo mắc ngược cực
+                readingText.text = $"-{absVal:F2} A";
+                readingText.color = Color.red; // Đổi chữ sang màu đỏ cảnh báo
+            }
+            else
+            {
+                readingText.text = absVal > 0.001f ? $"{absVal:F2} A" : "0.00 A";
+                readingText.color = Color.black;
+            }
         }
 
         if (needleTransform != null)
         {
-            float t = Mathf.Clamp01(currentVal / maxRange);
-            float angle = Mathf.Lerp(needleMinAngle, needleMaxAngle, t);
-            needleTransform.localRotation = Quaternion.Euler(0, 0, angle);
+            if (isReversePolarity)
+            {
+                // Nếu mắc ngược cực, kim lệch ngược về bên trái vạch 0
+                needleTransform.localRotation = Quaternion.Euler(0, 0, needleMinAngle + 15f);
+            }
+            else
+            {
+                float t = Mathf.Clamp01(absVal / maxRange);
+                float angle = Mathf.Lerp(needleMinAngle, needleMaxAngle, t);
+                needleTransform.localRotation = Quaternion.Euler(0, 0, angle);
+            }
         }
     }
 }

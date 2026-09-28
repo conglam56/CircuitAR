@@ -173,7 +173,6 @@ public class CircuitSolver : MonoBehaviour
         // 4. KIỂM TRA ĐOẢN MẠCH TRỰC TIẾP (Dead Short Circuit)
         if (netPos == netNeg)
         {
-            // Cực dương và cực âm của pin bị nối tắt trực tiếp bằng dây dẫn!
             ResetComponents(activeComponents);
             SetCircuitState(true, true, 0f, 0f);
             TriggerCircuitWarning("NGẮN MẠCH (Đoản mạch trực tiếp tại nguồn)!");
@@ -181,20 +180,15 @@ public class CircuitSolver : MonoBehaviour
         }
 
         // 5. THIẾT LẬP HỆ PHƯƠNG TRÌNH THẾ NÚT MẠNG (Nodal Admittance Matrix)
-        // Hệ gồm N phương trình với N thế nút V[0..N-1].
-        // Chọn Nút Cực Âm làm Nút Gốc chuẩn: V[netNeg] = 0V
-        // Chọn Nút Cực Dương có điện thế: V[netPos] = E (Suất điện động của pin)
         int N = netCount;
         double[,] G = new double[N, N];
         double[] I_vector = new double[N];
 
-        // Thêm độ dẫn điện rò cực nhỏ (1e-9 Siemens) để tránh ma trận suy biến khi có nhánh treo
         for (int i = 0; i < N; i++)
         {
             G[i, i] += 1e-9;
         }
 
-        // Nạp độ dẫn điện g = 1/R của từng linh kiện (Bóng đèn, Khóa K, Ampe kế, Vôn kế) vào ma trận
         foreach (var comp in activeComponents)
         {
             if (comp == battery) continue;
@@ -203,7 +197,7 @@ public class CircuitSolver : MonoBehaviour
             int u = terminalToNet[comp.terminalA];
             int v = terminalToNet[comp.terminalB];
 
-            if (u == v) continue; // Hai cực của cùng 1 linh kiện bị nối tắt dây ngoài
+            if (u == v) continue;
 
             float r = Mathf.Max(comp.resistance, 0.0001f);
             double g = 1.0 / r;
@@ -214,29 +208,25 @@ public class CircuitSolver : MonoBehaviour
             G[v, u] -= g;
         }
 
-        // Áp đặt điều kiện biên cho Nút Nguồn:
-        // Cố định V[netNeg] = 0
+        // Điều kiện biên cho Nguồn Pin
         for (int j = 0; j < N; j++) G[netNeg, j] = 0;
         G[netNeg, netNeg] = 1.0;
         I_vector[netNeg] = 0.0;
 
-        // Cố định V[netPos] = battery.voltageSource
         for (int j = 0; j < N; j++) G[netPos, j] = 0;
         G[netPos, netPos] = 1.0;
         I_vector[netPos] = battery.voltageSource;
 
-        // 6. GIẢI HỆ PHƯƠNG TRÌNH BẰNG PHƯƠNG PHÁP KHỬ GAUSS (Gaussian Elimination)
+        // 6. GIẢI HỆ PHƯƠNG TRÌNH BẰNG PHƯƠNG PHÁP KHỬ GAUSS
         double[] V = SolveLinearSystem(G, I_vector, N);
 
         if (V == null)
         {
-            // Không giải được thế nút -> Mạch hở
             ResetComponents(activeComponents);
             SetCircuitState(false, false, 0f, 0f);
             return;
         }
 
-        // Cập nhật điện thế tương đối V tại từng đầu cực vật lý
         foreach (var t in allTerminals)
         {
             int netIdx = terminalToNet[t];
@@ -260,34 +250,35 @@ public class CircuitSolver : MonoBehaviour
             int u = terminalToNet[comp.terminalA];
             int v = terminalToNet[comp.terminalB];
 
-            float uDrop = Mathf.Abs((float)(V[u] - V[v]));
+            float uDrop = (float)(V[u] - V[v]);
             float current = uDrop / Mathf.Max(comp.resistance, 0.0001f);
 
-            // Kiểm tra tải tiêu thụ thực tế (Bóng đèn)
+            // Phân bổ thông số điện học xuống linh kiện (Ampe kế, Vôn kế sẽ tự động nhận giá trị âm/dương chính xác)
+            comp.ApplyElectricalState(current, uDrop);
+
             if (comp is BulbComponent)
             {
                 hasLoadComponent = true;
             }
 
-            // Nếu nối vào nhánh có dòng điện chạy qua cực dương pin
+            // Tính dòng điện tổng rời khỏi cực dương của nguồn (netPos) đúng chiều
             if (u == netPos || v == netPos)
             {
-                totalLoadCurrent += current;
+                float currentAwayFromPos = (u == netPos) ? current : -current;
+                if (currentAwayFromPos > 0f)
+                {
+                    totalLoadCurrent += currentAwayFromPos;
+                }
             }
-
-            // Phân bổ dữ liệu xuống từng linh kiện để cập nhật hiển thị (Đèn sáng, kim quay)
-            comp.ApplyElectricalState(current, uDrop);
         }
 
-        // 8. ĐÁNH GIÁ MẠCH KÍN, HỞ MẠCH HOẶC ĐOẢN MẠCH
-        // Dòng điện tổng qua pin
+        // 8. ĐÁNH GIÁ TRẠNG THÁI MẠCH
         float calculatedCurrent = totalLoadCurrent;
         if (calculatedCurrent > 0.001f)
         {
             totalLoadResistance = battery.voltageSource / calculatedCurrent;
         }
 
-        // Nếu điện trở tải ngoài quá nhỏ (< 0.1 Ohm) và không có bóng đèn cản dòng -> Ngắn mạch / Đoản mạch
         if (calculatedCurrent > 15f || (calculatedCurrent > 1f && totalLoadResistance < 0.1f && !hasLoadComponent))
         {
             ResetComponents(activeComponents);
@@ -296,7 +287,6 @@ public class CircuitSolver : MonoBehaviour
             return;
         }
 
-        // Nếu dòng điện quá nhỏ (< 1mA) -> Mạch hở (Khóa K mở hoặc dây chưa kín vòng)
         if (calculatedCurrent < 0.001f)
         {
             ResetComponents(activeComponents);
@@ -305,16 +295,12 @@ public class CircuitSolver : MonoBehaviour
             return;
         }
 
-        // Mạch kín hoàn hảo!
         battery.ApplyElectricalState(calculatedCurrent, battery.voltageSource);
         SetCircuitState(true, false, calculatedCurrent, totalLoadResistance);
 
         Debug.Log($"<color=green>[CircuitSolver] MẠCH KÍN THÀNH CÔNG!</color> I = {calculatedCurrent:F3} A, R_td = {totalLoadResistance:F2} Ohm");
     }
 
-    /// <summary>
-    /// Thuật toán khử Gauss giải hệ ma trận Ax = B
-    /// </summary>
     private double[] SolveLinearSystem(double[,] A, double[] b, int n)
     {
         double[,] M = (double[,])A.Clone();
@@ -322,7 +308,6 @@ public class CircuitSolver : MonoBehaviour
 
         for (int i = 0; i < n; i++)
         {
-            // Tìm phần tử khử lớn nhất (Partial Pivoting)
             int maxRow = i;
             double maxVal = Math.Abs(M[i, i]);
             for (int k = i + 1; k < n; k++)
@@ -334,9 +319,8 @@ public class CircuitSolver : MonoBehaviour
                 }
             }
 
-            if (maxVal < 1e-12) return null; // Ma trận suy biến
+            if (maxVal < 1e-12) return null;
 
-            // Hoán vị hàng
             if (maxRow != i)
             {
                 for (int k = i; k < n; k++)
@@ -350,7 +334,6 @@ public class CircuitSolver : MonoBehaviour
                 x[maxRow] = tmpB;
             }
 
-            // Khử các hàng bên dưới
             for (int k = i + 1; k < n; k++)
             {
                 double factor = M[k, i] / M[i, i];
@@ -362,7 +345,6 @@ public class CircuitSolver : MonoBehaviour
             }
         }
 
-        // Thế ngược (Back Substitution)
         double[] result = new double[n];
         for (int i = n - 1; i >= 0; i--)
         {

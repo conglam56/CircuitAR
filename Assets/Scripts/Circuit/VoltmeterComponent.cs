@@ -23,18 +23,29 @@ public class VoltmeterComponent : CircuitComponent
 
     public override void UpdateVisuals()
     {
-        float voltageVal = Mathf.Abs(voltageDrop);
+        // Xác định xem điện áp rơi từ cực A sang cực B có bị âm không
+        bool isReversePolarity = voltageDrop < -0.01f;
+        float absVoltage = Mathf.Abs(voltageDrop);
 
         if (readingText != null)
         {
-            readingText.text = voltageVal > 0.01f ? $"{voltageVal:F1} V" : "0.0 V";
-        }
-
-        if (needleTransform != null)
-        {
-            float t = Mathf.Clamp01(voltageVal / maxRange);
-            float angle = Mathf.Lerp(needleMinAngle, needleMaxAngle, t);
-            needleTransform.localRotation = Quaternion.Euler(0, 0, angle);
+            if (absVoltage <= 0.01f)
+            {
+                readingText.text = "0.0 V";
+                readingText.color = Color.black;
+            }
+            else if (isReversePolarity)
+            {
+                // Hiển thị dấu âm và đổi chữ màu đỏ để cảnh báo mắc ngược cực
+                readingText.text = $"-{absVoltage:F1} V";
+                readingText.color = Color.red;
+            }
+            else
+            {
+                // Mắc đúng cực hiển thị số dương bình thường
+                readingText.text = $"{absVoltage:F1} V";
+                readingText.color = Color.black;
+            }
         }
     }
 }
