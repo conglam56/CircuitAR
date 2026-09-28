@@ -256,6 +256,55 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5ba3c50c2cb46dc9e916dd3a33c8a488, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!1 &278780536
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 278780538}
+  - component: {fileID: 278780537}
+  m_Layer: 0
+  m_Name: CircuitSolverManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &278780537
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 278780536}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c58d8ad68ae191d4f8648fa22480b595, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CircuitSolver
+  isCircuitClosed: 0
+  isShortCircuit: 0
+  totalCurrent: 0
+  equivalentResistance: 0
+  bubbleMenu: {fileID: 0}
+--- !u!4 &278780538
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 278780536}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 680.8637, y: 2283.8708, z: -0.79055}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &295728017
 GameObject:
   m_ObjectHideFlags: 0
@@ -526,11 +575,16 @@ MonoBehaviour:
   toolboxDrawer: {fileID: 0}
   componentButtons: []
   mainBubbleLabelText: {fileID: 0}
-  selectedComponentBadge: {fileID: 0}
-  selectedCompLabelTMP: {fileID: 0}
+  btnRotateComp: {fileID: 0}
   btnDeleteComp: {fileID: 0}
-  btnDeselectComp: {fileID: 0}
-  trashZoneRoot: {fileID: 0}
+  wireToolDrawer: {fileID: 0}
+  btnDrawerConnectWire: {fileID: 0}
+  btnDrawerDeleteWire: {fileID: 0}
+  isWireDrawerOpen: 0
+  toastNotificationRoot: {fileID: 0}
+  toastNotificationTMP: {fileID: 0}
+  toastNotificationBg: {fileID: 0}
+  toastNotificationOutline: {fileID: 0}
   confirmationDialogRoot: {fileID: 0}
   confirmationCard: {fileID: 0}
   confirmationGroup: {fileID: 0}
@@ -1739,7 +1793,6 @@ GameObject:
   - component: {fileID: 1222358475}
   - component: {fileID: 1222358474}
   - component: {fileID: 1222358479}
-  - component: {fileID: 1222358480}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -2004,22 +2057,6 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
---- !u!114 &1222358480
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1222358472}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b79e4df7250e5fd43bb813fcd78c9f91, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::InteractionDiagnosticHUD
-  arCamera: {fileID: 1222358478}
-  layerMask:
-    serializedVersion: 2
-    m_Bits: 4294967295
 --- !u!224 &1229135957 stripped
 RectTransform:
   m_CorrespondingSourceObject: {fileID: 3259285889726014650, guid: 5713b959e3c77a58fb258133fc8e4aef, type: 3}
@@ -3594,6 +3631,8 @@ MonoBehaviour:
   maxRaycastDistance: 15
   activeWires: []
   isWireMode: 0
+  currentSubMode: 0
+  floatingMenu: {fileID: 0}
 --- !u!4 &2123586960
 Transform:
   m_ObjectHideFlags: 0
@@ -3887,3 +3926,4 @@ SceneRoots:
   - {fileID: 1477617177}
   - {fileID: 2123586960}
   - {fileID: 87213602}
+  - {fileID: 278780538}

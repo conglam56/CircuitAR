@@ -1,7 +1,7 @@
 using System.Collections;
 using UnityEngine;
 
-public class SwitchComponent : MonoBehaviour
+public class SwitchComponent : CircuitComponent
 {
     [Header("Cấu hình Cần gạt")]
     [Tooltip("Kéo Transform của thanh cần gạt vào đây")]
@@ -23,23 +23,35 @@ public class SwitchComponent : MonoBehaviour
     private bool isRotating = false;
     private Coroutine rotateCoroutine = null;
 
+    protected override void Awake()
+    {
+        componentType = ComponentType.Switch;
+        currentResistance = isClosed ? resistanceClosed : resistanceOpen;
+        resistance = currentResistance;
+        voltageSource = 0f;
+        base.Awake();
+
+        if (terminalA != null) terminalA.polarity = TerminalPolarity.Neutral;
+        if (terminalB != null) terminalB.polarity = TerminalPolarity.Neutral;
+    }
+
     void Start()
     {
-        // Khởi tạo vị trí cần gạt và điện trở ban đầu
         if (leverTransform != null)
         {
             leverTransform.localRotation = Quaternion.Euler(isClosed ? closedRotationAngles : openRotationAngles);
         }
         currentResistance = isClosed ? resistanceClosed : resistanceOpen;
+        resistance = currentResistance;
     }
 
     public void ToggleSwitch()
     {
-        // Khóa debounce: Đang trong quá trình xoay thì không nhận lệnh đè
         if (isRotating) return;
 
         isClosed = !isClosed;
         currentResistance = isClosed ? resistanceClosed : resistanceOpen;
+        resistance = currentResistance;
 
         if (rotateCoroutine != null) StopCoroutine(rotateCoroutine);
 
@@ -47,6 +59,9 @@ public class SwitchComponent : MonoBehaviour
         rotateCoroutine = StartCoroutine(AnimateLever(Quaternion.Euler(targetAngles)));
 
         Debug.Log($"<color=cyan>[SwitchComponent]</color> Khóa K -> {(isClosed ? "ĐÓNG (Kín mạch)" : "MỞ (Hở mạch)")}, R = {currentResistance} Ohm");
+
+        // Báo cho hệ thống tính toán lại mạch điện
+        NotifyConnectionChanged();
     }
 
     private IEnumerator AnimateLever(Quaternion targetRot)
@@ -61,7 +76,6 @@ public class SwitchComponent : MonoBehaviour
         {
             elapsed += Time.deltaTime;
             float t = Mathf.Clamp01(elapsed / rotateDuration);
-            // Làm mượt chuyển động xoay
             float smoothT = Mathf.SmoothStep(0f, 1f, t);
             leverTransform.localRotation = Quaternion.Slerp(startRot, targetRot, smoothT);
             yield return null;
@@ -71,6 +85,8 @@ public class SwitchComponent : MonoBehaviour
         isRotating = false;
     }
 
-    // LƯU Ý QUAN TRỌNG: Tuyệt đối KHÔNG viết hàm OnMouseDown() ở đây
-    // để tránh bị xung đột kích hoạt 2 lần với SwitchInteractor.
+    public override void UpdateVisuals()
+    {
+        // Hiển thị trực quan của Khóa K được điều khiển qua góc gạt leverTransform
+    }
 }

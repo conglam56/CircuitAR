@@ -372,7 +372,7 @@ GameObject:
   - component: {fileID: 4967109630069526250}
   - component: {fileID: 3008323807741524960}
   m_Layer: 0
-  m_Name: Object001
+  m_Name: Bulb_Glass
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -885,9 +885,9 @@ MonoBehaviour:
   voltageDrop: 0
   bulbResistance: 10
   minLightingCurrent: 0.05
-  bulbGlassRenderer: {fileID: 0}
+  bulbGlassRenderer: {fileID: 3008323807741524960}
   pointLightSource: {fileID: 7651197875520983935}
-  emissionColor: {r: 1, g: 0.85, b: 0.3, a: 1}
+  emissionColor: {r: 1, g: 0.85, b: 0.3, a: 0.6117647}
 --- !u!1 &8700065377631683567
 GameObject:
   m_ObjectHideFlags: 0
