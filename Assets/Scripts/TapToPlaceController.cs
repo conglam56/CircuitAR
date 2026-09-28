@@ -160,6 +160,43 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    // =========================================================================
+    // ĐĂNG KÝ SỰ KIỆN CHUYỂN CHẾ ĐỘ MÔ PHỎNG (CIRCUIT SIMULATION MANAGER)
+    // =========================================================================
+
+    void OnEnable()
+    {
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged += HandleSimulationModeChanged;
+        }
+    }
+
+    void OnDisable()
+    {
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged -= HandleSimulationModeChanged;
+        }
+    }
+
+    private void HandleSimulationModeChanged(bool isSimulating)
+    {
+        if (isSimulating)
+        {
+            // 1. Nếu đang có linh kiện được chọn -> Bỏ chọn ngay và tắt viền highlight
+            ClearSelectedComponent();
+
+            // 2. Nếu đang xem trước (Preview) chuẩn bị đặt vật mới -> Hủy luôn preview
+            CancelPlacement();
+
+            // 3. Nếu đang dở thao tác kéo (Drag) linh kiện -> Nhả tay lập tức
+            if (isDragging)
+            {
+                ReleaseDraggedObject();
+            }
+        }
+    }
     void Start()
     {
         mainCamera = Camera.main;
@@ -168,10 +205,21 @@ public class TapToPlaceController : MonoBehaviour
         if (menuHUD == null) menuHUD = FindObjectOfType<MenuHUDController>();
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
         if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged -= HandleSimulationModeChanged;
+            CircuitSimulationManager.Instance.OnSimulationModeChanged += HandleSimulationModeChanged;
+        }
     }
 
     void Update()
     {
+        // Nếu đang bật Chế độ Mô phỏng, khóa hoàn toàn các thao tác chọn, nhấc và di chuyển linh kiện
+        if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
+        {
+            return; // Dừng toàn bộ xử lý cử chỉ chọn/kéo phía dưới
+        }
+
         if (boardCalibrator != null && !boardCalibrator.IsBoardTracking)
         {
             // Preserve the selection, but hide its camera-relative preview during recovery.
