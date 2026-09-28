@@ -37,6 +37,7 @@ public class TapToPlaceController : MonoBehaviour
     public GameObject DraggedObject => draggedObject;
     private bool isDragging = false;
     public bool IsDragging => isDragging;
+    private bool isHoveringTrash = false;
     private ARFloatingBubbleMenu floatingMenu = null;
     private float unpinchGraceTimer = 0f;
     private Vector3 lastValidDragPos = Vector3.zero;
@@ -48,12 +49,11 @@ public class TapToPlaceController : MonoBehaviour
     private Camera mainCamera;
     private TwoPointSpatialCalibrator boardCalibrator;
 
-    [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY (REQUIREMENTS 1 & 3) ---")]
+    [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA (REQUIREMENT 3) ---")]
     public GameObject SelectedComponent { get; private set; }
     public event System.Action<GameObject> OnSelectedComponentChanged;
     private Dictionary<Renderer, Material[]> originalSelectedMaterials = new Dictionary<Renderer, Material[]>();
     private Material selectionHighlightMat = null;
-    private Material selectionInvalidMat = null;
 
     /// <summary>
     /// Chọn một linh kiện trên bàn và hiển thị visual feedback
@@ -67,7 +67,7 @@ public class TapToPlaceController : MonoBehaviour
 
         if (SelectedComponent != null)
         {
-            UpdateSelectedComponentVisual();
+            ApplySelectionHighlight(SelectedComponent);
         }
 
         OnSelectedComponentChanged?.Invoke(SelectedComponent);
@@ -97,73 +97,11 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Xoay linh kiện đang được chọn 90 độ, kiểm tra va chạm bằng SAT và cập nhật visual feedback
-    /// </summary>
-    public void RotateSelectedComponent()
-    {
-        if (SelectedComponent == null) return;
-
-        Quaternion oldRot = SelectedComponent.transform.rotation;
-        SelectedComponent.transform.Rotate(Vector3.up, 90f, Space.Self);
-        Quaternion newRot = SelectedComponent.transform.rotation;
-
-        // Cập nhật tọa độ dây nối theo thời gian thực
-        if (wireConnectionController != null)
-        {
-            wireConnectionController.UpdateActiveWirePositionsExternal();
-        }
-
-        // Kiểm tra hợp lệ vị trí sau khi xoay (CheckOverlap) và đổi màu tương ứng
-        UpdateSelectedComponentVisual();
-
-        // Ghi nhận vào lịch sử Undo/Redo
-        History.RecordAction(new RotateComponentAction(SelectedComponent, oldRot, newRot, wireConnectionController, this));
-    }
-
-    /// <summary>
-    /// Đồng bộ visual cho linh kiện khi Undo/Redo thao tác xoay
-    /// </summary>
-    public void NotifyComponentRotated(GameObject obj)
-    {
-        if (obj == null) return;
-        if (SelectedComponent == obj)
-        {
-            UpdateSelectedComponentVisual();
-        }
-    }
-
-    private void EnsureOriginalMaterialsSaved(GameObject obj)
-    {
-        if (obj == null) return;
-        if (originalSelectedMaterials.Count > 0) return;
-
-        Renderer[] rens = obj.GetComponentsInChildren<Renderer>(true);
-        foreach (var r in rens)
-        {
-            if (r is LineRenderer) continue;
-            originalSelectedMaterials[r] = r.sharedMaterials;
-        }
-    }
-
-    public void UpdateSelectedComponentVisual()
-    {
-        if (SelectedComponent == null) return;
-        bool isOverlapping = CheckOverlap(SelectedComponent.transform.position, SelectedComponent, out _);
-        if (isOverlapping)
-        {
-            ApplySelectionInvalid(SelectedComponent);
-        }
-        else
-        {
-            ApplySelectionHighlight(SelectedComponent);
-        }
-    }
-
     private void ApplySelectionHighlight(GameObject obj)
     {
         if (obj == null) return;
-        EnsureOriginalMaterialsSaved(obj);
+        Renderer[] rens = obj.GetComponentsInChildren<Renderer>(true);
+        originalSelectedMaterials.Clear();
 
         if (selectionHighlightMat == null)
         {
@@ -180,43 +118,12 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
-        Renderer[] rens = obj.GetComponentsInChildren<Renderer>(true);
         foreach (var r in rens)
         {
             if (r is LineRenderer) continue;
+            originalSelectedMaterials[r] = r.sharedMaterials;
             Material[] mats = new Material[r.sharedMaterials.Length];
             for (int i = 0; i < mats.Length; i++) mats[i] = selectionHighlightMat;
-            r.materials = mats;
-        }
-    }
-
-    private void ApplySelectionInvalid(GameObject obj)
-    {
-        if (obj == null) return;
-        EnsureOriginalMaterialsSaved(obj);
-
-        if (selectionInvalidMat == null)
-        {
-            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null) shader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (shader == null) shader = Shader.Find("Sprites/Default");
-            selectionInvalidMat = new Material(shader);
-            Color invalidColor = new Color(1f, 0.22f, 0.22f, 0.9f);
-            if (selectionInvalidMat.HasProperty("_BaseColor")) selectionInvalidMat.SetColor("_BaseColor", invalidColor);
-            else if (selectionInvalidMat.HasProperty("_Color")) selectionInvalidMat.color = invalidColor;
-            if (selectionInvalidMat.HasProperty("_EmissionColor"))
-            {
-                selectionInvalidMat.EnableKeyword("_EMISSION");
-                selectionInvalidMat.SetColor("_EmissionColor", new Color(0.9f, 0.1f, 0.1f) * 0.8f);
-            }
-        }
-
-        Renderer[] rens = obj.GetComponentsInChildren<Renderer>(true);
-        foreach (var r in rens)
-        {
-            if (r is LineRenderer) continue;
-            Material[] mats = new Material[r.sharedMaterials.Length];
-            for (int i = 0; i < mats.Length; i++) mats[i] = selectionInvalidMat;
             r.materials = mats;
         }
     }
@@ -573,6 +480,10 @@ public class TapToPlaceController : MonoBehaviour
                         isDragBlocked = false;
                         unpinchGraceTimer = 0f;
 
+                        // Kích hoạt Drag-to-Trash UI trên màn hình
+                        if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
+                        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(true);
+
                         SelectComponent(draggedObject);
                         hitPlaced = true;
                         break;
@@ -585,13 +496,6 @@ public class TapToPlaceController : MonoBehaviour
             // Nếu pinch vào mặt bàn trống không trúng linh kiện nào -> Bỏ chọn linh kiện hiện tại
             if (!hitPlaced)
             {
-                // Nếu đang pinch vào nút Xóa hoặc Xoay ở trên màn hình, không bỏ chọn linh kiện
-                if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
-                if (floatingMenu != null && (floatingMenu.IsPointerOverDeleteButton(screenPos) || floatingMenu.IsPointerOverRotateButton(screenPos)))
-                {
-                    return;
-                }
-
                 for (int i = 0; i < allHits.Length; i++)
                 {
                     if (allHits[i].collider.CompareTag("CircuitBoard") || allHits[i].collider.name.Contains("Board"))
@@ -629,7 +533,13 @@ public class TapToPlaceController : MonoBehaviour
                     }
                 }
 
-                if (foundBoard)
+                // Kiểm tra xem con trỏ kéo có đang nằm trên Thùng Rác (Drag-to-Trash) không
+                if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
+                bool overTrash = (floatingMenu != null && floatingMenu.IsPointerOverTrashZone(screenPos));
+                isHoveringTrash = overTrash;
+                if (floatingMenu != null) floatingMenu.SetTrashZoneHovered(overTrash);
+
+                if (foundBoard && !overTrash)
                 {
                     // Bộ lọc làm mượt di chuyển:
                     // Bỏ qua micro-jitter (< 1.5mm) từ landmark MediaPipe để tránh rung vật
@@ -644,21 +554,13 @@ public class TapToPlaceController : MonoBehaviour
                     float margin = isDragBlocked ? 0.008f : 0f;
                     bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, margin);
 
-                    // Duy trì góc xoay tương đối so với mặt bàn (nếu linh kiện đã từng xoay)
-                    Quaternion dragTargetRot = boardHit.collider.transform.rotation * (Quaternion.Inverse(boardHit.collider.transform.rotation) * dragStartRot);
-
                     if (!isOverlapping)
                     {
                         isDragBlocked = false;
                         draggedObject.transform.position = currentSmoothedDragPos;
-                        draggedObject.transform.rotation = dragTargetRot;
+                        draggedObject.transform.rotation = boardHit.collider.transform.rotation;
                         lastValidDragPos = currentSmoothedDragPos;
-                        lastValidDragRot = dragTargetRot;
-
-                        if (SelectedComponent == draggedObject)
-                        {
-                            ApplySelectionHighlight(draggedObject);
-                        }
+                        lastValidDragRot = boardHit.collider.transform.rotation;
                     }
                     else
                     {
@@ -666,11 +568,6 @@ public class TapToPlaceController : MonoBehaviour
                         // Giữ nguyên ở điểm hợp lệ gần nhất, ngăn không cho đâm xuyên và không snap giật
                         draggedObject.transform.position = lastValidDragPos;
                         draggedObject.transform.rotation = lastValidDragRot;
-
-                        if (SelectedComponent == draggedObject)
-                        {
-                            ApplySelectionInvalid(draggedObject);
-                        }
                     }
 
                     // Cập nhật tọa độ dây nối theo thời gian thực khi di chuyển linh kiện
@@ -678,6 +575,11 @@ public class TapToPlaceController : MonoBehaviour
                     {
                         wireConnectionController.UpdateActiveWirePositionsExternal();
                     }
+                }
+                else if (overTrash)
+                {
+                    // Khi đang rê trên thùng rác: giữ nguyên vị trí trước đó
+                    draggedObject.transform.position = lastValidDragPos;
                 }
             }
             else
@@ -696,17 +598,29 @@ public class TapToPlaceController : MonoBehaviour
     {
         if (draggedObject != null)
         {
-            // Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
+            // Trường hợp 1: Nhả tay trên Thùng Rác -> XÓA LINH KIỆN (Drag-to-Trash)
+            if (isHoveringTrash)
+            {
+                GameObject objToDelete = draggedObject;
+                isDragging = false;
+                draggedObject = null;
+                isHoveringTrash = false;
+                if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
+
+                DeletePlacedComponent(objToDelete);
+                ClearSelectedComponent();
+                Debug.Log($"<color=red>[TapToPlace]</color> Đã kéo linh kiện [{objToDelete.name}] vào thùng rác để xóa thành công.");
+                return;
+            }
+
+            if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
+
+            // Trường hợp 2: Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
             bool isOverlapping = CheckOverlap(draggedObject.transform.position, draggedObject, out _);
             if (isOverlapping && lastValidDragPos != Vector3.zero)
             {
                 draggedObject.transform.position = lastValidDragPos;
                 draggedObject.transform.rotation = lastValidDragRot;
-            }
-
-            if (SelectedComponent == draggedObject)
-            {
-                UpdateSelectedComponentVisual();
             }
 
             // Ghi nhận vào lịch sử thao tác nếu có dịch chuyển (Requirement 2 & 3)
@@ -724,8 +638,10 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
+        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
         isDragging = false;
         draggedObject = null;
+        isHoveringTrash = false;
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
     }
@@ -798,6 +714,8 @@ public class TapToPlaceController : MonoBehaviour
         canPlace = false;
         isDragging = false;
         draggedObject = null;
+        isHoveringTrash = false;
+        if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
         Debug.Log("<color=yellow>[TapToPlace]</color> Đã hủy chế độ đặt linh kiện (Placement Cancelled).");
     }
 
@@ -1490,51 +1408,6 @@ public class MoveComponentAction : IUndoableAction
             targetObject.transform.rotation = newRotation;
             wireController?.UpdateActiveWirePositionsExternal();
             Debug.Log($"<color=cyan>[History]</color> Redo: Đưa [{targetObject.name}] tới vị trí sau khi di chuyển.");
-        }
-    }
-}
-
-/// <summary>
-/// Hành động xoay linh kiện 90 độ có hỗ trợ Undo / Redo.
-/// </summary>
-public class RotateComponentAction : IUndoableAction
-{
-    private readonly GameObject targetObject;
-    private readonly Quaternion oldRotation;
-    private readonly Quaternion newRotation;
-    private readonly WireConnectionController wireController;
-    private readonly TapToPlaceController placeController;
-
-    public string Description => $"Xoay [{targetObject?.name}] 90°";
-
-    public RotateComponentAction(GameObject obj, Quaternion oldRot, Quaternion newRot, WireConnectionController wController, TapToPlaceController pController)
-    {
-        targetObject = obj;
-        oldRotation = oldRot;
-        newRotation = newRot;
-        wireController = wController;
-        placeController = pController;
-    }
-
-    public void Undo()
-    {
-        if (targetObject != null)
-        {
-            targetObject.transform.rotation = oldRotation;
-            wireController?.UpdateActiveWirePositionsExternal();
-            placeController?.NotifyComponentRotated(targetObject);
-            Debug.Log($"<color=cyan>[History]</color> Undo: Đưa [{targetObject.name}] về góc xoay trước.");
-        }
-    }
-
-    public void Redo()
-    {
-        if (targetObject != null)
-        {
-            targetObject.transform.rotation = newRotation;
-            wireController?.UpdateActiveWirePositionsExternal();
-            placeController?.NotifyComponentRotated(targetObject);
-            Debug.Log($"<color=cyan>[History]</color> Redo: Xoay lại [{targetObject.name}].");
         }
     }
 }
