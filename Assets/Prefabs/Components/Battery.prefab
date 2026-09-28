@@ -10,7 +10,6 @@ GameObject:
   m_Component:
   - component: {fileID: 5835598006729097930}
   - component: {fileID: -7004417973110150}
-  - component: {fileID: 3902471505473918107}
   m_Layer: 0
   m_Name: Battery
   m_TagString: Untagged
@@ -55,28 +54,6 @@ BoxCollider:
   serializedVersion: 3
   m_Size: {x: 3.2356982, y: 3.1923885, z: 1.6689712}
   m_Center: {x: -0.021018982, y: 1.1664293, z: -0.062478125}
---- !u!114 &3902471505473918107
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 7794568006292757454}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ea692699912f0be4e8130bb987764958, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::BatteryComponent
-  componentType: 0
-  componentName: LinhKien
-  terminalA: {fileID: 5105554150754945107}
-  terminalB: {fileID: 552423935344287328}
-  resistance: 1
-  voltageSource: 0
-  currentPassing: 0
-  voltageDrop: 0
-  batteryVoltage: 4.2
-  internalResistance: 0.5
 --- !u!1001 &3591157492526442954
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -90,16 +67,8 @@ PrefabInstance:
       value: batery
       objectReference: {fileID: 0}
     - target: {fileID: 2983034182955546626, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
-      propertyPath: m_Name
-      value: Terminal_Pos
-      objectReference: {fileID: 0}
-    - target: {fileID: 2983034182955546626, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
       propertyPath: m_TagString
       value: Terminal
-      objectReference: {fileID: 0}
-    - target: {fileID: 3039893539087272356, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
-      propertyPath: m_Name
-      value: Terminal_Neg
       objectReference: {fileID: 0}
     - target: {fileID: 3039893539087272356, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
       propertyPath: m_TagString
@@ -156,15 +125,9 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 2983034182955546626, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
       insertIndex: -1
       addedObject: {fileID: 4005829073069870788}
-    - targetCorrespondingSourceObject: {fileID: 2983034182955546626, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 5105554150754945107}
     - targetCorrespondingSourceObject: {fileID: 3039893539087272356, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
       insertIndex: -1
       addedObject: {fileID: 1338524132508789008}
-    - targetCorrespondingSourceObject: {fileID: 3039893539087272356, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
-      insertIndex: -1
-      addedObject: {fileID: 552423935344287328}
   m_SourcePrefab: {fileID: 100100000, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
 --- !u!1 &1779915255819588040 stripped
 GameObject:
@@ -186,29 +149,12 @@ SphereCollider:
     serializedVersion: 2
     m_Bits: 0
   m_LayerOverridePriority: 0
-  m_IsTrigger: 1
+  m_IsTrigger: 0
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Radius: 0.28
+  m_Radius: 0.26122424
   m_Center: {x: 0, y: -0.0016411844, z: 0.21249978}
---- !u!114 &5105554150754945107
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1779915255819588040}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 42f69ce2166d4294093ee81bd0e8b13e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::Terminal
-  parentComponent: {fileID: 0}
-  polarity: 1
-  terminalID: Battery_Pos
-  connectedTerminals: []
-  electricPotential: 0
 --- !u!1 &2015789261248798830 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 3039893539087272356, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}
@@ -229,29 +175,12 @@ SphereCollider:
     serializedVersion: 2
     m_Bits: 0
   m_LayerOverridePriority: 0
-  m_IsTrigger: 1
+  m_IsTrigger: 0
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Radius: 0.28
+  m_Radius: 0.26122424
   m_Center: {x: 0, y: -0.00164119, z: 0.21249978}
---- !u!114 &552423935344287328
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2015789261248798830}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 42f69ce2166d4294093ee81bd0e8b13e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::Terminal
-  parentComponent: {fileID: 0}
-  polarity: 2
-  terminalID: Battery_Neg
-  connectedTerminals: []
-  electricPotential: 0
 --- !u!4 &2290959201228134156 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 3322889027674767046, guid: 904827b6a94bdfb499e3752783f863d8, type: 3}

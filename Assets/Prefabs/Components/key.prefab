@@ -193,9 +193,8 @@ GameObject:
   - component: {fileID: 3852928645514998909}
   - component: {fileID: 2646620777798638682}
   - component: {fileID: 6306359891192915464}
-  - component: {fileID: 6265899258809175025}
   m_Layer: 0
-  m_Name: Switch_Neg
+  m_Name: Cylinder011
   m_TagString: Terminal
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -300,29 +299,12 @@ SphereCollider:
     serializedVersion: 2
     m_Bits: 0
   m_LayerOverridePriority: 0
-  m_IsTrigger: 1
+  m_IsTrigger: 0
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Radius: 0.28
+  m_Radius: 0.26122424
   m_Center: {x: 0, y: -0.0016409237, z: 0.21249984}
---- !u!114 &6265899258809175025
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 3677359436292027393}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 42f69ce2166d4294093ee81bd0e8b13e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::Terminal
-  parentComponent: {fileID: 0}
-  polarity: 0
-  terminalID: Switch_Neg
-  connectedTerminals: []
-  electricPotential: 0
 --- !u!1 &5098236497286199025
 GameObject:
   m_ObjectHideFlags: 0
@@ -333,7 +315,6 @@ GameObject:
   m_Component:
   - component: {fileID: 5587634227536243787}
   - component: {fileID: 934175480385596442}
-  - component: {fileID: 5479305608793292958}
   m_Layer: 0
   m_Name: key
   m_TagString: Untagged
@@ -383,33 +364,8 @@ BoxCollider:
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Size: {x: 5.4, y: 2.2, z: 2.5}
-  m_Center: {x: 0, y: 0.6, z: 0}
---- !u!114 &5479305608793292958
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 5098236497286199025}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: fd4629a9348cccf4b8a051a112f1e6d6, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SwitchComponent
-  componentType: 0
-  componentName: LinhKien
-  terminalA: {fileID: 3388219926219684983}
-  terminalB: {fileID: 6265899258809175025}
-  resistance: 1
-  voltageSource: 0
-  currentPassing: 0
-  voltageDrop: 0
-  isClosed: 0
-  leverTransform: {fileID: 8646643747889259415}
-  closedRotationAngles: {x: 0, y: 90, z: 0}
-  openRotationAngles: {x: -45, y: 90, z: 0}
-  toggleDuration: 0.18
+  m_Size: {x: 4.2, y: 1.8, z: 2.5}
+  m_Center: {x: 0, y: 0.9, z: 0}
 --- !u!1 &5888295828487344603
 GameObject:
   m_ObjectHideFlags: 0
@@ -423,9 +379,8 @@ GameObject:
   - component: {fileID: 5988034372425855255}
   - component: {fileID: 6965056876648097933}
   - component: {fileID: 367104221824903456}
-  - component: {fileID: 3388219926219684983}
   m_Layer: 0
-  m_Name: Switch_Pos
+  m_Name: Cylinder012
   m_TagString: Terminal
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -530,29 +485,12 @@ SphereCollider:
     serializedVersion: 2
     m_Bits: 0
   m_LayerOverridePriority: 0
-  m_IsTrigger: 1
+  m_IsTrigger: 0
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Radius: 0.28
+  m_Radius: 0.26122424
   m_Center: {x: 0, y: -0.0016409237, z: 0.21249984}
---- !u!114 &3388219926219684983
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 5888295828487344603}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 42f69ce2166d4294093ee81bd0e8b13e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::Terminal
-  parentComponent: {fileID: 0}
-  polarity: 0
-  terminalID: Switch_Pos
-  connectedTerminals: []
-  electricPotential: 0
 --- !u!1 &6245565576403040655
 GameObject:
   m_ObjectHideFlags: 0
@@ -745,7 +683,7 @@ GameObject:
   - component: {fileID: 1850174020151405192}
   - component: {fileID: 413681676547275232}
   m_Layer: 0
-  m_Name: Lever
+  m_Name: Box003
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -759,13 +697,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6915944053990432411}
   serializedVersion: 2
-  m_LocalRotation: {x: -0.27059805, y: 0.6532815, z: 0.27059805, w: 0.6532815}
-  m_LocalPosition: {x: -0.94218636, y: 0.74640703, z: 0}
+  m_LocalRotation: {x: -0.29883623, y: 0.64085644, z: 0.29883623, w: 0.64085644}
+  m_LocalPosition: {x: -0.93394846, y: 0.74, z: 0}
   m_LocalScale: {x: 1, y: 0.7250823, z: 0.7319677}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 5587634227536243787}
-  m_LocalEulerAnglesHint: {x: -45, y: 90, z: 0}
+  m_LocalEulerAnglesHint: {x: -50, y: 90, z: 0}
 --- !u!33 &1850174020151405192
 MeshFilter:
   m_ObjectHideFlags: 0
