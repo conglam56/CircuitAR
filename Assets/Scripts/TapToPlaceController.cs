@@ -46,6 +46,7 @@ public class TapToPlaceController : MonoBehaviour
     private Vector3 currentSmoothedDragPos = Vector3.zero;
     private bool isDragBlocked = false;
     private Camera mainCamera;
+    private TwoPointSpatialCalibrator boardCalibrator;
 
     [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY (REQUIREMENTS 1 & 3) ---")]
     public GameObject SelectedComponent { get; private set; }
@@ -255,6 +256,7 @@ public class TapToPlaceController : MonoBehaviour
     void Start()
     {
         mainCamera = Camera.main;
+        boardCalibrator = FindFirstObjectByType<TwoPointSpatialCalibrator>();
         if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
         if (menuHUD == null) menuHUD = FindObjectOfType<MenuHUDController>();
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
@@ -263,6 +265,23 @@ public class TapToPlaceController : MonoBehaviour
 
     void Update()
     {
+        if (boardCalibrator != null && !boardCalibrator.IsBoardTracking)
+        {
+            // Preserve the selection, but hide its camera-relative preview during recovery.
+            if (previewAnchor != null) previewAnchor.SetActive(false);
+            canPlace = false;
+            // Tracking loss must never trigger drag-to-trash or commit a stale world pose.
+            if (isDragging)
+            {
+                isDragging = false;
+                draggedObject = null;
+                isHoveringTrash = false;
+                unpinchGraceTimer = 0f;
+                isDragBlocked = false;
+                if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
+            }
+            return;
+        }
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
         if (planeLock == null || !planeLock.HasLockedPlane)
         {

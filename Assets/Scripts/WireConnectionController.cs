@@ -229,6 +229,9 @@ public class WireConnectionController : MonoBehaviour
 
     void Update()
     {
+        if (firstSelectedTerminal != null && !firstSelectedTerminal.gameObject.activeInHierarchy)
+            CancelSelection();
+
         // Kiểm tra an toàn tham chiếu
         if (buttonInteractor == null || menuHUD == null)
         {
@@ -861,6 +864,13 @@ public class WireConnectionController : MonoBehaviour
                 activeWires.RemoveAt(i);
                 continue;
             }
+
+            // Wires live outside Board_Anchor. Hide them along with their endpoints
+            // during tracking recovery, without deleting connections or undo history.
+            bool endpointsVisible = wire.terminalA.gameObject.activeInHierarchy
+                && wire.terminalB.gameObject.activeInHierarchy;
+            wire.wireObject.SetActive(endpointsVisible);
+            if (!endpointsVisible) continue;
 
             // Quản lý đầu giắc cắm: Cực nào đã có giắc cắm từ dây trước thì dây sau cắm vào cùng cực đó
             // sẽ ẩn đầu giắc cắm thừa để ôm khít cọc và không bị lồng đè lên nhau
