@@ -345,8 +345,8 @@ public class WireConnectionController : MonoBehaviour
             return;
         }
 
-        // Trường hợp 3: Bấm vào 2 cực của cùng 1 linh kiện
-        if (GetRootPlacedName(firstSelectedTerminal) == GetRootPlacedName(terminal))
+        // Trường hợp 3: Bấm vào 2 cực của cùng 1 linh kiện (so sánh Transform thay cho tên chuỗi)
+        if (GetRootPlacedTransform(firstSelectedTerminal) == GetRootPlacedTransform(terminal))
         {
             Debug.LogWarning($"<color=orange>[WireConnection]</color> Hai cực thuộc cùng linh kiện [{GetRootPlacedName(terminal)}]. Thao tác bị từ chối.");
             if (currentSubMode == WireSubMode.Delete)
@@ -543,8 +543,8 @@ public class WireConnectionController : MonoBehaviour
             termA.ConnectTo(termB);
         }
 
-        // Tạo hình học uốn vồng ngay lập tức
-        UpdateWireGeometry(record);
+        // Cập nhật vị trí toàn bộ dây và các nút ngã rẽ phân nhánh ngay lập tức
+        UpdateActiveWirePositions();
 
         Debug.Log($"<color=green>[WireConnection]</color> <b>NỐI DÂY 3D THÀNH CÔNG!</b> Giữa [{startTerminal.name}] và [{endTerminal.name}]");
     }
@@ -631,64 +631,71 @@ public class WireConnectionController : MonoBehaviour
         return plugRoot;
     }
 
-    /// <summary>
-    /// Tính toán điểm nút ngã ba (Y-Split Junction) khi một cực có từ 2 nhánh dây nối trở lên
-    /// </summary>
-    private Vector3 GetSharedJunctionPoint(Transform terminal, Transform destinationTerminal, Vector3 plugTopPos, out bool isBranched)
+    // Quản lý các Node ngã rẽ trực quan (Junction Nodes) khi một cọc có từ 2 kết nối trở lên
+    private readonly Dictionary<Transform, GameObject> activeJunctionNodes = new Dictionary<Transform, GameObject>();
+
+    private struct TerminalJunctionInfo
     {
-        isBranched = false;
-        if (terminal == null) return plugTopPos;
+        public Vector3 junctionPos;
+        public WireRecord primaryWire;
+    }
 
-        List<Transform> otherTerminals = new List<Transform>();
-        for (int i = 0; i < activeWires.Count; i++)
-        {
-            var w = activeWires[i];
-            if (w.terminalA == terminal && w.terminalB != null && w.terminalB != terminal)
-            {
-                if (!otherTerminals.Contains(w.terminalB)) otherTerminals.Add(w.terminalB);
-            }
-            else if (w.terminalB == terminal && w.terminalA != null && w.terminalA != terminal)
-            {
-                if (!otherTerminals.Contains(w.terminalA)) otherTerminals.Add(w.terminalA);
-            }
-        }
-
-        // Chỉ tạo phân nhánh chữ Y khi cực này có từ 2 kết nối trở lên
-        if (otherTerminals.Count < 2)
-        {
-            return plugTopPos;
-        }
-
-        isBranched = true;
+    /// <summary>
+    /// Tính toán vị trí ngã rẽ Junction deterministic từ hướng trung bình các cọc đích
+    /// </summary>
+    private Vector3 CalculateJunctionPosition(Transform term, List<Transform> otherTerms, Vector3 termPlugPos)
+    {
         Vector3 avgDir = Vector3.zero;
-        for (int i = 0; i < otherTerminals.Count; i++)
+        float minDist = float.MaxValue;
+        for (int i = 0; i < otherTerms.Count; i++)
         {
-            Vector3 d = otherTerminals[i].position - terminal.position;
-            d.y = 0;
-            if (d.sqrMagnitude > 0.0001f) avgDir += d.normalized;
+            if (otherTerms[i] == null) continue;
+            Vector3 delta = otherTerms[i].position - term.position;
+            float d = delta.magnitude;
+            if (d < minDist) minDist = d;
+            delta.y = 0;
+            if (delta.sqrMagnitude > 0.0001f)
+            {
+                avgDir += delta.normalized;
+            }
         }
 
-        if (avgDir.sqrMagnitude < 0.001f)
+        if (minDist > 100f) minDist = 0.2f;
+
+        // Tránh triệt tiêu vector khi các cọc đối diện nằm đối xứng 2 bên:
+        if (avgDir.sqrMagnitude < 0.01f)
         {
-            Vector3 fallback = (destinationTerminal != null ? destinationTerminal.position : terminal.position) - terminal.position;
-            fallback.y = 0;
-            avgDir = fallback.sqrMagnitude > 0.001f ? fallback.normalized : Vector3.forward;
+            Vector3 fwd = term.forward;
+            fwd.y = 0;
+            if (fwd.sqrMagnitude < 0.001f && term.parent != null)
+            {
+                fwd = term.parent.forward;
+                fwd.y = 0;
+            }
+            avgDir = fwd.sqrMagnitude > 0.001f ? fwd.normalized : Vector3.forward;
         }
         else
         {
             avgDir = avgDir.normalized;
         }
 
-        float stalkDistance = 0.042f; // Đoạn thân chung 4.2cm nhô ra từ cọc
-        float stalkHeight = 0.022f;   // Độ cao nhô lên từ cọc
-        return plugTopPos + Vector3.up * stalkHeight + avgDir * stalkDistance;
+        float stalkDist = Mathf.Clamp(minDist * 0.35f, 0.035f, 0.10f);
+        float stalkHeight = 0.015f;
+        return termPlugPos + Vector3.up * stalkHeight + avgDir * stalkDist;
     }
 
     /// <summary>
     /// Cập nhật hình học thân ống tròn 3D uốn cong mềm mại (Cubic Bézier Arch & Sag) theo thời gian thực.
-    /// Hỗ trợ cả dây đơn trực tiếp lẫn phân nhánh chữ Y tự nhiên khi cực nối nhiều nhánh.
+    /// Hỗ trợ cả dây đơn trực tiếp lẫn phân nhánh ngã rẽ (Junction) không chồng chéo mesh.
     /// </summary>
-    private void UpdateWireGeometry(WireRecord wire)
+    private void UpdateWireGeometry(
+        WireRecord wire,
+        bool isBranchedA = false,
+        bool isPrimaryA = false,
+        Vector3 jPosA = default,
+        bool isBranchedB = false,
+        bool isPrimaryB = false,
+        Vector3 jPosB = default)
     {
         if (wire.terminalA == null || wire.terminalB == null || wire.wireMesh == null) return;
 
@@ -701,31 +708,72 @@ public class WireConnectionController : MonoBehaviour
         Vector3 p0 = basePosA + Vector3.up * plugTopOffset;
         Vector3 p3 = basePosB + Vector3.up * plugTopOffset;
 
-        float dist = Vector3.Distance(p0, p3);
-        if (dist < 0.005f) return;
-
-        // [FIX LOI 2] Moi day luon render Bezier truc tiep giua dung 2 endpoint rieng cua no.
-        // Khong chia se stem/junction voi day khac. Tranh hinh chu H khi 1 cuc noi nhieu day.
-
-        int N = Mathf.Max(12, curveSegments);
+        int N = Mathf.Max(16, curveSegments);
         int K = Mathf.Max(6, radialSegments);
 
         Vector3[] curvePoints = new Vector3[N + 1];
         Vector3[] tangents = new Vector3[N + 1];
 
-        float dynamicArch = Mathf.Clamp(dist * archFactor, archHeight * 0.6f, archHeight * 2.5f);
-        Vector3 dir = (p3 - p0).normalized;
-        Vector3 p1 = p0 + Vector3.up * dynamicArch + dir * (dist * 0.25f);
-        Vector3 p2 = p3 + Vector3.up * dynamicArch - dir * (dist * 0.25f);
+        // Xác định điểm thực sự bắt đầu và kết thúc của đoạn uốn lượn chính
+        // Nếu là nhánh phụ (không phải Primary), điểm bắt đầu/kết thúc chính là Junction Node
+        Vector3 startPos = (isBranchedA && !isPrimaryA) ? jPosA : p0;
+        Vector3 endPos = (isBranchedB && !isPrimaryB) ? jPosB : p3;
+
+        float dist = Vector3.Distance(startPos, endPos);
+        if (dist < 0.002f) return;
+
+        // Điểm phân chia đoạn thân thẳng (Trunk) nhô ra từ cọc tới Junction nếu là Primary Wire
+        int splitA = isPrimaryA ? Mathf.Clamp(N / 4, 3, N / 3) : 0;
+        int splitB = isPrimaryB ? Mathf.Clamp(N - (N / 4), N * 2 / 3, N - 3) : N;
+
+        Vector3 midStart = isPrimaryA ? jPosA : startPos;
+        Vector3 midEnd = isPrimaryB ? jPosB : endPos;
+        float midDist = Vector3.Distance(midStart, midEnd);
+        float midArch = Mathf.Clamp(midDist * archFactor, archHeight * 0.5f, archHeight * 2.2f);
+        Vector3 midDir = midDist > 0.001f ? (midEnd - midStart).normalized : Vector3.forward;
+        Vector3 mp1 = midStart + Vector3.up * midArch + midDir * (midDist * 0.25f);
+        Vector3 mp2 = midEnd + Vector3.up * midArch - midDir * (midDist * 0.25f);
 
         for (int i = 0; i <= N; i++)
         {
-            float t = (float)i / N;
-            float u = 1f - t;
-            curvePoints[i] = u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3;
+            if (isPrimaryA && i <= splitA)
+            {
+                // Đoạn thân chung từ cọc A đến nút Junction jPosA (CHỈ VẼ TRÊN PRIMARY WIRE)
+                float tLocal = (float)i / splitA;
+                float smoothT = Mathf.SmoothStep(0f, 1f, tLocal);
+                curvePoints[i] = Vector3.Lerp(p0, jPosA, smoothT);
+            }
+            else if (isPrimaryB && i >= splitB)
+            {
+                // Đoạn thân chung từ nút Junction jPosB đến cọc B (CHỈ VẼ TRÊN PRIMARY WIRE)
+                float tLocal = (float)(i - splitB) / (N - splitB);
+                float smoothT = Mathf.SmoothStep(0f, 1f, tLocal);
+                curvePoints[i] = Vector3.Lerp(jPosB, p3, smoothT);
+            }
+            else
+            {
+                // Đoạn vòng cung uốn lượn tự do ở giữa (hoặc toàn bộ dây nếu không phải đoạn trunk)
+                int midStartIdx = isPrimaryA ? splitA : 0;
+                int midEndIdx = isPrimaryB ? splitB : N;
+                float tLocal = (float)(i - midStartIdx) / Mathf.Max(1, midEndIdx - midStartIdx);
+                float uLocal = 1f - tLocal;
 
-            Vector3 tan = 3f * u * u * (p1 - p0) + 6f * u * t * (p2 - p1) + 3f * t * t * (p3 - p2);
-            if (tan.sqrMagnitude < 0.0001f) tan = dir;
+                curvePoints[i] = uLocal * uLocal * uLocal * midStart
+                               + 3f * uLocal * uLocal * tLocal * mp1
+                               + 3f * uLocal * tLocal * tLocal * mp2
+                               + tLocal * tLocal * tLocal * midEnd;
+            }
+        }
+
+        // Tính tiếp tuyến mượt mà dọc theo tất cả các điểm
+        for (int i = 0; i <= N; i++)
+        {
+            Vector3 tan;
+            if (i == 0) tan = curvePoints[1] - curvePoints[0];
+            else if (i == N) tan = curvePoints[N] - curvePoints[N - 1];
+            else tan = curvePoints[i + 1] - curvePoints[i - 1];
+
+            if (tan.sqrMagnitude < 0.00001f) tan = midDir;
             tangents[i] = tan.normalized;
         }
 
@@ -848,26 +896,19 @@ public class WireConnectionController : MonoBehaviour
 
     /// <summary>
     /// Cập nhật vị trí và hình dáng của toàn bộ các dây đang kết nối theo thời gian thực.
-    /// Tự động khử trùng lặp đầu giắc cắm khi nhiều dây cắm vào cùng 1 cọc.
+    /// Quản lý phân nhánh ngã rẽ (Junction) một cách deterministic ở tầng hiển thị, không chồng lấn mesh.
     /// </summary>
     private void UpdateActiveWirePositions()
     {
-        HashSet<Transform> seenTerminals = new HashSet<Transform>();
-
+        // 1. Dọn dẹp các dây không hợp lệ
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
             var wire = activeWires[i];
 
             if (wire.terminalA == null || wire.terminalB == null || wire.wireObject == null)
             {
-                if (wire.wireMesh != null)
-                {
-                    Destroy(wire.wireMesh);
-                }
-                if (wire.wireObject != null)
-                {
-                    Destroy(wire.wireObject);
-                }
+                if (wire.wireMesh != null) Destroy(wire.wireMesh);
+                if (wire.wireObject != null) Destroy(wire.wireObject);
                 activeWires.RemoveAt(i);
                 continue;
             }
@@ -877,17 +918,151 @@ public class WireConnectionController : MonoBehaviour
             bool endpointsVisible = wire.terminalA.gameObject.activeInHierarchy
                 && wire.terminalB.gameObject.activeInHierarchy;
             wire.wireObject.SetActive(endpointsVisible);
-            if (!endpointsVisible) continue;
+        }
 
-            // Quản lý đầu giắc cắm: Cực nào đã có giắc cắm từ dây trước thì dây sau cắm vào cùng cực đó
-            // sẽ ẩn đầu giắc cắm thừa để ôm khít cọc và không bị lồng đè lên nhau
-            bool isFirstOnA = seenTerminals.Add(wire.terminalA);
-            if (wire.pivotA != null) wire.pivotA.SetActive(isFirstOnA);
+        // 2. Gom nhóm các dây theo từng terminal
+        Dictionary<Transform, List<WireRecord>> terminalWires = new Dictionary<Transform, List<WireRecord>>();
+        for (int i = 0; i < activeWires.Count; i++)
+        {
+            var wire = activeWires[i];
+            if (!wire.wireObject.activeSelf) continue;
 
-            bool isFirstOnB = seenTerminals.Add(wire.terminalB);
-            if (wire.pivotB != null) wire.pivotB.SetActive(isFirstOnB);
+            if (!terminalWires.TryGetValue(wire.terminalA, out var listA))
+            {
+                listA = new List<WireRecord>();
+                terminalWires[wire.terminalA] = listA;
+            }
+            listA.Add(wire);
 
-            UpdateWireGeometry(wire);
+            if (!terminalWires.TryGetValue(wire.terminalB, out var listB))
+            {
+                listB = new List<WireRecord>();
+                terminalWires[wire.terminalB] = listB;
+            }
+            listB.Add(wire);
+        }
+
+        // 3. Tính toán Junction Data cho các terminal có >= 2 dây kết nối
+        Dictionary<Transform, TerminalJunctionInfo> junctionMap = new Dictionary<Transform, TerminalJunctionInfo>();
+        HashSet<Transform> currentBranchedTerminals = new HashSet<Transform>();
+        float plugTopOffset = useLabPlugStyle ? LAB_PLUG_HEIGHT : 0.005f;
+
+        foreach (var kvp in terminalWires)
+        {
+            Transform term = kvp.Key;
+            List<WireRecord> wiresOnTerm = kvp.Value;
+
+            if (wiresOnTerm.Count < 2) continue;
+
+            currentBranchedTerminals.Add(term);
+            Vector3 termPlugPos = GetTerminalBaseAnchor(term) + Vector3.up * plugTopOffset;
+
+            // Thu thập các terminal đối diện kết nối với cọc term (loại trừ trùng lặp và sắp xếp deterministic)
+            List<Transform> otherTerms = new List<Transform>();
+            for (int i = 0; i < wiresOnTerm.Count; i++)
+            {
+                Transform other = (wiresOnTerm[i].terminalA == term) ? wiresOnTerm[i].terminalB : wiresOnTerm[i].terminalA;
+                if (other != null && !otherTerms.Contains(other)) otherTerms.Add(other);
+            }
+            otherTerms.Sort((x, y) => x.GetInstanceID().CompareTo(y.GetInstanceID()));
+
+            // Tính vị trí Junction J_T một cách deterministic
+            Vector3 junctionPos = CalculateJunctionPosition(term, otherTerms, termPlugPos);
+
+            Vector3 trunkDir = (junctionPos - termPlugPos);
+            trunkDir.y = 0;
+            if (trunkDir.sqrMagnitude > 0.0001f) trunkDir.Normalize();
+            else trunkDir = term.forward;
+
+            // Xác định Primary Wire deterministically: dây có cọc đích thẳng hàng nhất với hướng trunk
+            WireRecord bestWire = wiresOnTerm[0];
+            float bestDot = -999f;
+            int bestInstanceId = int.MinValue;
+
+            for (int i = 0; i < wiresOnTerm.Count; i++)
+            {
+                WireRecord w = wiresOnTerm[i];
+                Transform other = (w.terminalA == term) ? w.terminalB : w.terminalA;
+                Vector3 toDest = (other != null ? other.position : term.position) - term.position;
+                toDest.y = 0;
+                float dot = toDest.sqrMagnitude > 0.0001f ? Vector3.Dot(trunkDir, toDest.normalized) : 0f;
+                int instId = other != null ? other.GetInstanceID() : 0;
+
+                if (dot > bestDot || (Mathf.Approximately(dot, bestDot) && instId > bestInstanceId))
+                {
+                    bestDot = dot;
+                    bestInstanceId = instId;
+                    bestWire = w;
+                }
+            }
+
+            junctionMap[term] = new TerminalJunctionInfo
+            {
+                junctionPos = junctionPos,
+                primaryWire = bestWire
+            };
+
+            // Cập nhật hoặc tạo mới visual Junction Node (viên bi tròn che khớp ngã rẽ)
+            if (!activeJunctionNodes.TryGetValue(term, out GameObject nodeObj) || nodeObj == null)
+            {
+                nodeObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                nodeObj.name = $"JunctionNode_{term.name}";
+                Collider col = nodeObj.GetComponent<Collider>();
+                if (col != null) Destroy(col);
+                if (wiresContainer != null) nodeObj.transform.SetParent(wiresContainer, true);
+
+                Material nodeMat = wireMaterial != null ? new Material(wireMaterial) : GetOrCreateRuntimeMaterial();
+                nodeObj.GetComponent<Renderer>().material = nodeMat;
+                activeJunctionNodes[term] = nodeObj;
+            }
+
+            nodeObj.transform.position = junctionPos;
+            nodeObj.transform.localScale = Vector3.one * (wireRadius * 2.8f);
+            nodeObj.SetActive(term.gameObject.activeInHierarchy);
+
+            Color termColor = DetectTerminalColor(term);
+            Material rendMat = nodeObj.GetComponent<Renderer>().material;
+            if (rendMat.HasProperty("_BaseColor")) rendMat.SetColor("_BaseColor", termColor);
+            else if (rendMat.HasProperty("_Color")) rendMat.color = termColor;
+            if (rendMat.HasProperty("_Smoothness")) rendMat.SetFloat("_Smoothness", 0.75f);
+        }
+
+        // Dọn dẹp các Junction Node không còn phân nhánh (< 2 dây)
+        List<Transform> toRemoveNodes = new List<Transform>();
+        foreach (var kvp in activeJunctionNodes)
+        {
+            if (!currentBranchedTerminals.Contains(kvp.Key))
+            {
+                if (kvp.Value != null) Destroy(kvp.Value);
+                toRemoveNodes.Add(kvp.Key);
+            }
+        }
+        for (int i = 0; i < toRemoveNodes.Count; i++) activeJunctionNodes.Remove(toRemoveNodes[i]);
+
+        // 4. Render từng dây dựa trên Junction Data
+        for (int i = 0; i < activeWires.Count; i++)
+        {
+            var wire = activeWires[i];
+            if (!wire.wireObject.activeSelf) continue;
+
+            bool isBranchedA = junctionMap.TryGetValue(wire.terminalA, out var dataA);
+            bool isPrimaryA = isBranchedA && dataA.primaryWire == wire;
+            Vector3 jPosA = isBranchedA ? dataA.junctionPos : Vector3.zero;
+
+            bool isBranchedB = junctionMap.TryGetValue(wire.terminalB, out var dataB);
+            bool isPrimaryB = isBranchedB && dataB.primaryWire == wire;
+            Vector3 jPosB = isBranchedB ? dataB.junctionPos : Vector3.zero;
+
+            // Quản lý đầu giắc cắm:
+            // Chỉ hiển thị giắc cắm trên cọc A nếu không phân nhánh, HOẶC là dây chính (Primary) của cọc A
+            bool showPlugA = !isBranchedA || isPrimaryA;
+            if (wire.pivotA != null) wire.pivotA.SetActive(showPlugA);
+
+            bool showPlugB = !isBranchedB || isPrimaryB;
+            if (wire.pivotB != null) wire.pivotB.SetActive(showPlugB);
+
+            // Dựng mesh thân dây uốn lượn
+            UpdateWireGeometry(wire, isBranchedA, isPrimaryA, jPosA, isBranchedB, isPrimaryB, jPosB);
         }
     }
 
@@ -1112,8 +1287,23 @@ public class WireConnectionController : MonoBehaviour
             }
         }
         activeWires.Clear();
+        ClearJunctionNodes();
         CancelSelection();
         Debug.Log("[WireConnection] Đã xoá toàn bộ dây nối.");
+    }
+
+    void OnDestroy()
+    {
+        ClearJunctionNodes();
+    }
+
+    private void ClearJunctionNodes()
+    {
+        foreach (var kvp in activeJunctionNodes)
+        {
+            if (kvp.Value != null) Destroy(kvp.Value);
+        }
+        activeJunctionNodes.Clear();
     }
 
     /// <summary>
@@ -1191,6 +1381,34 @@ public class WireConnectionController : MonoBehaviour
             cur = cur.parent;
         }
         return terminal.parent != null ? terminal.parent.name : terminal.name;
+    }
+
+    /// <summary>
+    /// Tìm Transform gốc "Placed_..." chứa điểm cực để so sánh instance object thay vì tên chuỗi
+    /// </summary>
+    private Transform GetRootPlacedTransform(Transform terminal)
+    {
+        if (terminal == null) return null;
+        Transform cur = terminal;
+        while (cur != null)
+        {
+            if (cur.name.StartsWith("Placed_"))
+            {
+                return cur;
+            }
+            cur = cur.parent;
+        }
+        Terminal t = terminal.GetComponent<Terminal>();
+        if (t != null && t.parentComponent != null)
+        {
+            return t.parentComponent.transform;
+        }
+        CircuitComponent cc = terminal.GetComponentInParent<CircuitComponent>();
+        if (cc != null)
+        {
+            return cc.transform;
+        }
+        return terminal.parent != null ? terminal.parent : terminal;
     }
 
     /// <summary>
