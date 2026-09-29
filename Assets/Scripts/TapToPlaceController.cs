@@ -21,7 +21,7 @@ public class TapToPlaceController : MonoBehaviour
     [Header("--- LỊCH SỬ LINH KIỆN (HỖ TRỢ UNDO / THU HỒI) ---")]
     public List<GameObject> placedObjectsHistory = new List<GameObject>();
 
-    // Hệ thống quản lý lịch sử thao tác chuyên sâu (Requirement 2 & 3: Command History)
+    // Hệ thống quản lý lịch sử thao tác chuyên sâu (Command History)
     public CircuitHistoryManager History { get; } = new CircuitHistoryManager();
 
     private GameObject previewAnchor;
@@ -48,7 +48,7 @@ public class TapToPlaceController : MonoBehaviour
     private Camera mainCamera;
     private TwoPointSpatialCalibrator boardCalibrator;
 
-    [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY (REQUIREMENTS 1 & 3) ---")]
+    [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY ---")]
     public GameObject SelectedComponent { get; private set; }
     public event System.Action<GameObject> OnSelectedComponentChanged;
     private Dictionary<Renderer, Material[]> originalSelectedMaterials = new Dictionary<Renderer, Material[]>();
@@ -253,24 +253,80 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    // =========================================================================
+    // ĐĂNG KÝ SỰ KIỆN CHUYỂN CHẾ ĐỘ MÔ PHỎNG (CIRCUIT SIMULATION MANAGER)
+    // =========================================================================
+
+    void OnEnable()
+    {
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged += HandleSimulationModeChanged;
+        }
+    }
+
+    void OnDisable()
+    {
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged -= HandleSimulationModeChanged;
+        }
+    }
+
+    private void HandleSimulationModeChanged(bool isSimulating)
+    {
+        if (isSimulating)
+        {
+            // 1. Nếu đang có linh kiện được chọn -> Bỏ chọn ngay và tắt viền highlight
+            ClearSelectedComponent();
+
+            // 2. Nếu đang xem trước (Preview) chuẩn bị đặt vật mới -> Hủy luôn preview
+            CancelPlacement();
+
+            // 3. Nếu đang dở thao tác kéo (Drag) linh kiện -> Nhả tay lập tức
+            if (isDragging)
+            {
+                ReleaseDraggedObject();
+            }
+        }
+    }
+
     void Start()
     {
         mainCamera = Camera.main;
+#if UNITY_2023_1_OR_NEWER
         boardCalibrator = FindFirstObjectByType<TwoPointSpatialCalibrator>();
+        if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
+        if (menuHUD == null) menuHUD = FindFirstObjectByType<MenuHUDController>();
+        if (planeLock == null) planeLock = FindFirstObjectByType<SinglePlaneLockController>();
+        if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
+#else
+        boardCalibrator = FindObjectOfType<TwoPointSpatialCalibrator>();
         if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
         if (menuHUD == null) menuHUD = FindObjectOfType<MenuHUDController>();
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
         if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
+#endif
+        if (CircuitSimulationManager.Instance != null)
+        {
+            CircuitSimulationManager.Instance.OnSimulationModeChanged -= HandleSimulationModeChanged;
+            CircuitSimulationManager.Instance.OnSimulationModeChanged += HandleSimulationModeChanged;
+        }
     }
 
     void Update()
     {
+        // Nếu đang bật Chế độ Mô phỏng, khóa hoàn toàn các thao tác chọn, nhấc và di chuyển linh kiện
+        if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
+        {
+            return; // Dừng toàn bộ xử lý cử chỉ chọn/kéo phía dưới
+        }
+
         if (boardCalibrator != null && !boardCalibrator.IsBoardTracking)
         {
-            // Preserve the selection, but hide its camera-relative preview during recovery.
             if (previewAnchor != null) previewAnchor.SetActive(false);
             canPlace = false;
-            // Tracking loss must never trigger accidental placement or commit a stale world pose.
+            // Đã loại bỏ hoàn toàn các dòng tàn dư gây lỗi CS0103 & CS1061 ở đây:
             if (isDragging)
             {
                 isDragging = false;
@@ -280,17 +336,30 @@ public class TapToPlaceController : MonoBehaviour
             }
             return;
         }
+
+#if UNITY_2023_1_OR_NEWER
+        if (planeLock == null) planeLock = FindFirstObjectByType<SinglePlaneLockController>();
+#else
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
+#endif
         if (planeLock == null || !planeLock.HasLockedPlane)
         {
             if (previewAnchor != null) Destroy(previewAnchor);
             return;
         }
 
+#if UNITY_2023_1_OR_NEWER
+        if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
+#else
         if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
+#endif
         if (buttonInteractor == null) return;
 
+#if UNITY_2023_1_OR_NEWER
+        if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
+#else
         if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
+#endif
 
         if (mainCamera == null)
         {
@@ -300,7 +369,7 @@ public class TapToPlaceController : MonoBehaviour
 
         if (cooldownTimer > 0) cooldownTimer -= Time.deltaTime;
 
-        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI (Từ MenuHUD hoặc ARFloatingBubbleMenu gọi trực tiếp)
+        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI
         bool hasSelection = (menuHUD != null && menuHUD.HasSelection);
         bool hasDirectPreview = (currentPrefabToPlace != null && previewAnchor != null);
 
@@ -328,9 +397,6 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Cập nhật vị trí bóng xem trước (Preview), kiểm tra chống chồng lấn và đặt vật thể
-    /// </summary>
     private void UpdatePreviewAndPlacement()
     {
         if (currentPrefabToPlace == null || previewAnchor == null) return;
@@ -372,7 +438,7 @@ public class TapToPlaceController : MonoBehaviour
             {
                 // Cảnh báo thị giác trực quan: Đổi màu bóng Preview sang ĐỎ CẢNH BÁO
                 SetPreviewColor(previewVisual, new Color(1f, 0.22f, 0.22f, 0.75f));
-                canPlace = false; // TỪ CHỐI ĐẶT
+                canPlace = false;
             }
             else
             {
@@ -404,9 +470,6 @@ public class TapToPlaceController : MonoBehaviour
         canPlace = false;
     }
 
-    /// <summary>
-    /// Đặt linh kiện thật xuống mặt bảng mạch và lưu vào lịch sử Undo
-    /// </summary>
     private void PlaceObject(Vector3 position, Quaternion rotation, Transform boardParent)
     {
         if (!previewAnchor.activeSelf) return;
@@ -434,8 +497,6 @@ public class TapToPlaceController : MonoBehaviour
             previewVisual.transform.localScale = Vector3.one * scaleMultiplier;
         }
 
-        // Đảm bảo luôn có Body Collider cho linh kiện để có thể kéo thả (Move Mode)
-        // và độc lập hoàn toàn với Terminal Collider (Guardrail 6)
         bool hasBodyCollider = false;
         Collider[] allCols = previewAnchor.GetComponentsInChildren<Collider>();
         foreach (var c in allCols)
@@ -475,9 +536,6 @@ public class TapToPlaceController : MonoBehaviour
         menuHUD.ClearSelection();
     }
 
-    /// <summary>
-    /// Xử lý kéo thả linh kiện (Drag & Drop) mượt mà có kiểm tra chống chồng lấn và Wire Mode (Requirement 2 & 3)
-    /// </summary>
     private void HandleDragAndDrop()
     {
         // QUY TẮC RÀNG BUỘC REQUIREMENT 3:
@@ -491,7 +549,7 @@ public class TapToPlaceController : MonoBehaviour
         Vector2 screenPos = GetCursorScreenPosition();
         Ray ray = mainCamera.ScreenPointToRay(screenPos);
 
-        // 1. BẮT ĐẦU KÉO / CHỌN LINH KIỆN: Khi người dùng bấm chụm ngón tay vào vật thể
+        // 1. BẮT ĐẦU KÉO / CHỌN LINH KIỆN
         if (buttonInteractor.JustPinched && !isDragging)
         {
             RaycastHit[] allHits = Physics.RaycastAll(ray, 20f);
@@ -532,11 +590,14 @@ public class TapToPlaceController : MonoBehaviour
                 if (isDragging) break;
             }
 
-            // Nếu pinch vào mặt bàn trống không trúng linh kiện nào -> Bỏ chọn linh kiện hiện tại
+            // Nếu pinch vào mặt bàn trống -> Bỏ chọn
             if (!hitPlaced)
             {
-                // Nếu đang pinch vào nút Xóa hoặc Xoay ở trên màn hình, không bỏ chọn linh kiện
+#if UNITY_2023_1_OR_NEWER
+                if (floatingMenu == null) floatingMenu = FindFirstObjectByType<ARFloatingBubbleMenu>();
+#else
                 if (floatingMenu == null) floatingMenu = FindObjectOfType<ARFloatingBubbleMenu>();
+#endif
                 if (floatingMenu != null && (floatingMenu.IsPointerOverDeleteButton(screenPos) || floatingMenu.IsPointerOverRotateButton(screenPos)))
                 {
                     return;
@@ -553,7 +614,7 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
-        // 2. ĐANG KÉO: Cập nhật vị trí vật thể trượt mượt mà kèm kiểm tra CHỐNG CHỒNG LẤN
+        // 2. ĐANG KÉO
         if (isDragging && draggedObject != null)
         {
             if (buttonInteractor.isPinching)
@@ -581,20 +642,16 @@ public class TapToPlaceController : MonoBehaviour
 
                 if (foundBoard)
                 {
-                    // Bộ lọc làm mượt di chuyển:
-                    // Bỏ qua micro-jitter (< 1.5mm) từ landmark MediaPipe để tránh rung vật
                     Vector3 targetPoint = boardHit.point;
                     if (Vector3.Distance(targetPoint, currentSmoothedDragPos) > 0.0015f)
                     {
-                        float followSpeed = 26f; // Tốc độ phản hồi cực nhanh ~38ms, không gây cảm giác trễ
+                        float followSpeed = 26f;
                         currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.deltaTime));
                     }
 
-                    // Kiểm tra chống chồng lấn với dải trễ (hysteresis) trong lúc drag để tránh snap giật mép va chạm
                     float margin = isDragBlocked ? 0.008f : 0f;
                     bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, margin);
 
-                    // Duy trì góc xoay tương đối so với mặt bàn (nếu linh kiện đã từng xoay)
                     Quaternion dragTargetRot = boardHit.collider.transform.rotation * (Quaternion.Inverse(boardHit.collider.transform.rotation) * dragStartRot);
 
                     if (!isOverlapping)
@@ -632,7 +689,6 @@ public class TapToPlaceController : MonoBehaviour
             }
             else
             {
-                // Thêm độ trễ nhỏ (0.12s) chống rung tay nhả pinch vô tình
                 unpinchGraceTimer += Time.deltaTime;
                 if (unpinchGraceTimer > 0.12f)
                 {
@@ -688,9 +744,6 @@ public class TapToPlaceController : MonoBehaviour
         return RectTransformUtility.WorldToScreenPoint(uiCam, buttonInteractor.debugPoint.position);
     }
 
-    /// <summary>
-    /// Bắt đầu hiển thị bóng xem trước (Preview) cho linh kiện được chọn
-    /// </summary>
     public void StartPreview(string componentName)
     {
         ClearPreview();
@@ -717,15 +770,12 @@ public class TapToPlaceController : MonoBehaviour
 
         AlignVisualBaseToAnchor(previewAnchor, previewVisual);
         SetPreviewTransparent(previewVisual, previewAlpha);
-        previewAnchor.SetActive(true); // Hiển thị ngay lập tức để người dùng nhìn thấy!
+        previewAnchor.SetActive(true);
 
         canPlace = false;
         cooldownTimer = 0.4f;
     }
 
-    /// <summary>
-    /// Huỷ bóng xem trước và xoá trạng thái chọn
-    /// </summary>
     public void ClearPreview()
     {
         if (previewAnchor != null)
@@ -739,9 +789,6 @@ public class TapToPlaceController : MonoBehaviour
         if (menuHUD != null) menuHUD.ClearSelection();
     }
 
-    /// <summary>
-    /// Hủy hoàn toàn chế độ đặt linh kiện (Cancel Placement Preview - Guardrail 5)
-    /// </summary>
     public void CancelPlacement()
     {
         ClearPreview();
@@ -836,9 +883,6 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Đổi màu hiển thị của bóng xem trước (đỏ khi vị trí bị trùng/chồng lấn, trắng mờ khi hợp lệ)
-    /// </summary>
     private void SetPreviewColor(GameObject obj, Color tintColor)
     {
         if (obj == null) return;
@@ -860,25 +904,16 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Thu hồi / Hoàn tác thao tác gần nhất trong lịch sử (Requirement 2)
-    /// </summary>
     public bool UndoLastPlacedComponent()
     {
         return History.Undo();
     }
 
-    /// <summary>
-    /// Làm lại thao tác vừa hoàn tác trong lịch sử (Requirement 3: Redo)
-    /// </summary>
     public bool RedoLastAction()
     {
         return History.Redo();
     }
 
-    /// <summary>
-    /// Xóa linh kiện và lưu vết vào lịch sử Undo (Requirement 1 & 2)
-    /// </summary>
     public void DeletePlacedComponent(GameObject targetObj)
     {
         if (targetObj == null) return;
@@ -909,9 +944,6 @@ public class TapToPlaceController : MonoBehaviour
         Debug.Log($"<color=green>[TapToPlace]</color> Đã chuyển linh kiện [{objName}] sang trạng thái ẩn và lưu vết vào History.");
     }
 
-    /// <summary>
-    /// Khôi phục chính xác toàn bộ material gốc của prefab (Requirement 5: không làm đổi sang màu trắng)
-    /// </summary>
     private void RestoreOriginalMaterials(GameObject visualInstance, GameObject sourcePrefab)
     {
         if (visualInstance == null || sourcePrefab == null) return;
@@ -929,27 +961,22 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
-    /// <summary>
     public struct FootprintOBB2D
     {
-        public Vector2 center;      // Tâm OBB trong mặt phẳng 2D (x, z)
-        public Vector2 halfExtents; // Bán kính nửa kích thước (width/2, depth/2) tính bằng mét
-        public Vector2[] corners;   // 4 đỉnh OBB trong mặt phẳng 2D (x, z)
-        public Vector2 axis1;       // Trục pháp tuyến cạnh 1 (normalized)
-        public Vector2 axis2;       // Trục pháp tuyến cạnh 2 (normalized)
+        public Vector2 center;
+        public Vector2 halfExtents;
+        public Vector2[] corners;
+        public Vector2 axis1;
+        public Vector2 axis2;
     }
 
-    /// <summary>
-    /// Tính toán hộp bao hướng (Oriented Bounding Box - OBB) 2D trên mặt phẳng X-Z cho một linh kiện.
-    /// Tính toán chính xác kích thước thực tế theo mét (đã áp dụng scaleMultiplier = 0.035).
-    /// </summary>
     public bool GetFootprintOBB(GameObject obj, Vector3 worldPos, Quaternion worldRot, out FootprintOBB2D obb, float margin = 0f)
     {
         obb = default;
         if (obj == null) return false;
 
         Vector2 localCenter = Vector2.zero;
-        Vector2 localHalfExtents = new Vector2(0.045f, 0.045f); // Giá trị mặc định an toàn 4.5cm x 4.5cm
+        Vector2 localHalfExtents = new Vector2(0.045f, 0.045f);
 
         Transform rootTransform = obj.transform;
 
@@ -1057,11 +1084,9 @@ public class TapToPlaceController : MonoBehaviour
         localHalfExtents.x = Mathf.Clamp(localHalfExtents.x, 0.02f, 0.18f);
         localHalfExtents.y = Mathf.Clamp(localHalfExtents.y, 0.02f, 0.18f);
 
-        // Áp dụng lề margin
         float hx = localHalfExtents.x + margin;
         float hz = localHalfExtents.y + margin;
 
-        // Vector hướng phẳng trên mặt bàn X-Z
         Vector3 right3 = worldRot * Vector3.right;
         Vector3 fwd3 = worldRot * Vector3.forward;
 
@@ -1073,10 +1098,8 @@ public class TapToPlaceController : MonoBehaviour
         if (fwd2.sqrMagnitude < 0.0001f) fwd2 = Vector2.up;
         else fwd2.Normalize();
 
-        // Tâm OBB trong mặt phẳng 2D thế giới
         Vector2 center2D = new Vector2(worldPos.x, worldPos.z) + right2 * localCenter.x + fwd2 * localCenter.y;
 
-        // 4 góc của OBB trong mặt phẳng 2D thế giới
         Vector2[] corners = new Vector2[4];
         corners[0] = center2D - right2 * hx - fwd2 * hz;
         corners[1] = center2D + right2 * hx - fwd2 * hz;
@@ -1092,11 +1115,6 @@ public class TapToPlaceController : MonoBehaviour
         return true;
     }
 
-    /// <summary>
-    /// Kiểm tra va chạm giao nhau giữa 2 OBB 2D bằng định lý trục phân tách (Separating Axis Theorem - SAT).
-    /// Bắt buộc cấm overlap dù chỉ giao nhau một phần hoặc chạm góc.
-    /// Trả về false nếu có trục phân tách (không overlap), true nếu overlap trên tất cả 4 trục.
-    /// </summary>
     public static bool CheckOBBOverlapSAT(FootprintOBB2D a, FootprintOBB2D b, out int separatingAxisIndex)
     {
         separatingAxisIndex = -1;
@@ -1107,7 +1125,6 @@ public class TapToPlaceController : MonoBehaviour
             Vector2 axis = axes[i];
             if (axis.sqrMagnitude < 0.0001f) continue;
 
-            // Chiếu 4 góc của A lên trục
             float minA = float.MaxValue, maxA = float.MinValue;
             for (int j = 0; j < 4; j++)
             {
@@ -1116,7 +1133,6 @@ public class TapToPlaceController : MonoBehaviour
                 if (proj > maxA) maxA = proj;
             }
 
-            // Chiếu 4 góc của B lên trục
             float minB = float.MaxValue, maxB = float.MinValue;
             for (int j = 0; j < 4; j++)
             {
@@ -1125,7 +1141,6 @@ public class TapToPlaceController : MonoBehaviour
                 if (proj > maxB) maxB = proj;
             }
 
-            // Nếu tồn tại dù chỉ 1 trục phân tách -> 2 hộp hoàn toàn tách rời nhau (không giao)
             if (maxA < minB || maxB < minA)
             {
                 separatingAxisIndex = i;
@@ -1133,20 +1148,13 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
-        // Không có trục phân tách nào -> 2 hộp giao nhau (overlap)
         return true;
     }
 
-    /// <summary>
-    /// Kiểm tra xem vị trí đề xuất (candidatePosition) có bị chồng lấn lên linh kiện đã đặt nào không bằng OBB 2D / SAT.
-    /// Cấm chồng lấn dù chỉ giao nhau một phần.
-    /// </summary>
     public bool CheckOverlap(Vector3 candidatePosition, GameObject ignoreObject, out GameObject overlappingObject, float marginOffset = 0f)
     {
         overlappingObject = null;
 
-        // Collision skin: lề an toàn tối thiểu 3mm bao quanh footprint OBB để bù sai lệch nhỏ
-        // giữa BoxCollider và mép thực tế của mesh model linh kiện (tránh overlap mép do phần mesh nhô ra ngoài BoxCollider).
         const float collisionSkin = 0.003f;
         float effectiveMargin = Mathf.Max(marginOffset, collisionSkin);
 
@@ -1178,14 +1186,17 @@ public class TapToPlaceController : MonoBehaviour
             }
         }
 
-        // Quét bổ sung các linh kiện Placed_ trong Hierarchy
+#if UNITY_2023_1_OR_NEWER
+        Transform[] allRoots = FindObjectsByType<Transform>(FindObjectsSortMode.None);
+#else
         Transform[] allRoots = FindObjectsOfType<Transform>();
+#endif
         for (int i = 0; i < allRoots.Length; i++)
         {
             Transform t = allRoots[i];
             if (t != null && t.name.StartsWith("Placed_") && t.gameObject.activeInHierarchy)
             {
-                if (t.parent != null && t.parent.name.StartsWith("Placed_")) continue; // Bỏ qua object con
+                if (t.parent != null && t.parent.name.StartsWith("Placed_")) continue;
                 if (t.gameObject == candidateObj || t.gameObject == ignoreObject) continue;
                 if (previewAnchor != null && (t.gameObject == previewAnchor || t.IsChildOf(previewAnchor.transform))) continue;
                 if (ignoreObject != null && t.IsChildOf(ignoreObject.transform)) continue;
@@ -1203,9 +1214,8 @@ public class TapToPlaceController : MonoBehaviour
             GameObject placed = activePlaced[i];
             if (placed == null) continue;
 
-            // Bộ lọc sơ bộ khoảng cách 2D trên mặt bàn X-Z (> 45cm thì chắc chắn không va chạm)
             Vector2 diffXZ = new Vector2(candidatePosition.x - placed.transform.position.x, candidatePosition.z - placed.transform.position.z);
-            if (diffXZ.sqrMagnitude > 0.2025f) // (0.45m)^2 = 0.2025
+            if (diffXZ.sqrMagnitude > 0.2025f)
             {
                 continue;
             }
@@ -1214,7 +1224,6 @@ public class TapToPlaceController : MonoBehaviour
             {
                 if (CheckOBBOverlapSAT(candidateOBB, placedOBB, out int separatingAxisIndex))
                 {
-                    // DEBUG TẠM THỜI theo yêu cầu người dùng:
                     Debug.LogWarning($"<color=red>[CheckOverlap OVERLAP]</color> " +
                         $"Candidate: [{candidateObj.name}] at ({candidatePosition.x:F3}, {candidatePosition.z:F3}), rotY={candidateRot.eulerAngles.y:F1}°, halfExtents=({candidateOBB.halfExtents.x * 100f:F1}cm, {candidateOBB.halfExtents.y * 100f:F1}cm) | " +
                         $"Existing: [{placed.name}] at ({placed.transform.position.x:F3}, {placed.transform.position.z:F3}), rotY={placed.transform.rotation.eulerAngles.y:F1}°, halfExtents=({placedOBB.halfExtents.x * 100f:F1}cm, {placedOBB.halfExtents.y * 100f:F1}cm) | " +
@@ -1229,9 +1238,6 @@ public class TapToPlaceController : MonoBehaviour
         return false;
     }
 
-    /// <summary>
-    /// Bán kính footprint tương đương chân đế thực tế (dùng làm helper/fallback nếu cần)
-    /// </summary>
     public float GetComponentRadius(GameObject obj)
     {
         if (obj == null) return 0.042f;
@@ -1289,12 +1295,9 @@ public class TapToPlaceController : MonoBehaviour
 }
 
 // =========================================================================
-// HỆ THỐNG COMMAND HISTORY CHO PHÉP UNDO / REDO ĐA THAO TÁC (Requirement 2 & 3)
+// HỆ THỐNG COMMAND HISTORY CHO PHÉP UNDO / REDO ĐA THAO TÁC
 // =========================================================================
 
-/// <summary>
-/// Giao diện đại diện cho một thao tác có thể Hoàn tác (Undo) và Làm lại (Redo).
-/// </summary>
 public interface IUndoableAction
 {
     void Undo();
@@ -1302,10 +1305,6 @@ public interface IUndoableAction
     string Description { get; }
 }
 
-/// <summary>
-/// Hành động đặt một linh kiện mới lên bảng mạch.
-/// Quản lý trạng thái bằng SetActive để không hủy GameObject, bảo toàn nguyên vẹn tham chiếu và Terminal.
-/// </summary>
 public class PlaceComponentAction : IUndoableAction
 {
     private readonly GameObject placedObject;
@@ -1340,9 +1339,6 @@ public class PlaceComponentAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Hành động xóa một linh kiện và các dây nối kèm.
-/// </summary>
 public class DeleteComponentAction : IUndoableAction
 {
     private readonly GameObject deletedObject;
@@ -1367,7 +1363,6 @@ public class DeleteComponentAction : IUndoableAction
             deletedObject.SetActive(true);
             tapController?.NotifyComponentToggled(deletedObject, true);
 
-            // Tái lập các dây kết nối trước đó
             if (wireController != null && attachedWires != null)
             {
                 foreach (var (a, b) in attachedWires)
@@ -1397,9 +1392,6 @@ public class DeleteComponentAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Hành động di chuyển linh kiện từ vị trí cũ sang vị trí mới.
-/// </summary>
 public class MoveComponentAction : IUndoableAction
 {
     private readonly GameObject targetObject;
@@ -1444,9 +1436,6 @@ public class MoveComponentAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Hành động xoay linh kiện 90 độ có hỗ trợ Undo / Redo.
-/// </summary>
 public class RotateComponentAction : IUndoableAction
 {
     private readonly GameObject targetObject;
@@ -1489,10 +1478,6 @@ public class RotateComponentAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Hành động nối dây giữa 2 điểm cực (Terminal).
-/// Hỗ trợ hoàn hảo cấu trúc Y-branch nhiều nhánh.
-/// </summary>
 public class ConnectWireAction : IUndoableAction
 {
     private readonly Transform terminalA;
@@ -1527,9 +1512,6 @@ public class ConnectWireAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Hành động ngắt một dây nối giữa 2 điểm cực.
-/// </summary>
 public class DisconnectWireAction : IUndoableAction
 {
     private readonly Transform terminalA;
@@ -1564,9 +1546,6 @@ public class DisconnectWireAction : IUndoableAction
     }
 }
 
-/// <summary>
-/// Quản lý ngăn xếp Lịch sử Thao tác (Undo / Redo Stack).
-/// </summary>
 public class CircuitHistoryManager
 {
     private readonly Stack<IUndoableAction> undoStack = new Stack<IUndoableAction>();
@@ -1577,20 +1556,14 @@ public class CircuitHistoryManager
     public int UndoCount => undoStack.Count;
     public int RedoCount => redoStack.Count;
 
-    /// <summary>
-    /// Ghi nhận một thao tác người dùng mới vào lịch sử. Xóa sạch Redo stack.
-    /// </summary>
     public void RecordAction(IUndoableAction action)
     {
         if (action == null) return;
         undoStack.Push(action);
-        redoStack.Clear(); // Thao tác mới -> xóa redo stack theo đúng quy tắc
+        redoStack.Clear();
         Debug.Log($"<color=green>[CircuitHistory]</color> Đã ghi nhận thao tác: {action.Description} (Undo stack: {undoStack.Count})");
     }
 
-    /// <summary>
-    /// Hoàn tác thao tác gần nhất
-    /// </summary>
     public bool Undo()
     {
         if (undoStack.Count == 0)
@@ -1606,9 +1579,6 @@ public class CircuitHistoryManager
         return true;
     }
 
-    /// <summary>
-    /// Làm lại thao tác vừa hoàn tác
-    /// </summary>
     public bool Redo()
     {
         if (redoStack.Count == 0)
@@ -1624,9 +1594,6 @@ public class CircuitHistoryManager
         return true;
     }
 
-    /// <summary>
-    /// Xóa toàn bộ lịch sử khi quét lại mặt phẳng hoặc reset toàn bộ mạch
-    /// </summary>
     public void Clear()
     {
         undoStack.Clear();

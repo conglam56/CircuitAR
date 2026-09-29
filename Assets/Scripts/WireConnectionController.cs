@@ -536,6 +536,13 @@ public class WireConnectionController : MonoBehaviour
         WireRecord record = new WireRecord(startTerminal, endTerminal, wireObj, mf, mr, wireMesh, pivotA, pivotB, connA, connB, effectiveColor);
         activeWires.Add(record);
 
+        Terminal termA = startTerminal.GetComponent<Terminal>() ?? startTerminal.GetComponentInChildren<Terminal>();
+        Terminal termB = endTerminal.GetComponent<Terminal>() ?? endTerminal.GetComponentInChildren<Terminal>();
+        if (termA != null && termB != null)
+        {
+            termA.ConnectTo(termB);
+        }
+
         // Tạo hình học uốn vồng ngay lập tức
         UpdateWireGeometry(record);
 
@@ -939,6 +946,13 @@ public class WireConnectionController : MonoBehaviour
 
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
+            Terminal termA = terminalA.GetComponent<Terminal>() ?? terminalA.GetComponentInChildren<Terminal>();
+            Terminal termB = terminalB.GetComponent<Terminal>() ?? terminalB.GetComponentInChildren<Terminal>();
+            if (termA != null && termB != null)
+            {
+                termA.DisconnectFrom(termB);
+            }
+
             var wire = activeWires[i];
             bool match = (wire.terminalA == terminalA && wire.terminalB == terminalB) ||
                          (wire.terminalA == terminalB && wire.terminalB == terminalA);
@@ -1086,6 +1100,15 @@ public class WireConnectionController : MonoBehaviour
             if (activeWires[i].wireObject != null)
             {
                 Destroy(activeWires[i].wireObject);
+            }
+        }
+        foreach (var w in activeWires)
+        {
+            if (w.terminalA != null && w.terminalB != null)
+            {
+                Terminal tA = w.terminalA.GetComponent<Terminal>() ?? w.terminalA.GetComponentInChildren<Terminal>();
+                Terminal tB = w.terminalB.GetComponent<Terminal>() ?? w.terminalB.GetComponentInChildren<Terminal>();
+                if (tA != null && tB != null) tA.DisconnectFrom(tB);
             }
         }
         activeWires.Clear();
