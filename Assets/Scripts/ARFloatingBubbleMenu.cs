@@ -113,6 +113,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     [Header("--- TRẠNG THÁI HIỆN TẠI ---")]
     public bool isBarExpanded = false;
     public bool isToolboxOpen = false;
+    private bool returnToToolboxAfterPlacement;
+    private GameObject mainBubbleCancelIcon;
 
     private static Sprite circleSprite;
     private static Sprite roundedRectSprite;
@@ -121,6 +123,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private static Sprite rotateSprite;
     private Canvas targetCanvas;
     private CanvasScaler targetScaler;
+    private bool menuVisibilityRequested = true;
+    private bool hiddenForSizeDialog;
     private Coroutine animCoroutine;
     private Coroutine drawerAnimCoroutine;
 
@@ -148,6 +152,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         {
             tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
             tapToPlaceController.OnSelectedComponentChanged += UpdateSelectedComponentUI;
+            tapToPlaceController.OnPlacementFinished -= RestoreToolboxAfterPlacement;
+            tapToPlaceController.OnPlacementFinished += RestoreToolboxAfterPlacement;
             UpdateSelectedComponentUI(tapToPlaceController.SelectedComponent);
         }
     }
@@ -162,6 +168,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (tapToPlaceController != null)
         {
             tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
+            tapToPlaceController.OnPlacementFinished -= RestoreToolboxAfterPlacement;
         }
     }
 
@@ -188,6 +195,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         {
             tapToPlaceController.OnSelectedComponentChanged -= UpdateSelectedComponentUI;
             tapToPlaceController.OnSelectedComponentChanged += UpdateSelectedComponentUI;
+            tapToPlaceController.OnPlacementFinished -= RestoreToolboxAfterPlacement;
+            tapToPlaceController.OnPlacementFinished += RestoreToolboxAfterPlacement;
             UpdateSelectedComponentUI(tapToPlaceController.SelectedComponent);
         }
 
@@ -211,12 +220,28 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         {
             SetMenuVisible(false);
         }
+        ApplyMenuVisibility();
     }
 
     public Canvas MenuCanvas => targetCanvas;
 
     public void SetMenuVisible(bool visible)
     {
+        if (!visible && returnToToolboxAfterPlacement)
+            CancelToolboxPlacement();
+        menuVisibilityRequested = visible;
+        ApplyMenuVisibility();
+    }
+
+    public void SetHiddenForSizeDialog(bool hidden)
+    {
+        hiddenForSizeDialog = hidden;
+        ApplyMenuVisibility();
+    }
+
+    private void ApplyMenuVisibility()
+    {
+        bool visible = menuVisibilityRequested && !hiddenForSizeDialog;
         if (targetCanvas != null)
         {
             targetCanvas.gameObject.SetActive(visible);
@@ -226,6 +251,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             GameObject canvasObj = GameObject.Find("ARFloatingMenu_Canvas");
             if (canvasObj != null)
             {
+                targetCanvas = canvasObj.GetComponent<Canvas>();
                 canvasObj.SetActive(visible);
             }
         }
@@ -317,6 +343,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     public void ToggleChatBubbleMenu()
     {
+        if (returnToToolboxAfterPlacement)
+        {
+            CancelToolboxPlacement();
+            return;
+        }
+
         if (isBarExpanded)
         {
             RetractMenu();
@@ -338,6 +370,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     public void RetractMenu()
     {
+        if (returnToToolboxAfterPlacement)
+            CancelToolboxPlacement();
         isBarExpanded = false;
         if (mainBubbleLabelText != null) mainBubbleLabelText.text = "MENU AR";
 
@@ -556,8 +590,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Mở thanh công cụ CHỈNH KÍCH THƯỚC MẶT BÀN...");
         if (isToolboxOpen) ToggleToolboxDrawer();
         if (isWireDrawerOpen) ToggleWireToolDrawer();
-        RetractMenu();
-
         if (spatialCalibrator == null)
         {
             spatialCalibrator = FindFirstObjectByType<TwoPointSpatialCalibrator>();
@@ -622,6 +654,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (tapToPlaceController != null)
         {
+            tapToPlaceController.ClearSelectedComponent();
             tapToPlaceController.StartPreview(componentName);
         }
 
@@ -630,8 +663,100 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             menuHUDController.Select(componentName);
         }
 
-        // GIỮ NGUYÊN KHAY DỤNG CỤ: Không tự động đóng để người dùng thoải mái chọn liên tiếp nhiều linh kiện!
-        // Người dùng có thể chủ động bấm nút 'ĐÓNG' trong khay hoặc thu gọn menu khi hoàn tất.
+        if (isToolboxOpen && tapToPlaceController != null && tapToPlaceController.CurrentPrefabToPlace != null)
+            ShowPlacementCancelMenu();
+    }
+
+    private void ShowPlacementCancelMenu()
+    {
+        returnToToolboxAfterPlacement = true;
+        if (animCoroutine != null) StopCoroutine(animCoroutine);
+        if (drawerAnimCoroutine != null) StopCoroutine(drawerAnimCoroutine);
+        isBarExpanded = false;
+        isToolboxOpen = false;
+        SetMenuStateImmediate(false);
+        UpdateMainBubblePlacementIcon();
+    }
+
+    private void CancelToolboxPlacement()
+    {
+        if (!returnToToolboxAfterPlacement) return;
+        if (tapToPlaceController != null) tapToPlaceController.CancelPlacement();
+        if (returnToToolboxAfterPlacement) RestoreToolboxAfterPlacement();
+    }
+
+    private void RestoreToolboxAfterPlacement()
+    {
+        if (!returnToToolboxAfterPlacement) return;
+        returnToToolboxAfterPlacement = false;
+        UpdateMainBubblePlacementIcon();
+        if (animCoroutine != null) StopCoroutine(animCoroutine);
+        if (drawerAnimCoroutine != null) StopCoroutine(drawerAnimCoroutine);
+        isBarExpanded = true;
+        SetMenuStateImmediate(true);
+        if (toolboxDrawer != null)
+        {
+            isToolboxOpen = true;
+            toolboxDrawer.gameObject.SetActive(true);
+            toolboxDrawer.localScale = Vector3.one;
+        }
+    }
+
+    private void UpdateMainBubblePlacementIcon()
+    {
+        if (mainChatBubble == null) return;
+        Transform normalIcon = mainChatBubble.Find("MainIcon");
+        if (normalIcon != null) normalIcon.gameObject.SetActive(!returnToToolboxAfterPlacement);
+        if (mainBubbleCancelIcon == null)
+        {
+            GameObject trashButton = new GameObject("CancelPlacementTrash", typeof(RectTransform), typeof(Image));
+            trashButton.transform.SetParent(mainChatBubble, false);
+            RectTransform backgroundRect = trashButton.GetComponent<RectTransform>();
+            backgroundRect.anchorMin = Vector2.zero;
+            backgroundRect.anchorMax = Vector2.one;
+            backgroundRect.offsetMin = Vector2.zero;
+            backgroundRect.offsetMax = Vector2.zero;
+            Image background = trashButton.GetComponent<Image>();
+            background.sprite = circleSprite;
+            background.color = new Color(0.18f, 0.05f, 0.08f, 0.96f);
+            background.raycastTarget = false;
+
+            GameObject icon = new GameObject("Icon", typeof(RectTransform), typeof(Image));
+            icon.transform.SetParent(trashButton.transform, false);
+            RectTransform iconRect = icon.GetComponent<RectTransform>();
+            iconRect.anchorMin = Vector2.zero;
+            iconRect.anchorMax = Vector2.one;
+            iconRect.offsetMin = new Vector2(18f, 18f);
+            iconRect.offsetMax = new Vector2(-18f, -18f);
+            Image iconImage = icon.GetComponent<Image>();
+            iconImage.sprite = GetTrashIconSprite();
+            iconImage.color = new Color(1f, 0.92f, 0.92f, 1f);
+            iconImage.preserveAspect = true;
+            iconImage.raycastTarget = false;
+
+            mainBubbleCancelIcon = trashButton;
+        }
+        mainBubbleCancelIcon.SetActive(returnToToolboxAfterPlacement);
+        Outline ring = mainChatBubble.GetComponent<Outline>();
+        if (ring != null) ring.effectColor = returnToToolboxAfterPlacement
+            ? new Color(1f, 0.28f, 0.28f, 0.98f)
+            : new Color(0f, 0.95f, 1f, 1f);
+        if (mainBubbleLabelText != null)
+        {
+            mainBubbleLabelText.text = returnToToolboxAfterPlacement ? "HỦY VẬT" : "THU GỌN";
+            mainBubbleLabelText.color = returnToToolboxAfterPlacement
+                ? new Color(1f, 0.4f, 0.4f, 1f)
+                : new Color(0.2f, 0.95f, 1f, 1f);
+            Transform labelPill = mainBubbleLabelText.transform.parent;
+            Image pillImage = labelPill != null ? labelPill.GetComponent<Image>() : null;
+            if (pillImage != null) pillImage.color = returnToToolboxAfterPlacement
+                ? new Color(0.18f, 0.05f, 0.08f, 0.96f)
+                : new Color(0.06f, 0.10f, 0.18f, 0.96f);
+            Outline pillRing = labelPill != null ? labelPill.GetComponent<Outline>() : null;
+            if (pillRing != null) pillRing.effectColor = returnToToolboxAfterPlacement
+                ? new Color(1f, 0.28f, 0.28f, 0.98f)
+                : new Color(0f, 0.9f, 1f, 0.8f);
+        }
     }
 
     // =========================================================================
