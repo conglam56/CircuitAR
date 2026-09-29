@@ -270,15 +270,13 @@ public class TapToPlaceController : MonoBehaviour
             // Preserve the selection, but hide its camera-relative preview during recovery.
             if (previewAnchor != null) previewAnchor.SetActive(false);
             canPlace = false;
-            // Tracking loss must never trigger drag-to-trash or commit a stale world pose.
+            // Tracking loss must never trigger accidental placement or commit a stale world pose.
             if (isDragging)
             {
                 isDragging = false;
                 draggedObject = null;
-                isHoveringTrash = false;
                 unpinchGraceTimer = 0f;
                 isDragBlocked = false;
-                if (floatingMenu != null) floatingMenu.SetTrashZoneVisible(false);
             }
             return;
         }
