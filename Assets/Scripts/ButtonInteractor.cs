@@ -280,6 +280,10 @@ public class ButtonInteractor : MonoBehaviour
 
             bool isHovering = RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam);
             Image img = buttonImages[btn];
+            Color hoverTint = hoverColor;
+            Color pressTint = pressColor;
+            hoverTint.a = originalColors[btn].a;
+            pressTint.a = originalColors[btn].a;
 
             HoldToActivateButton holdComp = btn.GetComponent<HoldToActivateButton>();
             if (holdComp != null)
@@ -288,7 +292,7 @@ public class ButtonInteractor : MonoBehaviour
                 if (isHovering)
                 {
                     anyButtonHovered = true;
-                    img.color = isPinching ? pressColor : hoverColor;
+                    img.color = isPinching ? pressTint : hoverTint;
                 }
                 else
                 {
@@ -300,7 +304,7 @@ public class ButtonInteractor : MonoBehaviour
             if (isHovering)
             {
                 anyButtonHovered = true;
-                img.color = isPinching ? pressColor : hoverColor;
+                img.color = isPinching ? pressTint : hoverTint;
 
                 if (isPinching && !wasPinching && Time.time - lastClickTime > clickCooldown)
                 {

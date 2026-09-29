@@ -51,6 +51,7 @@ public class TapToPlaceController : MonoBehaviour
     [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY ---")]
     public GameObject SelectedComponent { get; private set; }
     public event System.Action<GameObject> OnSelectedComponentChanged;
+    public event System.Action OnPlacementFinished;
     private Dictionary<Renderer, Material[]> originalSelectedMaterials = new Dictionary<Renderer, Material[]>();
     private Material selectionHighlightMat = null;
     private Material selectionInvalidMat = null;
@@ -534,6 +535,7 @@ public class TapToPlaceController : MonoBehaviour
         previewVisual = null;
         currentPrefabToPlace = null;
         menuHUD.ClearSelection();
+        OnPlacementFinished?.Invoke();
     }
 
     private void HandleDragAndDrop()
@@ -791,11 +793,13 @@ public class TapToPlaceController : MonoBehaviour
 
     public void CancelPlacement()
     {
+        bool hadPreview = currentPrefabToPlace != null || previewAnchor != null;
         ClearPreview();
         canPlace = false;
         isDragging = false;
         draggedObject = null;
         Debug.Log("<color=yellow>[TapToPlace]</color> Đã hủy chế độ đặt linh kiện (Placement Cancelled).");
+        if (hadPreview) OnPlacementFinished?.Invoke();
     }
 
     private void AlignVisualBaseToAnchor(GameObject anchor, GameObject visual)

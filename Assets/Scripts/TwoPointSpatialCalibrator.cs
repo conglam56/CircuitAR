@@ -10,11 +10,9 @@ using UnityEngine.XR.ARSubsystems;
 /// <summary>
 /// Quản lý căn chỉnh và cố định bàn mạch AR (TwoPointSpatialCalibrator):
 /// 1. TỰ ĐỘNG ĐẶT CHÍNH DIỆN: Khi chạm, bàn mạch tự động đặt chính diện song song với tầm mắt người dùng.
-/// 2. CỬ CHỈ XOAY TỰ NHIÊN NHƯ IKEA PLACE (Gesture Rotate - Không cần nút):
-///    - Dùng 2 ngón tay vặn xoay (Twist) HOẶC vuốt 1 ngón tay ngang màn hình để xoay bàn mạch khớp khít 100% với cạnh bàn gỗ thật.
-///    - Thao tác trực tiếp trên màn hình cực nhanh, mượt và tự nhiên.
+/// 2. Xoay bàn mạch bằng nút pinch trong hộp thoại kích thước; hỗ trợ thêm cử chỉ xoay màn hình khi được bật.
 /// 3. KHÓA CỨNG CAO ĐỘ THẾ GIỚI: Vị trí Y và XZ luôn giữ nguyên trên mặt bàn, không di chuyển theo camera.
-/// 4. Thanh công cụ tinh gọn: Chỉ gồm thanh kéo Rộng, Dài, Presets và nút XÁC NHẬN CỐ ĐỊNH.
+/// 4. Chọn kích thước từ năm mẫu có sẵn rồi xác nhận cố định bàn mạch.
 /// </summary>
 public class TwoPointSpatialCalibrator : MonoBehaviour
 {
@@ -38,7 +36,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     [Header("--- BOARD ORIENTATION LOCK ---")]
     [Tooltip("Use the user's horizontal viewing direction at placement, instead of the AR plane's changing axis.")]
     public bool alignBoardToUserOnPlacement = true;
-    [Tooltip("Keep the board parallel to the user and disable rotation gestures after placement.")]
+    [Tooltip("Disable touch rotation gestures. The manual pinch rotation buttons remain available.")]
     public bool lockBoardOrientationToUser = true;
 
     [Header("--- UI VÀ TÂM NGẮM ---")]
@@ -60,8 +58,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     private bool isAdjusting = false;
     private TrackableId currentPlaneId = TrackableId.invalidId;
     private GameObject fineTuneUIRoot;
-    private Slider widthSlider;
-    private Slider depthSlider;
+    private ARFloatingBubbleMenu floatingBubbleMenu;
     private List<RectTransform> fineTuneRegisteredButtons = new List<RectTransform>();
     private ButtonInteractor buttonInteractor;
 
@@ -70,17 +67,18 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     private ARScanFloatingHUD floatingHUD;
 
     private TextMeshProUGUI sizeLabelTMP;
-    private TextMeshProUGUI widthValueTMP;
-    private TextMeshProUGUI depthValueTMP;
     private List<Image> presetButtonBgs = new List<Image>();
     private List<Outline> presetButtonOutlines = new List<Outline>();
     private List<Vector2> presetSizes = new List<Vector2>();
     private static Sprite fineTuneRoundedRectSprite;
-    private static Sprite fineTuneSmallPillSprite;
     private static Sprite fineTuneCapsuleSprite;
     private static Sprite fineTuneCircleSprite;
     private static Sprite fineTuneCheckSprite;
     private static Sprite fineTuneCloseIconSprite;
+    private const float RotationButtonHeight = 152f;
+    private const float ConfirmButtonHeight = 166f;
+    private const float FineTunePanelHeight = 48f + 48f + 150f + 150f
+        + RotationButtonHeight + ConfirmButtonHeight + 46f + 5f * 14f;
 
     private static List<ARRaycastHit> hits = new List<ARRaycastHit>();
     private Coroutine warningCoroutine;
@@ -453,7 +451,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// <summary>
     /// Khởi tạo bàn mạch:
     /// - TỰ ĐỘNG CĂN CHÍNH DIỆN THEO HƯỚNG NGƯỜI DÙNG: Căn vuông vắn chính diện với góc nhìn camera tại thời điểm đặt.
-    /// - HỖ TRỢ CỬ CHỈ XOAY 2 NGÓN TAY (IKEA Place): Người dùng có thể vặn xoay nhẹ trên màn hình để khớp mép bàn gỗ thật.
+    /// - Có thể chỉnh góc xoay bằng các nút pinch trong hộp thoại kích thước.
     /// - PHÁP TUYẾN CHUẨN VECTOR3.UP: Phẳng lì tuyệt đối theo trọng lực Trái Đất.
     /// </summary>
     private void DoPlaceBoard(Pose hitPose, ARPlane hitPlane, TrackableId planeId)
@@ -545,7 +543,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         if (floatingHUD != null)
             floatingHUD.ShowWarning("Đang neo bàn mạch", "Giữ camera hướng về mặt bàn");
         CreateARAnchor(new Pose(center, rotation));
-        Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã đặt bàn mạch chính diện. Có thể vuốt 1 hoặc 2 ngón tay trên màn hình để xoay khớp mép bàn.");
+        Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã đặt bàn mạch chính diện. Pinch nút xoay trái/phải để chỉnh góc mặt bàn.");
     }
 
     /// <summary>
@@ -807,6 +805,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     public void ShowFineTuneToolbar(bool isReconfiguring = false)
     {
         CloseResizeBoardToolbar();
+        if (floatingBubbleMenu == null) floatingBubbleMenu = FindFirstObjectByType<ARFloatingBubbleMenu>(FindObjectsInactive.Include);
+        if (floatingBubbleMenu != null) floatingBubbleMenu.SetHiddenForSizeDialog(true);
         EnsureFineTuneSprites();
 
         fineTuneUIRoot = new GameObject("FineTune_Canvas");
@@ -822,47 +822,41 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
 
         fineTuneUIRoot.AddComponent<GraphicRaycaster>();
 
-        // Khung nền chính ở mép dưới màn hình (Card kính mờ bo góc lớn 32px, tự động co giãn theo nội dung không còn khoảng trống đáy)
+        // Khung trong suốt ở mép dưới để vẫn thấy bàn tay và camera khi pinch.
         GameObject panelObj = new GameObject("FineTune_Panel", typeof(RectTransform), typeof(Image));
         panelObj.transform.SetParent(fineTuneUIRoot.transform, false);
 
         RectTransform panelRt = panelObj.GetComponent<RectTransform>();
+        float bottomAnchor = Mathf.Max(0.06f, Screen.safeArea.yMin / Mathf.Max(1f, Screen.height) + 0.02f);
         if (isLandscape)
         {
-            panelRt.anchorMin = new Vector2(0.16f, 0.02f);
-            panelRt.anchorMax = new Vector2(0.84f, 0.02f);
+            panelRt.anchorMin = new Vector2(0.16f, bottomAnchor);
+            panelRt.anchorMax = new Vector2(0.84f, bottomAnchor);
             panelRt.pivot = new Vector2(0.5f, 0f);
         }
         else
         {
-            panelRt.anchorMin = new Vector2(0.02f, 0.02f);
-            panelRt.anchorMax = new Vector2(0.98f, 0.02f);
+            panelRt.anchorMin = new Vector2(0.02f, bottomAnchor);
+            panelRt.anchorMax = new Vector2(0.98f, bottomAnchor);
             panelRt.pivot = new Vector2(0.5f, 0f);
         }
-        panelRt.offsetMin = Vector2.zero;
-        panelRt.offsetMax = Vector2.zero;
-
-        ContentSizeFitter csf = panelObj.AddComponent<ContentSizeFitter>();
-        csf.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
-        csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-        LayoutElement panelLe = panelObj.AddComponent<LayoutElement>();
-        panelLe.minHeight = 720;
-        panelLe.preferredHeight = 720;
+        // Đặt chiều cao theo tổng sáu hàng, padding và khoảng cách để nút không tràn khỏi khung.
+        panelRt.sizeDelta = new Vector2(0f, FineTunePanelHeight);
+        panelRt.anchoredPosition = Vector2.zero;
 
         Image panelImg = panelObj.GetComponent<Image>();
         panelImg.sprite = fineTuneRoundedRectSprite;
         panelImg.type = Image.Type.Sliced;
-        panelImg.color = new Color(0.045f, 0.08f, 0.15f, 0.95f); // Dark Slate Glass
-        panelImg.raycastTarget = true;
+        panelImg.color = new Color(0.045f, 0.08f, 0.15f, 0.18f);
+        panelImg.raycastTarget = false;
 
         Outline panelOutline = panelObj.AddComponent<Outline>();
-        panelOutline.effectColor = new Color(0f, 0.88f, 1f, 0.65f); // Neon Cyan Outline
+        panelOutline.effectColor = new Color(0f, 0.88f, 1f, 0.45f);
         panelOutline.effectDistance = new Vector2(2f, -2f);
 
         VerticalLayoutGroup vlg = panelObj.AddComponent<VerticalLayoutGroup>();
-        vlg.padding = new RectOffset(26, 26, 26, 28);
-        vlg.spacing = 16;
+        vlg.padding = new RectOffset(20, 20, 22, 24);
+        vlg.spacing = 14;
         vlg.childForceExpandWidth = true;
         vlg.childForceExpandHeight = false;
         vlg.childControlWidth = true;
@@ -897,12 +891,12 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         closeRt.anchorMin = new Vector2(1f, 1f);
         closeRt.anchorMax = new Vector2(1f, 1f);
         closeRt.pivot = new Vector2(1f, 1f);
-        closeRt.sizeDelta = new Vector2(76f, 76f);
-        closeRt.anchoredPosition = new Vector2(-20f, -14f);
+        closeRt.sizeDelta = new Vector2(96f, 96f);
+        closeRt.anchoredPosition = new Vector2(-14f, -10f);
 
         Image closeImg = closeBtnObj.GetComponent<Image>();
         closeImg.sprite = fineTuneCircleSprite;
-        closeImg.color = new Color(0.16f, 0.24f, 0.38f, 0.95f);
+        closeImg.color = new Color(0.16f, 0.24f, 0.38f, 0.72f);
 
         Outline closeOutline = closeBtnObj.AddComponent<Outline>();
         closeOutline.effectColor = new Color(0.3f, 0.65f, 0.95f, 0.8f);
@@ -927,68 +921,45 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
 
         fineTuneRegisteredButtons.Add(closeRt);
 
-        // Vùng đệm cách biệt an toàn giữa Header/Nút [X] và Hàng thanh kéo đầu tiên (ngăn cách hoàn toàn nút X với dấu +)
-        GameObject spacerHeaderObj = new GameObject("Spacer_Header_Slider", typeof(RectTransform), typeof(LayoutElement));
+        // Chừa chỗ cho nút đóng, tránh vùng pinch của nút đầu tiên bị chồng lên.
+        GameObject spacerHeaderObj = new GameObject("Spacer_Header_Presets", typeof(RectTransform), typeof(LayoutElement));
         spacerHeaderObj.transform.SetParent(panelObj.transform, false);
         LayoutElement spacerHeaderLe = spacerHeaderObj.GetComponent<LayoutElement>();
-        spacerHeaderLe.minHeight = 32;
-        spacerHeaderLe.preferredHeight = 32;
+        spacerHeaderLe.minHeight = 48;
+        spacerHeaderLe.preferredHeight = 48;
         spacerHeaderLe.flexibleHeight = 0;
 
-        // Hàng 1: Thanh kéo Chiều Rộng (Width Slider) - Hỗ trợ mở rộng đến 2.50m
-        widthSlider = CreateModernSliderRow(panelObj.transform, "Chiều Rộng (Ngang)", 0.30f, 2.50f, defaultBoardWidth, new Color(0.0f, 0.85f, 1f), (val) =>
-        {
-            defaultBoardWidth = val;
-            UpdateWidthLabel(val);
-            UpdateBoardScale();
-            UpdatePresetHighlights(defaultBoardWidth, defaultBoardDepth);
-        }, out widthValueTMP);
-
-        // Hàng 2: Thanh kéo Chiều Dài / Sâu (Depth Slider) - Hỗ trợ mở rộng đến 2.00m
-        depthSlider = CreateModernSliderRow(panelObj.transform, "Chiều Dài (Dọc)", 0.30f, 2.00f, defaultBoardDepth, new Color(0.15f, 0.90f, 0.60f), (val) =>
-        {
-            defaultBoardDepth = val;
-            UpdateDepthLabel(val);
-            UpdateBoardScale();
-            UpdatePresetHighlights(defaultBoardWidth, defaultBoardDepth);
-        }, out depthValueTMP);
-
-        // Vùng đệm cách biệt an toàn giữa thanh trượt Chiều Dài và hàng nút mẫu
-        GameObject spacerObj = new GameObject("Spacer_Depth_Presets", typeof(RectTransform), typeof(LayoutElement));
-        spacerObj.transform.SetParent(panelObj.transform, false);
-        LayoutElement spacerLe = spacerObj.GetComponent<LayoutElement>();
-        spacerLe.minHeight = 24;
-        spacerLe.preferredHeight = 24;
-        spacerLe.flexibleHeight = 0;
-
-        // Hàng 3: Kích thước mẫu nhanh (Presets Chips) - 5 nút Card lớn cao 125px cực kỳ dễ nhìn và dễ bấm
+        // Năm kích thước mẫu, chia thành hai hàng để mỗi nút có vùng pinch lớn.
         presetButtonBgs.Clear();
         presetButtonOutlines.Clear();
         presetSizes.Clear();
 
-        GameObject rowPresets = CreateRow(panelObj.transform, 10);
-        LayoutElement presetsLe = rowPresets.GetComponent<LayoutElement>();
-        if (presetsLe != null)
-        {
-            presetsLe.minHeight = 125;
-            presetsLe.preferredHeight = 125;
-            presetsLe.flexibleHeight = 0;
-        }
+        GameObject firstPresetRow = CreatePresetRow(panelObj.transform);
+        CreatePresetChip(firstPresetRow.transform, "40 × 30", 0.40f, 0.30f);
+        CreatePresetChip(firstPresetRow.transform, "60 × 40", 0.60f, 0.40f);
+        CreatePresetChip(firstPresetRow.transform, "80 × 60", 0.80f, 0.60f);
 
-        CreatePresetChip(rowPresets.transform, "40 × 30", 0.40f, 0.30f);
-        CreatePresetChip(rowPresets.transform, "60 × 40", 0.60f, 0.40f);
-        CreatePresetChip(rowPresets.transform, "80 × 60", 0.80f, 0.60f);
-        CreatePresetChip(rowPresets.transform, "100 × 70", 1.00f, 0.70f);
-        CreatePresetChip(rowPresets.transform, "120 × 80", 1.20f, 0.80f);
+        GameObject secondPresetRow = CreatePresetRow(panelObj.transform);
+        CreatePresetChip(secondPresetRow.transform, "100 × 70", 1.00f, 0.70f);
+        CreatePresetChip(secondPresetRow.transform, "120 × 80", 1.20f, 0.80f);
         UpdatePresetHighlights(defaultBoardWidth, defaultBoardDepth);
 
-        // Hàng 4: NÚT XÁC NHẬN (Kích thước lớn 84px, chữ 1 dòng duy nhất)
+        // Xoay bàn mạch bằng pinch, kể cả khi không dùng cử chỉ trên màn hình.
+        GameObject rowRotation = CreateRow(panelObj.transform, 14);
+        LayoutElement rotationRowLe = rowRotation.GetComponent<LayoutElement>();
+        rotationRowLe.minHeight = RotationButtonHeight;
+        rotationRowLe.preferredHeight = RotationButtonHeight;
+        rotationRowLe.flexibleHeight = 0;
+        CreateRotationButton(rowRotation.transform, "XOAY TRÁI 5°", -5f);
+        CreateRotationButton(rowRotation.transform, "XOAY PHẢI 5°", 5f);
+
+        // Nút xác nhận rộng và cao để pinch thuận tiện.
         GameObject rowConfirm = CreateRow(panelObj.transform, 0);
         LayoutElement confirmRowLe = rowConfirm.GetComponent<LayoutElement>();
         if (confirmRowLe != null)
         {
-            confirmRowLe.minHeight = 84;
-            confirmRowLe.preferredHeight = 84;
+            confirmRowLe.minHeight = ConfirmButtonHeight;
+            confirmRowLe.preferredHeight = ConfirmButtonHeight;
             confirmRowLe.flexibleHeight = 0;
         }
 
@@ -996,8 +967,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         System.Action confirmAction = isReconfiguring ? (System.Action)ConfirmResizeBoard : ConfirmAndLockPlacement;
         Button confirmBtn = CreateConfirmButton(rowConfirm.transform, confirmTitle, confirmAction);
         LayoutElement confirmLe = confirmBtn.gameObject.AddComponent<LayoutElement>();
-        confirmLe.minHeight = 84;
-        confirmLe.preferredHeight = 84;
+        confirmLe.minHeight = ConfirmButtonHeight;
+        confirmLe.preferredHeight = ConfirmButtonHeight;
         confirmLe.flexibleHeight = 0;
 
         // Đăng ký tương tác MediaPipe Hand Air Pinch cho toàn bộ nút trong Toolbar
@@ -1010,8 +981,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             }
         }
 
-        // Hiệu ứng trượt slide-up êm ái khi vừa xuất hiện
-        StartCoroutine(AnimateToolbarSlideUp(panelRt));
+        LayoutRebuilder.ForceRebuildLayoutImmediate(panelRt);
     }
 
     /// <summary>
@@ -1028,6 +998,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// </summary>
     public void CloseResizeBoardToolbar()
     {
+        bool hadDialog = fineTuneUIRoot != null;
         if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
         if (buttonInteractor != null)
         {
@@ -1043,266 +1014,18 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             Destroy(fineTuneUIRoot);
             fineTuneUIRoot = null;
         }
+        if (hadDialog && floatingBubbleMenu != null)
+            floatingBubbleMenu.SetHiddenForSizeDialog(false);
     }
 
-    private Slider CreateModernSliderRow(Transform parent, string title, float min, float max, float currentVal, Color fillColor, System.Action<float> onValueChange, out TextMeshProUGUI valueLabel)
+    private GameObject CreatePresetRow(Transform parent)
     {
-        GameObject rowObj = new GameObject("SliderRow_" + title, typeof(RectTransform), typeof(LayoutElement));
-        rowObj.transform.SetParent(parent, false);
-
-        LayoutElement rowLe = rowObj.GetComponent<LayoutElement>();
-        rowLe.minHeight = 140;
-        rowLe.preferredHeight = 140;
-        rowLe.flexibleHeight = 0;
-
-        VerticalLayoutGroup vlg = rowObj.AddComponent<VerticalLayoutGroup>();
-        vlg.spacing = 10;
-        vlg.childForceExpandWidth = true;
-        vlg.childForceExpandHeight = false;
-        vlg.childControlWidth = true;
-        vlg.childControlHeight = true;
-
-        // Top info subrow: [ Title ] [ - ] [ 120 cm ] [ + ] (Cao 76px, các nút dạng viên thuốc to dày dễ chạm/pinch)
-        GameObject infoRow = new GameObject("InfoRow", typeof(RectTransform), typeof(LayoutElement));
-        infoRow.transform.SetParent(rowObj.transform, false);
-        LayoutElement infoLe = infoRow.GetComponent<LayoutElement>();
-        infoLe.minHeight = 76;
-        infoLe.preferredHeight = 76;
-        infoLe.flexibleHeight = 0;
-
-        HorizontalLayoutGroup hlg = infoRow.AddComponent<HorizontalLayoutGroup>();
-        hlg.padding = new RectOffset(0, 12, 0, 0); // Thụt lề nhẹ bên phải để dấu [+] không thẳng hàng sát mép với nút đóng [X]
-        hlg.spacing = 12;
-        hlg.childForceExpandWidth = false;
-        hlg.childForceExpandHeight = false;
-        hlg.childControlWidth = true;
-        hlg.childControlHeight = true;
-        hlg.childAlignment = TextAnchor.MiddleCenter;
-
-        // Title
-        GameObject titleObj = new GameObject("Title", typeof(RectTransform), typeof(LayoutElement));
-        titleObj.transform.SetParent(infoRow.transform, false);
-        LayoutElement titleLe = titleObj.GetComponent<LayoutElement>();
-        titleLe.minWidth = 140;
-        titleLe.flexibleWidth = 1;
-        titleLe.minHeight = 76;
-        titleLe.preferredHeight = 76;
-        titleLe.flexibleHeight = 0;
-
-        TextMeshProUGUI titleTMP = titleObj.AddComponent<TextMeshProUGUI>();
-        titleTMP.font = WelcomeScreenController.GetSafeFont();
-        titleTMP.text = title;
-        titleTMP.fontSize = 22f;
-        titleTMP.fontStyle = FontStyles.Bold;
-        titleTMP.color = new Color(0.92f, 0.96f, 1f);
-        titleTMP.alignment = TextAlignmentOptions.MidlineLeft;
-
-        // Stepper: [ - ] [ 120 cm ] [ + ]
-        // Nút trừ nhanh (-10cm) - Dạng viên thuốc đứng 76x76px bo tròn mềm mại (Capsule)
-        GameObject minusBtnObj = new GameObject("Btn_Minus", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-        minusBtnObj.transform.SetParent(infoRow.transform, false);
-        LayoutElement minusLe = minusBtnObj.GetComponent<LayoutElement>();
-        minusLe.minWidth = 76;
-        minusLe.preferredWidth = 76;
-        minusLe.minHeight = 76;
-        minusLe.preferredHeight = 76;
-        minusLe.flexibleWidth = 0;
-        minusLe.flexibleHeight = 0;
-
-        Image minusImg = minusBtnObj.GetComponent<Image>();
-        minusImg.sprite = fineTuneCapsuleSprite;
-        minusImg.type = Image.Type.Sliced;
-        minusImg.color = new Color(0.10f, 0.16f, 0.26f, 0.95f);
-        Outline minusOutline = minusBtnObj.AddComponent<Outline>();
-        minusOutline.effectColor = new Color(fillColor.r, fillColor.g, fillColor.b, 0.65f);
-        minusOutline.effectDistance = new Vector2(2f, -2f);
-        Button minusBtn = minusBtnObj.GetComponent<Button>();
-        minusBtn.targetGraphic = minusImg;
-
-        GameObject minusTxtObj = new GameObject("Txt", typeof(RectTransform), typeof(TextMeshProUGUI));
-        minusTxtObj.transform.SetParent(minusBtnObj.transform, false);
-        RectTransform mtRt = minusTxtObj.GetComponent<RectTransform>();
-        mtRt.anchorMin = Vector2.zero;
-        mtRt.anchorMax = Vector2.one;
-        mtRt.offsetMin = Vector2.zero;
-        mtRt.offsetMax = Vector2.zero;
-        TextMeshProUGUI minusTxt = minusTxtObj.GetComponent<TextMeshProUGUI>();
-        minusTxt.font = WelcomeScreenController.GetSafeFont();
-        minusTxt.text = "<b>-</b>";
-        minusTxt.fontSize = 42;
-        minusTxt.alignment = TextAlignmentOptions.Center;
-        minusTxt.color = Color.white;
-
-        // Ô hiển thị kích thước (Badge) - Rộng 150px, cao 76px bo tròn viên thuốc mềm mại
-        GameObject badgeObj = new GameObject("Badge", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
-        badgeObj.transform.SetParent(infoRow.transform, false);
-        LayoutElement badgeLe = badgeObj.GetComponent<LayoutElement>();
-        badgeLe.minWidth = 150;
-        badgeLe.preferredWidth = 150;
-        badgeLe.minHeight = 76;
-        badgeLe.preferredHeight = 76;
-        badgeLe.flexibleWidth = 0;
-        badgeLe.flexibleHeight = 0;
-
-        Image badgeImg = badgeObj.GetComponent<Image>();
-        badgeImg.sprite = fineTuneCapsuleSprite;
-        badgeImg.type = Image.Type.Sliced;
-        badgeImg.color = new Color(0.07f, 0.12f, 0.20f, 0.92f);
-
-        Outline badgeOutline = badgeObj.AddComponent<Outline>();
-        badgeOutline.effectColor = new Color(fillColor.r, fillColor.g, fillColor.b, 0.65f);
-        badgeOutline.effectDistance = new Vector2(2f, -2f);
-
-        GameObject badgeTxtObj = new GameObject("Txt", typeof(RectTransform));
-        badgeTxtObj.transform.SetParent(badgeObj.transform, false);
-        RectTransform btRT = badgeTxtObj.GetComponent<RectTransform>();
-        btRT.anchorMin = Vector2.zero;
-        btRT.anchorMax = Vector2.one;
-        btRT.offsetMin = Vector2.zero;
-        btRT.offsetMax = Vector2.zero;
-
-        valueLabel = badgeTxtObj.AddComponent<TextMeshProUGUI>();
-        valueLabel.font = WelcomeScreenController.GetSafeFont();
-        valueLabel.text = $"{Mathf.RoundToInt(currentVal * 100)} cm";
-        valueLabel.fontSize = 28f;
-        valueLabel.fontStyle = FontStyles.Bold;
-        valueLabel.alignment = TextAlignmentOptions.Center;
-        valueLabel.color = fillColor;
-
-        // Nút cộng nhanh (+10cm) - Dạng viên thuốc đứng 76x76px
-        GameObject plusBtnObj = new GameObject("Btn_Plus", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-        plusBtnObj.transform.SetParent(infoRow.transform, false);
-        LayoutElement plusLe = plusBtnObj.GetComponent<LayoutElement>();
-        plusLe.minWidth = 76;
-        plusLe.preferredWidth = 76;
-        plusLe.minHeight = 76;
-        plusLe.preferredHeight = 76;
-        plusLe.flexibleWidth = 0;
-        plusLe.flexibleHeight = 0;
-
-        Image plusImg = plusBtnObj.GetComponent<Image>();
-        plusImg.sprite = fineTuneCapsuleSprite;
-        plusImg.type = Image.Type.Sliced;
-        plusImg.color = new Color(0.10f, 0.16f, 0.26f, 0.95f);
-        Outline plusOutline = plusBtnObj.AddComponent<Outline>();
-        plusOutline.effectColor = new Color(fillColor.r, fillColor.g, fillColor.b, 0.65f);
-        plusOutline.effectDistance = new Vector2(2f, -2f);
-        Button plusBtn = plusBtnObj.GetComponent<Button>();
-        plusBtn.targetGraphic = plusImg;
-
-        GameObject plusTxtObj = new GameObject("Txt", typeof(RectTransform), typeof(TextMeshProUGUI));
-        plusTxtObj.transform.SetParent(plusBtnObj.transform, false);
-        RectTransform ptRt = plusTxtObj.GetComponent<RectTransform>();
-        ptRt.anchorMin = Vector2.zero;
-        ptRt.anchorMax = Vector2.one;
-        ptRt.offsetMin = Vector2.zero;
-        ptRt.offsetMax = Vector2.zero;
-        TextMeshProUGUI plusTxt = plusTxtObj.GetComponent<TextMeshProUGUI>();
-        plusTxt.font = WelcomeScreenController.GetSafeFont();
-        plusTxt.text = "<b>+</b>";
-        plusTxt.fontSize = 42;
-        plusTxt.alignment = TextAlignmentOptions.Center;
-        plusTxt.color = Color.white;
-
-        // Slider component
-        GameObject sliderObj = new GameObject("Slider", typeof(RectTransform), typeof(LayoutElement));
-        sliderObj.transform.SetParent(rowObj.transform, false);
-        RectTransform sliderRt = sliderObj.GetComponent<RectTransform>();
-        sliderRt.sizeDelta = new Vector2(0, 40);
-        LayoutElement sliderLe = sliderObj.AddComponent<LayoutElement>();
-        sliderLe.minHeight = 40;
-        sliderLe.preferredHeight = 40;
-        sliderLe.flexibleHeight = 0;
-
-        Slider slider = sliderObj.AddComponent<Slider>();
-        slider.transition = Selectable.Transition.ColorTint;
-
-        // Background Track
-        GameObject bgObj = new GameObject("Background", typeof(RectTransform), typeof(Image));
-        bgObj.transform.SetParent(sliderObj.transform, false);
-        RectTransform bgRt = bgObj.GetComponent<RectTransform>();
-        bgRt.anchorMin = new Vector2(0f, 0.38f);
-        bgRt.anchorMax = new Vector2(1f, 0.62f);
-        bgRt.offsetMin = new Vector2(16, 0);
-        bgRt.offsetMax = new Vector2(-16, 0);
-        Image bgImg = bgObj.GetComponent<Image>();
-        bgImg.sprite = fineTuneCapsuleSprite;
-        bgImg.type = Image.Type.Sliced;
-        bgImg.color = new Color(0.08f, 0.12f, 0.20f, 1f);
-
-        // Fill Area
-        GameObject fillArea = new GameObject("Fill Area", typeof(RectTransform));
-        fillArea.transform.SetParent(sliderObj.transform, false);
-        RectTransform fillAreaRt = fillArea.GetComponent<RectTransform>();
-        fillAreaRt.anchorMin = new Vector2(0f, 0.38f);
-        fillAreaRt.anchorMax = new Vector2(1f, 0.62f);
-        fillAreaRt.offsetMin = new Vector2(16, 0);
-        fillAreaRt.offsetMax = new Vector2(-16, 0);
-
-        // Fill
-        GameObject fill = new GameObject("Fill", typeof(RectTransform), typeof(Image));
-        fill.transform.SetParent(fillArea.transform, false);
-        RectTransform fillRt = fill.GetComponent<RectTransform>();
-        fillRt.anchorMin = Vector2.zero;
-        fillRt.anchorMax = new Vector2(0f, 1f);
-        fillRt.offsetMin = Vector2.zero;
-        fillRt.offsetMax = Vector2.zero;
-        Image fillImg = fill.GetComponent<Image>();
-        fillImg.sprite = fineTuneCapsuleSprite;
-        fillImg.type = Image.Type.Sliced;
-        fillImg.color = fillColor;
-
-        // Handle Slide Area
-        GameObject handleArea = new GameObject("Handle Slide Area", typeof(RectTransform));
-        handleArea.transform.SetParent(sliderObj.transform, false);
-        RectTransform handleAreaRt = handleArea.GetComponent<RectTransform>();
-        handleAreaRt.anchorMin = Vector2.zero;
-        handleAreaRt.anchorMax = Vector2.one;
-        handleAreaRt.offsetMin = new Vector2(16, 0);
-        handleAreaRt.offsetMax = new Vector2(-16, 0);
-
-        // Handle: kích thước 48x48px
-        GameObject handle = new GameObject("Handle", typeof(RectTransform), typeof(Image));
-        handle.transform.SetParent(handleArea.transform, false);
-        RectTransform handleRt = handle.GetComponent<RectTransform>();
-        handleRt.sizeDelta = new Vector2(48, 48);
-        Image handleImg = handle.GetComponent<Image>();
-        handleImg.sprite = fineTuneCircleSprite;
-        handleImg.color = Color.white;
-
-        Outline handleOutline = handle.AddComponent<Outline>();
-        handleOutline.effectColor = fillColor;
-        handleOutline.effectDistance = new Vector2(2f, -2f);
-
-        slider.fillRect = fillRt;
-        slider.handleRect = handleRt;
-        slider.targetGraphic = handleImg;
-        slider.direction = Slider.Direction.LeftToRight;
-        slider.minValue = min;
-        slider.maxValue = max;
-        slider.value = currentVal;
-
-        slider.onValueChanged.AddListener(val =>
-        {
-            onValueChange?.Invoke(val);
-        });
-
-        minusBtn.onClick.AddListener(() =>
-        {
-            float nv = Mathf.Round((slider.value - 0.10f) * 100f) / 100f;
-            slider.value = Mathf.Clamp(nv, min, max);
-        });
-
-        plusBtn.onClick.AddListener(() =>
-        {
-            float nv = Mathf.Round((slider.value + 0.10f) * 100f) / 100f;
-            slider.value = Mathf.Clamp(nv, min, max);
-        });
-
-        fineTuneRegisteredButtons.Add(minusBtnObj.GetComponent<RectTransform>());
-        fineTuneRegisteredButtons.Add(plusBtnObj.GetComponent<RectTransform>());
-
-        return slider;
+        GameObject row = CreateRow(parent, 14);
+        LayoutElement rowLayout = row.GetComponent<LayoutElement>();
+        rowLayout.minHeight = 150;
+        rowLayout.preferredHeight = 150;
+        rowLayout.flexibleHeight = 0;
+        return row;
     }
 
     private void CreatePresetChip(Transform parent, string label, float w, float d)
@@ -1312,15 +1035,15 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         chipObj.transform.SetParent(parent, false);
 
         LayoutElement le = chipObj.GetComponent<LayoutElement>();
-        le.minHeight = 125;
-        le.preferredHeight = 125;
+        le.minHeight = 150;
+        le.preferredHeight = 150;
         le.flexibleWidth = 1;
         le.flexibleHeight = 0;
 
         Image img = chipObj.GetComponent<Image>();
         img.sprite = fineTuneCapsuleSprite;
         img.type = Image.Type.Sliced;
-        img.color = new Color(0.09f, 0.14f, 0.24f, 0.95f);
+        img.color = new Color(0.09f, 0.14f, 0.24f, 0.62f);
 
         Outline outline = chipObj.AddComponent<Outline>();
         outline.effectColor = new Color(0.2f, 0.3f, 0.45f, 0.5f);
@@ -1341,17 +1064,63 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         TextMeshProUGUI txt = txtObj.AddComponent<TextMeshProUGUI>();
         txt.font = WelcomeScreenController.GetSafeFont();
         txt.text = $"<b>{label}</b>\n<size=16><color=#94A3B8>cm</color></size>";
-        txt.fontSize = 26f;
+        txt.fontSize = 30f;
         txt.fontStyle = FontStyles.Bold;
         txt.alignment = TextAlignmentOptions.Center;
         txt.lineSpacing = 2f;
         txt.color = Color.white;
         txt.enableWordWrapping = false;
+        txt.raycastTarget = false;
 
         presetButtonBgs.Add(img);
         presetButtonOutlines.Add(outline);
         presetSizes.Add(new Vector2(w, d));
         fineTuneRegisteredButtons.Add(chipObj.GetComponent<RectTransform>());
+    }
+
+    private void CreateRotationButton(Transform parent, string label, float degrees)
+    {
+        GameObject buttonObj = new GameObject("Btn_" + label, typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+        buttonObj.transform.SetParent(parent, false);
+
+        LayoutElement layout = buttonObj.GetComponent<LayoutElement>();
+        layout.minHeight = RotationButtonHeight;
+        layout.preferredHeight = RotationButtonHeight;
+        layout.flexibleWidth = 1;
+        layout.flexibleHeight = 0;
+
+        Image image = buttonObj.GetComponent<Image>();
+        image.sprite = fineTuneCapsuleSprite;
+        image.type = Image.Type.Sliced;
+        image.color = new Color(0.08f, 0.22f, 0.34f, 0.62f);
+
+        Outline outline = buttonObj.AddComponent<Outline>();
+        outline.effectColor = new Color(0f, 0.88f, 1f, 0.72f);
+        outline.effectDistance = new Vector2(2f, -2f);
+
+        Button button = buttonObj.GetComponent<Button>();
+        button.targetGraphic = image;
+        button.onClick.AddListener(() => AdjustYaw(degrees));
+
+        GameObject textObj = new GameObject("Txt", typeof(RectTransform), typeof(TextMeshProUGUI));
+        textObj.transform.SetParent(buttonObj.transform, false);
+        RectTransform textRect = textObj.GetComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.offsetMin = Vector2.zero;
+        textRect.offsetMax = Vector2.zero;
+
+        TextMeshProUGUI text = textObj.GetComponent<TextMeshProUGUI>();
+        text.font = WelcomeScreenController.GetSafeFont();
+        text.text = label;
+        text.fontSize = 28f;
+        text.fontStyle = FontStyles.Bold;
+        text.alignment = TextAlignmentOptions.Center;
+        text.color = Color.white;
+        text.enableWordWrapping = false;
+        text.raycastTarget = false;
+
+        fineTuneRegisteredButtons.Add(buttonObj.GetComponent<RectTransform>());
     }
 
     private Button CreateConfirmButton(Transform parent, string label, System.Action onClick)
@@ -1362,7 +1131,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         Image img = btnObj.GetComponent<Image>();
         img.sprite = fineTuneCapsuleSprite;
         img.type = Image.Type.Sliced;
-        img.color = new Color(0.02f, 0.68f, 0.46f, 0.95f); // Emerald/Mint gradient base
+        img.color = new Color(0.02f, 0.68f, 0.46f, 0.78f);
 
         Outline outline = btnObj.AddComponent<Outline>();
         outline.effectColor = new Color(0.35f, 1f, 0.78f, 0.90f); // Bright Mint glow
@@ -1415,49 +1184,10 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         txt.color = Color.white;
         txt.characterSpacing = 1.0f;
         txt.enableWordWrapping = false; // Ngăn không cho chữ nhảy xuống dòng 2
+        txt.raycastTarget = false;
 
         fineTuneRegisteredButtons.Add(btnObj.GetComponent<RectTransform>());
         return btn;
-    }
-
-    private IEnumerator AnimateToolbarSlideUp(RectTransform panelRt)
-    {
-        if (panelRt == null) yield break;
-
-        // Ép tính toán kích thước tự động (ContentSizeFitter) trước khi bắt đầu hiệu ứng trượt
-        LayoutRebuilder.ForceRebuildLayoutImmediate(panelRt);
-
-        float duration = 0.28f;
-        float elapsed = 0f;
-        Vector2 startPos = new Vector2(0f, -900f);
-        Vector2 endPos = Vector2.zero;
-        panelRt.anchoredPosition = startPos;
-
-        while (elapsed < duration)
-        {
-            elapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(elapsed / duration);
-            float ease = 1f + 0.8f * Mathf.Pow(t - 1f, 3) + 0.8f * Mathf.Pow(t - 1f, 2);
-            panelRt.anchoredPosition = Vector2.LerpUnclamped(startPos, endPos, ease);
-            yield return null;
-        }
-        panelRt.anchoredPosition = endPos;
-    }
-
-    private void UpdateWidthLabel(float w)
-    {
-        if (widthValueTMP != null)
-        {
-            widthValueTMP.text = $"{Mathf.RoundToInt(w * 100)} cm";
-        }
-    }
-
-    private void UpdateDepthLabel(float d)
-    {
-        if (depthValueTMP != null)
-        {
-            depthValueTMP.text = $"{Mathf.RoundToInt(d * 100)} cm";
-        }
     }
 
     private void UpdatePresetHighlights(float w, float d)
@@ -1469,13 +1199,13 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             bool isMatch = Mathf.Abs(presetSizes[i].x - w) < 0.02f && Mathf.Abs(presetSizes[i].y - d) < 0.02f;
             if (isMatch)
             {
-                presetButtonBgs[i].color = new Color(0.12f, 0.24f, 0.40f, 0.98f);
+                presetButtonBgs[i].color = new Color(0.12f, 0.30f, 0.44f, 0.78f);
                 presetButtonOutlines[i].effectColor = new Color(0f, 0.95f, 1f, 0.95f);
                 presetButtonOutlines[i].effectDistance = new Vector2(2f, -2f);
             }
             else
             {
-                presetButtonBgs[i].color = new Color(0.08f, 0.13f, 0.22f, 0.92f);
+                presetButtonBgs[i].color = new Color(0.08f, 0.13f, 0.22f, 0.58f);
                 presetButtonOutlines[i].effectColor = new Color(0.2f, 0.3f, 0.42f, 0.45f);
                 presetButtonOutlines[i].effectDistance = new Vector2(1f, -1f);
             }
@@ -1534,10 +1264,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     {
         defaultBoardWidth = w;
         defaultBoardDepth = d;
-        if (widthSlider != null) widthSlider.value = w;
-        if (depthSlider != null) depthSlider.value = d;
-        UpdateWidthLabel(w);
-        UpdateDepthLabel(d);
         UpdateBoardScale();
         UpdatePresetHighlights(w, d);
     }
@@ -1554,7 +1280,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     {
         if (fineTuneCircleSprite == null) fineTuneCircleSprite = GenerateCircleSprite(64);
         if (fineTuneRoundedRectSprite == null) fineTuneRoundedRectSprite = GenerateRoundedRectSprite(128, 128, 20);
-        if (fineTuneSmallPillSprite == null) fineTuneSmallPillSprite = GenerateRoundedRectSprite(32, 32, 8);
         if (fineTuneCapsuleSprite == null) fineTuneCapsuleSprite = GenerateRoundedRectSprite(64, 64, 22);
         if (fineTuneCheckSprite == null) fineTuneCheckSprite = GenerateCheckIconSprite(64);
         if (fineTuneCloseIconSprite == null) fineTuneCloseIconSprite = GenerateCloseIconSprite(64);
@@ -1703,8 +1428,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     public void AdjustRoll(float deltaDegrees) { }
     public void AdjustYaw(float deltaDegrees)
     {
-        if (lockBoardOrientationToUser) return;
-
         if (ActiveBoardAnchor != null)
         {
             lockedWorldRot = Quaternion.AngleAxis(deltaDegrees, Vector3.up) * lockedWorldRot;
@@ -1817,7 +1540,8 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         }
 
         if (spatialCalibrationUI != null) spatialCalibrationUI.SetActive(true);
-        if (reticleUI != null) reticleUI.SetActive(true);
+        // AR_Reticle cũ là ô đỏ giữa màn hình; giao diện quét dùng HolographicARReticle.
+        if (reticleUI != null) reticleUI.SetActive(false);
         if (holographicReticle != null) holographicReticle.Hide();
         if (floatingHUD != null) floatingHUD.ShowScanning();
 
