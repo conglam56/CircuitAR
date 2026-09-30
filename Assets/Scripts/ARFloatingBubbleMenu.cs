@@ -28,7 +28,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     [Header("--- CẤU HÌNH VỊ TRÍ & KÍCH THƯỚC ---")]
     [Tooltip("Độ cao của bong bóng chat so với mép dưới màn hình (px). Vị trí vàng vùng giữa phía dưới.")]
-    [Range(120f, 350f)] public float menuBottomOffset = 200f;
+    [Range(120f, 350f)] public float menuBottomOffset = 230f;
 
     [Tooltip("Kích thước đường kính của các bong bóng tròn (px)")]
     public float bubbleDiameter = 115f;

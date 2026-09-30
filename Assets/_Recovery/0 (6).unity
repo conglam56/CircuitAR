@@ -559,7 +559,7 @@ MonoBehaviour:
   singlePlaneLockController: {fileID: 0}
   spatialCalibrator: {fileID: 0}
   menuHUDController: {fileID: 372488932}
-  menuBottomOffset: 230
+  menuBottomOffset: 200
   bubbleDiameter: 180
   autoGenerateUI: 1
   disableOldSpatialMenu: 1
