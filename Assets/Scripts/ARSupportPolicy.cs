@@ -3,6 +3,17 @@ using UnityEngine;
 /// <summary>Bounded decisions on already measured surfaces, never an estimated floor.</summary>
 public static class ARSupportPolicy
 {
+    public static bool CanShareAnchor(UnityEngine.XR.ARSubsystems.TrackingState state, bool pending,
+        Vector3 anchorPosition, Vector3 existingContact, Vector3 measuredContact)
+    {
+        return state == UnityEngine.XR.ARSubsystems.TrackingState.Tracking && !pending &&
+            IsFinite(anchorPosition) && IsFinite(existingContact) && IsFinite(measuredContact) &&
+            Mathf.Abs(anchorPosition.y - measuredContact.y) <= 0.025f &&
+            Mathf.Abs(existingContact.y - measuredContact.y) <= 0.025f &&
+            (existingContact - measuredContact).sqrMagnitude <= 1f &&
+            (anchorPosition - measuredContact).sqrMagnitude <= 1f;
+    }
+
     public static bool PreferMeasuredDepth(Pose plane, Pose depth)
     {
         return IsFinite(plane.position) && IsFinite(depth.position) &&
@@ -12,6 +23,59 @@ public static class ARSupportPolicy
     private static bool IsFinite(Vector3 p) =>
         !float.IsNaN(p.x) && !float.IsNaN(p.y) && !float.IsNaN(p.z) &&
         !float.IsInfinity(p.x) && !float.IsInfinity(p.y) && !float.IsInfinity(p.z);
+
+    // A plane refit may lower an early contact substantially. It must never
+    // automatically lift a floor object onto a newly merged tabletop.
+    public static bool CanCorrectContactHeight(float current, float measured) =>
+        IsFinite(new Vector3(current, measured, 0f)) &&
+        Mathf.Abs(measured - current) > 0.012f &&
+        measured - current >= -0.6f && measured - current <= 0.03f;
+
+    public static bool TryProjectContactVertically(Vector3 contact, Vector3 planePoint,
+        Vector3 normal, out Vector3 projected)
+    {
+        projected = default;
+        if (!IsFinite(contact) || !IsFinite(planePoint) || !IsFinite(normal) ||
+            normal.sqrMagnitude < 0.9f || Vector3.Dot(normal.normalized, Vector3.up) < 0.9659258f)
+            return false;
+        projected = contact;
+        projected.y = planePoint.y - (normal.x * (contact.x - planePoint.x) +
+            normal.z * (contact.z - planePoint.z)) / normal.y;
+        return IsFinite(projected);
+    }
+
+    public sealed class ContactConfirmation
+    {
+        private bool pending;
+        private float firstHeight, startedAt, lastAt;
+        private int observations;
+        public void Reset() { pending = false; observations = 0; }
+
+        // Called only for separate, finite plane + depth observations. Repeated
+        // reads of a cached ray do not qualify as additional evidence.
+        public bool Observe(float currentHeight, float measuredHeight, float now)
+        {
+            if (!CanCorrectContactHeight(currentHeight, measuredHeight) ||
+                float.IsNaN(now) || float.IsInfinity(now))
+            {
+                Reset();
+                return false;
+            }
+            if (!pending || now < lastAt || now - lastAt > 2f ||
+                Mathf.Abs(firstHeight - measuredHeight) > 0.01f)
+            {
+                pending = true;
+                firstHeight = measuredHeight;
+                startedAt = lastAt = now;
+                observations = 1;
+                return false;
+            }
+            if (now <= lastAt) return false;
+            lastAt = now;
+            observations++;
+            return observations >= 3 && now - startedAt >= 0.6f;
+        }
+    }
 
     public sealed class LevelTransition
     {

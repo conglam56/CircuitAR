@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.XR.ARSubsystems;
 
 /// <summary>Pure camera-coordinate checks; no device/session or scene is started.</summary>
 internal static class ARCameraCoordinateRegressionChecks
@@ -86,6 +88,67 @@ internal static class ARCameraCoordinateRegressionChecks
             "Pausing must discard the previous session's crop matrix for both landmarks.");
         results.Add("PASS: index and thumb share one camera-frame mapping and stale session transforms are cleared");
         CheckDepthProbeHandMask(results, croppedPortrait);
+        CheckAsyncCameraConversion(results);
+    }
+
+    private sealed class AsyncCameraApi : XRCpuImage.Api, IDisposable
+    {
+        public XRCpuImage.AsyncConversionStatus State = XRCpuImage.AsyncConversionStatus.Processing;
+        public int DisposedCount;
+        private int requests;
+        private IntPtr buffer = Marshal.AllocHGlobal(16);
+        public AsyncCameraApi() { for (int i = 0; i < 16; i++) Marshal.WriteByte(buffer, i, 42); }
+        public override int ConvertAsync(int nativeHandle, XRCpuImage.ConversionParams conversionParams) => ++requests;
+        public override XRCpuImage.AsyncConversionStatus GetAsyncRequestStatus(int requestId) => State;
+        public override bool TryGetAsyncRequestData(int requestId, out IntPtr pointer, out int length)
+        { pointer = buffer; length = 16; return true; }
+        public override void DisposeAsyncRequest(int requestId)
+        { DisposedCount++; for (int i = 0; i < 16; i++) Marshal.WriteByte(buffer, i, 0); }
+        public void Dispose() { Marshal.FreeHGlobal(buffer); buffer = IntPtr.Zero; }
+    }
+
+    private static void CheckAsyncCameraConversion(List<string> results)
+    {
+        using var api = new AsyncCameraApi();
+        var bridge = new CustomARFrameBridge(null);
+        var constructor = typeof(XRCpuImage.AsyncConversion).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic,
+            null, new[] { typeof(XRCpuImage.Api), typeof(int), typeof(XRCpuImage.ConversionParams) }, null);
+        void Queue()
+        {
+            var parameters = new XRCpuImage.ConversionParams { outputDimensions = new Vector2Int(2, 2), outputFormat = TextureFormat.RGBA32 };
+            Set(bridge, "_cpuConversion", constructor.Invoke(new object[] { api, 1, parameters }));
+            Set(bridge, "_cpuConversionPending", true);
+            Set(bridge, "_pendingDimensions", new Vector2Int(2, 2));
+            Set(bridge, "_acceptCpuFrames", true);
+            Set(bridge, "_cpuConversionStartedAt", System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+        try
+        {
+            Queue();
+            Require(bridge.FrameVersion == 0 && !bridge.isPrepared && api.DisposedCount == 0,
+                "An in-flight CPU conversion must not block or publish an unfinished image.");
+            api.State = XRCpuImage.AsyncConversionStatus.Ready;
+            Require(bridge.FrameVersion == 1 && bridge.isPrepared && api.DisposedCount == 1 && bridge.LatestFrameReadyTimestamp > 0,
+                "Only a complete asynchronous camera image may publish a frame, exactly once.");
+            var texture = (Texture2D)bridge.GetCurrentTexture();
+            Require(texture.GetRawTextureData<byte>()[0] == 42 && texture.GetRawTextureData<byte>()[15] == 42 && bridge.FrameVersion == 1,
+                "Published CPU image bytes must survive disposal of the native request and cannot be republished.");
+            api.State = XRCpuImage.AsyncConversionStatus.Processing;
+            Queue();
+            bridge.Pause();
+            Require(api.DisposedCount == 2 && bridge.FrameVersion == 1,
+                "Pausing must cancel and release native conversion work without publishing a stale image.");
+            api.State = XRCpuImage.AsyncConversionStatus.Failed;
+            Queue();
+            Require(bridge.FrameVersion == 1 && api.DisposedCount == 3,
+                "A failed native conversion must be disposed and leave the previous complete frame intact.");
+            results.Add("PASS: asynchronous AR camera conversion publishes one owned complete image, never blocks on pending work and disposes failures/pause");
+        }
+        finally
+        {
+            bridge.Pause();
+            if (bridge.GetCurrentTexture() != null) UnityEngine.Object.DestroyImmediate(bridge.GetCurrentTexture());
+        }
     }
 
     private static void CheckDepthProbeHandMask(List<string> results, Matrix4x4 croppedPortrait)

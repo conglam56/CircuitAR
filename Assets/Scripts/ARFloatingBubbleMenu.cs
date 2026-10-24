@@ -7,11 +7,9 @@ using TMPro;
 /// <summary>
 /// ARFloatingBubbleMenu - Menu Bong Bóng Chat AR (Messenger Floating Action Bubble).
 /// 100% điều khiển bằng cử chỉ tay MediaPipe (Zero-touchscreen):
-/// 1. Nút Bong Bóng Chat chính (Main Bubble): Bấm/Pinch vào là XÒE RA 3 bong bóng hình tròn, bấm lại là THỤT VÀO.
-/// 2. 3 Bong bóng tròn vệ tinh xòe ra hình cánh quạt, hiển thị chính xác các icon/hình ảnh người dùng yêu cầu:
-///    - Ô 1: Quét lại mặt phẳng (icon_scan)
-///    - Ô 2: Reset mạch điện (icon_reset)
-///    - Ô 3: Kho dụng cụ linh kiện (icon_toolbox)
+/// 1. Nút Bong Bóng Chat chính (Main Bubble): Bấm/Pinch để mở hoặc thu gọn menu.
+/// 2. Năm nút trải đều theo chiều rộng vùng màn hình an toàn:
+///    Dây, Hoàn tác, Kho dụng cụ, Làm lại, Reset mạch.
 ///    Tất cả icon được nhúng trực tiếp qua UIIconAssets (Base64), đảm bảo 100% hiển thị trên mọi thiết bị Android.
 /// 3. Toàn bộ chữ hiển thị dùng tiếng Việt chuẩn, loại bỏ hoàn toàn emoji để không bao giờ bị lỗi ô vuông.
 /// 4. Vị trí công thái học: Nằm ở VÙNG GIỮA PHÍA DƯỚI (cách đáy 200px, không sát rìa, không sát camera).
@@ -30,7 +28,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     [Tooltip("Độ cao của bong bóng chat so với mép dưới màn hình (px). Vị trí vàng vùng giữa phía dưới.")]
     [Range(120f, 350f)] public float menuBottomOffset = 200f;
 
-    [Tooltip("Kích thước đường kính của các bong bóng tròn (px)")]
+    [Tooltip("Đường kính nút xoay / xóa (px). Các nút menu tự tăng kích thước theo chiều rộng màn hình.")]
     public float bubbleDiameter = 115f;
 
     [Tooltip("Tự động tạo giao diện bong bóng chat nếu chưa gán thủ công")]
@@ -41,8 +39,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     [Header("--- THAM CHIẾU UI BONG BÓNG ---")]
     public RectTransform mainChatBubble;        // Bong bóng chat điều khiển chính
-    public RectTransform btnScanBubble;         // Ô tròn 1: Quét lại
-    public RectTransform btnResizePlaneBubble;  // Ô tròn 2: Chỉnh kích thước mặt phẳng (Mở rộng bàn mạch)
     public RectTransform btnUndoBubble;         // Ô tròn 3: Hoàn tác (Requirement 1 & 2)
     public RectTransform btnRedoBubble;         // Ô tròn 3: Làm lại (Requirement 3)
     public RectTransform btnResetBubble;        // Ô tròn 4: Reset mạch
@@ -130,9 +126,14 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private Coroutine animCoroutine;
     private Coroutine drawerAnimCoroutine;
 
-    // Vị trí mục tiêu khi xòe ra (Hình cánh quạt 6 bong bóng đối xứng với MENU ở trung tâm)
-    private Vector2 posScanTarget;
-    private Vector2 posResizePlaneTarget;
+    private RectTransform menuRoot;
+    private float menuButtonDiameter;
+    private int layoutScreenWidth;
+    private int layoutScreenHeight;
+    private Rect layoutSafeArea;
+    private float layoutCanvasWidth;
+
+    // Năm vị trí cách đều theo X, vẫn giữ dáng vòng cung phía trên nút MENU.
     private Vector2 posToolboxTarget;
     private Vector2 posUndoTarget;
     private Vector2 posRedoTarget;
@@ -266,7 +267,72 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     void LateUpdate()
     {
+        UpdateResponsiveMenuLayout();
         LayoutTopActions();
+    }
+
+    private void UpdateResponsiveMenuLayout(bool force = false)
+    {
+        if (targetCanvas == null || menuRoot == null) return;
+        Rect safeArea = Screen.safeArea;
+        if (!force && layoutScreenWidth == Screen.width && layoutScreenHeight == Screen.height &&
+            layoutSafeArea == safeArea && Mathf.Approximately(layoutCanvasWidth, menuRoot.rect.width)) return;
+
+        Canvas.ForceUpdateCanvases();
+        Camera camera = targetCanvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : targetCanvas.worldCamera;
+        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(menuRoot, safeArea.min, camera, out Vector2 safeMin) ||
+            !RectTransformUtility.ScreenPointToLocalPointInRectangle(menuRoot, safeArea.max, camera, out Vector2 safeMax)) return;
+
+        float left = safeMin.x - menuRoot.rect.center.x + 28f;
+        float right = safeMax.x - menuRoot.rect.center.x - 28f;
+        float availableWidth = right - left;
+        if (availableWidth <= 80f) return;
+        menuButtonDiameter = Mathf.Min(190f, (availableWidth - 4f * 20f) / 5f);
+        float mainDiameter = menuButtonDiameter * 0.85f;
+        float baseY = Mathf.Max(menuBottomOffset, safeMin.y - menuRoot.rect.yMin + mainDiameter * 0.5f + 46f);
+        float step = (availableWidth - menuButtonDiameter) / 4f;
+        float firstX = left + menuButtonDiameter * 0.5f;
+        posMainBubble = new Vector2((left + right) * 0.5f, baseY);
+        posWireModeTarget = new Vector2(firstX, baseY + menuButtonDiameter * 0.55f);
+        posUndoTarget = new Vector2(firstX + step, baseY + menuButtonDiameter * 1.2f);
+        posToolboxTarget = new Vector2(firstX + step * 2f, baseY + menuButtonDiameter * 1.4f);
+        posRedoTarget = new Vector2(firstX + step * 3f, posUndoTarget.y);
+        posResetTarget = new Vector2(firstX + step * 4f, posWireModeTarget.y);
+
+        // A rotation/resizing during the fan animation ends at the current menu state.
+        if (animCoroutine != null) { StopCoroutine(animCoroutine); animCoroutine = null; }
+        LayoutFanButton(btnWireModeBubble, posWireModeTarget);
+        LayoutFanButton(btnUndoBubble, posUndoTarget);
+        LayoutFanButton(btnToolboxBubble, posToolboxTarget);
+        LayoutFanButton(btnRedoBubble, posRedoTarget);
+        LayoutFanButton(btnResetBubble, posResetTarget);
+        if (mainChatBubble != null)
+        {
+            mainChatBubble.anchoredPosition = posMainBubble;
+            mainChatBubble.sizeDelta = Vector2.one * mainDiameter;
+            var label = mainChatBubble.Find("MainBubble_LabelPill") as RectTransform;
+            if (label != null) label.sizeDelta = new Vector2(mainDiameter + 10f, 36f);
+            if (mainBubbleLabelText != null) mainBubbleLabelText.fontSize = 18f;
+        }
+        float drawerY = posToolboxTarget.y + menuButtonDiameter * 0.5f + 28f;
+        if (toolboxDrawer != null) toolboxDrawer.anchoredPosition = new Vector2(posMainBubble.x, drawerY);
+        if (wireToolDrawer != null) wireToolDrawer.anchoredPosition = new Vector2(posMainBubble.x, drawerY);
+
+        layoutScreenWidth = Screen.width;
+        layoutScreenHeight = Screen.height;
+        layoutSafeArea = safeArea;
+        layoutCanvasWidth = menuRoot.rect.width;
+    }
+
+    private void LayoutFanButton(RectTransform button, Vector2 expandedPosition)
+    {
+        if (button == null) return;
+        button.sizeDelta = Vector2.one * menuButtonDiameter;
+        button.anchoredPosition = isBarExpanded ? expandedPosition : posMainBubble;
+        button.localScale = isBarExpanded ? Vector3.one : Vector3.zero;
+        button.gameObject.SetActive(isBarExpanded);
+        var label = button.Find("Label_Pill") as RectTransform;
+        if (label != null) label.sizeDelta = new Vector2(menuButtonDiameter, 36f);
     }
 
     private void LayoutTopActions()
@@ -425,20 +491,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (expanding)
         {
-            if (btnScanBubble != null) { btnScanBubble.gameObject.SetActive(true); btnScanBubble.localScale = Vector3.zero; }
-            if (btnResizePlaneBubble != null) { btnResizePlaneBubble.gameObject.SetActive(true); btnResizePlaneBubble.localScale = Vector3.zero; }
             if (btnToolboxBubble != null) { btnToolboxBubble.gameObject.SetActive(true); btnToolboxBubble.localScale = Vector3.zero; }
             if (btnUndoBubble != null) { btnUndoBubble.gameObject.SetActive(true); btnUndoBubble.localScale = Vector3.zero; }
             if (btnRedoBubble != null) { btnRedoBubble.gameObject.SetActive(true); btnRedoBubble.localScale = Vector3.zero; }
             if (btnWireModeBubble != null) { btnWireModeBubble.gameObject.SetActive(true); btnWireModeBubble.localScale = Vector3.zero; }
             if (btnResetBubble != null) { btnResetBubble.gameObject.SetActive(true); btnResetBubble.localScale = Vector3.zero; }
         }
-
-        Vector2 startScan = expanding ? posMainBubble : posScanTarget;
-        Vector2 endScan = expanding ? posScanTarget : posMainBubble;
-
-        Vector2 startResize = expanding ? posMainBubble : posResizePlaneTarget;
-        Vector2 endResize = expanding ? posResizePlaneTarget : posMainBubble;
 
         Vector2 startToolbox = expanding ? posMainBubble : posToolboxTarget;
         Vector2 endToolbox = expanding ? posToolboxTarget : posMainBubble;
@@ -475,17 +533,14 @@ public class ARFloatingBubbleMenu : MonoBehaviour
                 ease = Mathf.Sin(t * Mathf.PI * 0.5f);
             }
 
-            Vector2 curScan = Vector2.LerpUnclamped(startScan, endScan, ease);
-            Vector2 curResize = Vector2.LerpUnclamped(startResize, endResize, ease);
-            Vector2 curToolbox = Vector2.LerpUnclamped(startToolbox, endToolbox, ease);
-            Vector2 curUndo = Vector2.LerpUnclamped(startUndo, endUndo, ease);
-            Vector2 curRedo = Vector2.LerpUnclamped(startRedo, endRedo, ease);
-            Vector2 curWire = Vector2.LerpUnclamped(startWire, endWire, ease);
-            Vector2 curReset = Vector2.LerpUnclamped(startReset, endReset, ease);
+            // Clamp travel so the outer buttons cannot overshoot the safe area.
+            Vector2 curToolbox = Vector2.Lerp(startToolbox, endToolbox, ease);
+            Vector2 curUndo = Vector2.Lerp(startUndo, endUndo, ease);
+            Vector2 curRedo = Vector2.Lerp(startRedo, endRedo, ease);
+            Vector2 curWire = Vector2.Lerp(startWire, endWire, ease);
+            Vector2 curReset = Vector2.Lerp(startReset, endReset, ease);
             Vector3 curScale = Vector3.LerpUnclamped(startScale, endScale, Mathf.Clamp01(ease));
 
-            if (btnScanBubble != null) { btnScanBubble.anchoredPosition = curScan; btnScanBubble.localScale = curScale; }
-            if (btnResizePlaneBubble != null) { btnResizePlaneBubble.anchoredPosition = curResize; btnResizePlaneBubble.localScale = curScale; }
             if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = curToolbox; btnToolboxBubble.localScale = curScale; }
             if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = curUndo; btnUndoBubble.localScale = curScale; }
             if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = curRedo; btnRedoBubble.localScale = curScale; }
@@ -495,8 +550,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             yield return null;
         }
 
-        if (btnScanBubble != null) { btnScanBubble.anchoredPosition = endScan; btnScanBubble.localScale = endScale; }
-        if (btnResizePlaneBubble != null) { btnResizePlaneBubble.anchoredPosition = endResize; btnResizePlaneBubble.localScale = endScale; }
         if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = endToolbox; btnToolboxBubble.localScale = endScale; }
         if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = endUndo; btnUndoBubble.localScale = endScale; }
         if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = endRedo; btnRedoBubble.localScale = endScale; }
@@ -505,8 +558,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
         if (!expanding)
         {
-            if (btnScanBubble != null) btnScanBubble.gameObject.SetActive(false);
-            if (btnResizePlaneBubble != null) btnResizePlaneBubble.gameObject.SetActive(false);
             if (btnToolboxBubble != null) btnToolboxBubble.gameObject.SetActive(false);
             if (btnUndoBubble != null) btnUndoBubble.gameObject.SetActive(false);
             if (btnRedoBubble != null) btnRedoBubble.gameObject.SetActive(false);
@@ -519,8 +570,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     {
         if (expanded)
         {
-            if (btnScanBubble != null) { btnScanBubble.gameObject.SetActive(true); btnScanBubble.anchoredPosition = posScanTarget; btnScanBubble.localScale = Vector3.one; }
-            if (btnResizePlaneBubble != null) { btnResizePlaneBubble.gameObject.SetActive(true); btnResizePlaneBubble.anchoredPosition = posResizePlaneTarget; btnResizePlaneBubble.localScale = Vector3.one; }
             if (btnToolboxBubble != null) { btnToolboxBubble.gameObject.SetActive(true); btnToolboxBubble.anchoredPosition = posToolboxTarget; btnToolboxBubble.localScale = Vector3.one; }
             if (btnUndoBubble != null) { btnUndoBubble.gameObject.SetActive(true); btnUndoBubble.anchoredPosition = posUndoTarget; btnUndoBubble.localScale = Vector3.one; }
             if (btnRedoBubble != null) { btnRedoBubble.gameObject.SetActive(true); btnRedoBubble.anchoredPosition = posRedoTarget; btnRedoBubble.localScale = Vector3.one; }
@@ -530,8 +579,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         }
         else
         {
-            if (btnScanBubble != null) { btnScanBubble.anchoredPosition = posMainBubble; btnScanBubble.localScale = Vector3.zero; btnScanBubble.gameObject.SetActive(false); }
-            if (btnResizePlaneBubble != null) { btnResizePlaneBubble.anchoredPosition = posMainBubble; btnResizePlaneBubble.localScale = Vector3.zero; btnResizePlaneBubble.gameObject.SetActive(false); }
             if (btnToolboxBubble != null) { btnToolboxBubble.anchoredPosition = posMainBubble; btnToolboxBubble.localScale = Vector3.zero; btnToolboxBubble.gameObject.SetActive(false); }
             if (btnUndoBubble != null) { btnUndoBubble.anchoredPosition = posMainBubble; btnUndoBubble.localScale = Vector3.zero; btnUndoBubble.gameObject.SetActive(false); }
             if (btnRedoBubble != null) { btnRedoBubble.anchoredPosition = posMainBubble; btnRedoBubble.localScale = Vector3.zero; btnRedoBubble.gameObject.SetActive(false); }
@@ -1180,8 +1227,6 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         if (buttonInteractor == null) return;
 
         if (mainChatBubble != null) buttonInteractor.RegisterButton(mainChatBubble);
-        if (btnScanBubble != null) buttonInteractor.RegisterButton(btnScanBubble);
-        if (btnResizePlaneBubble != null) buttonInteractor.RegisterButton(btnResizePlaneBubble);
         if (btnToolboxBubble != null) buttonInteractor.RegisterButton(btnToolboxBubble);
         if (btnUndoBubble != null) buttonInteractor.RegisterButton(btnUndoBubble);
         if (btnRedoBubble != null) buttonInteractor.RegisterButton(btnRedoBubble);
@@ -1247,28 +1292,10 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         rootRT.offsetMin = Vector2.zero;
         rootRT.offsetMax = Vector2.zero;
 
-        // Tính toán tọa độ công thái học vùng giữa phía dưới
-        // Tính toán tọa độ công thái học cánh quạt 7 bong bóng ĐỐI XỨNG TUYỆT ĐỐI quanh trục X = 0
-        posMainBubble = new Vector2(0f, menuBottomOffset);
-
-        // Cánh ngoài cùng (Outer Wings): Quét mặt phẳng (-375) <-> Reset (+375)
-        posScanTarget        = new Vector2(-375f, menuBottomOffset + 65f);
-        posResetTarget       = new Vector2( 375f, menuBottomOffset + 65f);
-
-        // Cánh trung gian (Mid Arc): Chỉnh cỡ mặt bàn (-255) <-> Chế độ nối dây (+255)
-        posResizePlaneTarget = new Vector2(-255f, menuBottomOffset + 155f);
-        posWireModeTarget    = new Vector2( 255f, menuBottomOffset + 155f);
-
-        // Cánh cận tâm (Inner Arc): Hoàn tác (-135) <-> Làm lại (+135)
-        posUndoTarget        = new Vector2(-135f, menuBottomOffset + 225f);
-        posRedoTarget        = new Vector2( 135f, menuBottomOffset + 225f);
-
-        // Đỉnh vòm chính giữa (Center Apex): Kho dụng cụ (0, +250)
-        posToolboxTarget     = new Vector2(   0f, menuBottomOffset + 250f);
+        menuRoot = rootRT;
+        UpdateResponsiveMenuLayout(true);
 
         // Nạp các Sprite chất lượng cao từ UIIconAssets
-        Sprite scanSprite = UIIconAssets.GetScanSprite();
-        Sprite resizePlaneSprite = UIIconAssets.GetResizePlaneSprite();
         Sprite toolboxSprite = UIIconAssets.GetToolboxSprite();
         Sprite undoSprite = UIIconAssets.GetUndoSprite();
         Sprite redoSprite = UIIconAssets.GetRedoSprite();
@@ -1276,42 +1303,13 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         Sprite resetSprite = UIIconAssets.GetResetSprite();
         Sprite mainBubbleSprite = UIIconAssets.GetMainBubbleSprite();
 
-        // 1. Ô TRÒN 1: QUÉT LẠI MẶT PHẲNG (Cánh trái ngoài cùng) - Giữ 1.25s để kích hoạt
-        GameObject scanObj = CreateCircularIconButton(
-            parent: rootRT,
-            name: "Btn_Bubble_Scan",
-            iconSprite: scanSprite,
-            ringColor: new Color(0f, 0.85f, 1f, 0.95f), // Viền cyan phát sáng
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
-            anchoredPos: posScanTarget,
-            labelText: "QUÉT MẶT PHẲNG",
-            onClick: null,
-            holdToActivate: true,
-            holdingLabelText: "GIỮ ĐỂ QUÉT",
-            onHoldComplete: ExecuteScan
-        );
-        btnScanBubble = scanObj.GetComponent<RectTransform>();
-
-        // 2. Ô TRÒN 2: CHỈNH KÍCH THƯỚC MẶT BÀN (Cánh trái) - Nhấn / Pinch mở thanh công cụ đổi kích thước
-        GameObject resizeObj = CreateCircularIconButton(
-            parent: rootRT,
-            name: "Btn_Bubble_ResizePlane",
-            iconSprite: resizePlaneSprite,
-            ringColor: new Color(0.98f, 0.65f, 0.15f, 0.95f), // Viền cam vàng phát sáng tone-sur-tone với icon
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
-            anchoredPos: posResizePlaneTarget,
-            labelText: "CỠ MẶT BÀN",
-            onClick: OnClickResizePlane
-        );
-        btnResizePlaneBubble = resizeObj.GetComponent<RectTransform>();
-
-        // 3. Ô TRÒN 3: KHO DỤNG CỤ (Cánh trái giữa) - Chạm / Pinch mở khay
+        // KHO DỤNG CỤ: đỉnh vòng cung, ở giữa Hoàn tác và Làm lại.
         GameObject toolObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_Toolbox",
             iconSprite: toolboxSprite,
             ringColor: new Color(0.1f, 0.92f, 0.7f, 0.95f), // Viền ngọc phát sáng
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            size: Vector2.one * menuButtonDiameter,
             anchoredPos: posToolboxTarget,
             labelText: "KHO DỤNG CỤ",
             onClick: OnClickToolbox
@@ -1324,7 +1322,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             name: "Btn_Bubble_Undo",
             iconSprite: undoSprite,
             ringColor: new Color(0f, 0.85f, 1f, 0.95f), // Viền cam hổ phách
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            size: Vector2.one * menuButtonDiameter,
             anchoredPos: posUndoTarget,
             labelText: "HOÀN TÁC",
             onClick: OnClickUndo
@@ -1337,20 +1335,20 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             name: "Btn_Bubble_Redo",
             iconSprite: redoSprite,
             ringColor: new Color(0.98f, 0.62f, 0.15f, 0.95f), // Viền vàng hổ phách
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            size: Vector2.one * menuButtonDiameter,
             anchoredPos: posRedoTarget,
             labelText: "LÀM LẠI",
             onClick: OnClickRedo
         );
         btnRedoBubble = redoObj.GetComponent<RectTransform>();
 
-        // 5. Ô TRÒN 5: CHẾ ĐỘ NỐI DÂY (Cánh phải giữa) (Requirement 4: Wire Mode)
+        // DÂY: ngoài cùng bên trái.
         GameObject wireObj = CreateCircularIconButton(
             parent: rootRT,
             name: "Btn_Bubble_WireMode",
             iconSprite: wireSprite,
             ringColor: new Color(0f, 0.85f, 1f, 0.95f),
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            size: Vector2.one * menuButtonDiameter,
             anchoredPos: posWireModeTarget,
             labelText: "DÂY",
             onClick: OnClickWireModeButton
@@ -1363,7 +1361,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             name: "Btn_Bubble_Reset",
             iconSprite: resetSprite,
             ringColor: new Color(1f, 0.35f, 0.2f, 0.95f), // Viền đỏ cam phát sáng
-            size: new Vector2(bubbleDiameter, bubbleDiameter),
+            size: Vector2.one * menuButtonDiameter,
             anchoredPos: posResetTarget,
             labelText: "RESET MẠCH",
             onClick: null,
@@ -1379,7 +1377,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             name: "Btn_Main_ChatBubble",
             iconSprite: mainBubbleSprite,
             ringColor: new Color(0f, 0.95f, 1f, 1f),
-            size: new Vector2(125f, 125f),
+            size: Vector2.one * menuButtonDiameter * 0.85f,
             anchoredPos: posMainBubble,
             onClick: ToggleChatBubbleMenu
         );
@@ -1492,13 +1490,13 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         // 11. Toast thông báo nổi khi thao tác lỗi hoặc nhắc nhở
         BuildToastNotificationUI(rootRT);
 
-        // Khởi tạo hộp thoại xác nhận an toàn cho Reset và Quét mặt phẳng
+        // Khởi tạo hộp thoại xác nhận dùng chung.
         BuildConfirmationDialog(rootRT);
 
+        UpdateResponsiveMenuLayout(true);
         RegisterAllButtonsToInteractor();
         UpdateWireModeUI(wireConnectionController != null && wireConnectionController.IsWireMode);
-        Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã khởi tạo hoàn tất Menu Bong Bóng Chat với 5 ô tròn!");
-        Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Đã khởi tạo hoàn tất Menu Bong Bóng Chat với 3 ô tròn icon!");
+        Debug.Log("<color=green>[ARFloatingBubbleMenu]</color> Menu: Dây, Hoàn tác, Kho dụng cụ, Làm lại, Reset mạch.");
     }
 
     /// <summary>
@@ -1595,7 +1593,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             pillRT.anchorMin = new Vector2(0.5f, 0f);
             pillRT.anchorMax = new Vector2(0.5f, 0f);
             pillRT.pivot = new Vector2(0.5f, 1f);
-            pillRT.sizeDelta = new Vector2(120, 32);
+            pillRT.sizeDelta = new Vector2(size.x, 36);
             pillRT.anchoredPosition = new Vector2(0, -6);
 
             Image pillImg = pillObj.GetComponent<Image>();
@@ -1619,10 +1617,10 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             labelTmp = textObj.AddComponent<TextMeshProUGUI>();
             if (labelTmp.font == null && TMP_Settings.defaultFontAsset != null) labelTmp.font = TMP_Settings.defaultFontAsset;
             labelTmp.text = labelText;
-            labelTmp.fontSize = 13;
+            labelTmp.fontSize = 18;
             labelTmp.enableAutoSizing = true;
-            labelTmp.fontSizeMin = 9.5f;
-            labelTmp.fontSizeMax = 13.5f;
+            labelTmp.fontSizeMin = 12f;
+            labelTmp.fontSizeMax = 18f;
             labelTmp.characterSpacing = 0.5f;
             labelTmp.fontStyle = FontStyles.Bold;
             labelTmp.alignment = TextAlignmentOptions.Center;

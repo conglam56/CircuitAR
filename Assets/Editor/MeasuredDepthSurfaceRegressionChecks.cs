@@ -26,15 +26,37 @@ internal static class MeasuredDepthSurfaceRegressionChecks
             "A flat measured patch surrounding the pointer must produce its real contact height.");
         results.Add("PASS: measured depth accepts a finite surrounding horizontal patch");
 
+        var noisyNormals = new List<Pose>();
+        for (int i = 0; i < patch.Count; i++)
+            noisyNormals.Add(new Pose(patch[i].position, Quaternion.Euler(35f + i * 17f, i * 10f, i * 20f)));
+        Require(MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera, noisyNormals, out var noisyPose) &&
+            noisyPose.position.sqrMagnitude < 0.000001f,
+            "Flat measured geometry must remain usable when individual depth-hit normals are unreliable.");
+        results.Add("PASS: noisy pixel normals do not discard a genuinely horizontal measured patch");
+
         Require(!MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera,
                 Ring(Vector3.zero, 0.1f, Quaternion.Euler(30f, 0f, 0f)), out _) &&
                 !MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera,
                 Ring(Vector3.zero, 0.1f, Quaternion.Euler(90f, 0f, 0f)), out _),
-            "Sloped and vertical hand-like depth normals must not count as a horizontal support.");
+            "Physically sloped and vertical measured geometry must not count as a horizontal support.");
         var insufficient = new List<Pose> { patch[0], patch[1], patch[2] };
         Require(!MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera, insufficient, out _),
             "Three points alone must not be treated as a supported patch.");
         results.Add("PASS: insufficient, sloped and vertical depth samples cannot place components");
+
+        Require(!MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera,
+            Ring(Vector3.zero, 0.02f, Quaternion.Euler(30f, 0f, 0f)), out _),
+            "A small sloped patch cannot pass merely because its height range fits inside the height-cluster tolerance.");
+        var warped = Ring(Vector3.zero, 0.06f, Quaternion.identity);
+        for (int i = 0; i < warped.Count; i++)
+        {
+            var sample = warped[i];
+            sample.position.y = 0.01f * Mathf.Sin(i * Mathf.PI * 0.5f);
+            warped[i] = sample;
+        }
+        Require(!MeasuredDepthSurfaceProvider.TryValidatePatch(ray, camera, warped, out _),
+            "A warped depth patch must fail the geometric residual check even if its height samples are one cluster.");
+        results.Add("PASS: geometry fitting rejects small slopes and nonplanar patches instead of mistaking them for floor noise");
 
         var beyondEdgeRay = new Ray(camera, (new Vector3(0.13f, 0f, 0f) - camera).normalized);
         Require(!MeasuredDepthSurfaceProvider.TryValidatePatch(beyondEdgeRay, camera, patch, out _),
@@ -123,6 +145,15 @@ internal static class MeasuredDepthSurfaceRegressionChecks
             "Reset/session/hand invalidation must leave no reusable finite support.");
         results.Add("PASS: finite depth reuse never extends edges, survives failed measurements or outlives its 120 ms lifetime");
 
+        var tiltedCache = new MeasuredDepthSurfaceProvider.FinitePatchCache();
+        var shallowSlope = Ring(new Vector3(0f, 0.2f, 0f), 0.05f, Quaternion.Euler(0f, 0f, 10f));
+        Vector3 slopeTarget = new Vector3(0.02f, 0.2f + Mathf.Tan(10f * Mathf.Deg2Rad) * 0.02f, 0.01f);
+        Require(tiltedCache.TryCapture(elevatedRay, camera, shallowSlope, 20f, out _) &&
+            tiltedCache.TryProject(new Ray(camera, (slopeTarget - camera).normalized), camera, 20.05f, out var slopePose) &&
+            Vector3.Distance(slopePose.position, slopeTarget) < 0.00001f,
+            "Finite reuse must intersect the measured fitted support rather than flattening its height to the previous pointer.");
+        results.Add("PASS: cached contact follows the measured shallow support geometry as the pointer/camera moves");
+
         Vector2 screenSize = new Vector2(1000f, 2000f);
         Vector2 screenPoint = screenSize * 0.5f;
         float clearRadius = MeasuredDepthSurfaceProvider.ChooseProbeRadius(screenPoint, screenSize, null);
@@ -198,7 +229,7 @@ internal static class MeasuredDepthSurfaceRegressionChecks
         for (int i = 0; i < 8; i++)
         {
             float angle = i * Mathf.PI / 4f;
-            samples.Add(new Pose(center + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius, rotation));
+            samples.Add(new Pose(center + rotation * new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * radius, rotation));
         }
         return samples;
     }

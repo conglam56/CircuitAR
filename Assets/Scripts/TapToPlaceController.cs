@@ -105,6 +105,21 @@ public class TapToPlaceController : MonoBehaviour
     private float nextPlacementDiagnosticAt;
     private ButtonInteractor.PlacementFeedback lastPlacementFeedback;
     private readonly MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
+    private readonly MeasuredDepthSurfaceProvider contactDepth = new MeasuredDepthSurfaceProvider { RequireVisibleHand = false };
+    private sealed class PlacedContact
+    {
+        public TrackableId planeId;
+        public Transform parent;
+        public Vector3 expectedLocal;
+        public bool settling;
+        public float targetHeight;
+        public readonly ARSupportPolicy.ContactConfirmation confirmation = new ARSupportPolicy.ContactConfirmation();
+    }
+    private readonly Dictionary<GameObject, PlacedContact> placedContacts = new Dictionary<GameObject, PlacedContact>();
+    private float nextContactProbeAt;
+    private float nextContactDiagnosticAt;
+    private int contactProbeIndex;
+    private bool dragHasMeasuredSupport;
     private bool previewSurfaceIsDepth;
     private bool hasDepthSupportEvidence;
     private Pose lastDepthSupportEvidence;
@@ -118,8 +133,11 @@ public class TapToPlaceController : MonoBehaviour
     private float guidanceSurfaceReadySince = float.NegativeInfinity;
     private float placementConfirmedUntil;
     private float nextAnchorDiagnosticAt;
-    private GameObject diagnosticObject;
-    private Vector3 diagnosticWorldPosition, diagnosticLocalPosition, diagnosticAnchorPosition, diagnosticCameraPosition;
+    private struct AnchorDiagnostic
+    {
+        public Vector3 world, local, anchor, camera;
+    }
+    private readonly Dictionary<GameObject, AnchorDiagnostic> anchorDiagnostics = new Dictionary<GameObject, AnchorDiagnostic>();
     private static readonly Vector2[] GuidanceProbeViewports =
     {
         new Vector2(0.5f, 0.45f), new Vector2(0.35f, 0.45f),
@@ -353,6 +371,7 @@ public class TapToPlaceController : MonoBehaviour
 
     void OnDisable()
     {
+        CancelContactCorrections();
         EndSurfaceGuidance();
         placementGeneration++;
         placementPending = false;
@@ -480,6 +499,7 @@ public class TapToPlaceController : MonoBehaviour
 
             HandleDragAndDrop();
         }
+        UpdatePlacedContacts();
     }
 
     private void UpdatePreviewAndPlacement()
@@ -792,7 +812,7 @@ public class TapToPlaceController : MonoBehaviour
                 $"depthReady={measuredDepth.IsReady}; depthSamples={measuredDepth.LastSupportSampleCount}; " +
                 $"handMasked={measuredDepth.HandMaskedProbeCount}; probeRadius={measuredDepth.LastProbeRadiusPixels:F0}; " +
                 $"depthHits={measuredDepth.LastNativeHitCount}/{measuredDepth.LastNativeQueryCount}; " +
-                $"rejectNormal={measuredDepth.LastRejectedNormalCount}; rejectRange={measuredDepth.LastRejectedRangeCount}; " +
+                $"noisyNormal={measuredDepth.LastUnreliableNormalCount}; rejectRange={measuredDepth.LastRejectedRangeCount}; " +
                 $"rejectHeight={measuredDepth.LastRejectedHeightCount}");
             nextPlacementDiagnosticAt = Time.unscaledTime + 2f;
         }
@@ -819,7 +839,7 @@ public class TapToPlaceController : MonoBehaviour
         previewAnchor.name = "Placed_" + currentPrefabToPlace.name;
 
         // Chỉ chuyển sang vật đã đặt sau khi native anchor được tạo thành công.
-        // Từ đây không có code raycast/camera nào ghi lại pose của vật ngoài thao tác kéo.
+        // Subsequent contact verification may correct Y, never camera/finger XZ.
         previewAnchor.transform.SetParent(nativeAnchor.transform, true);
         previewAnchor.transform.SetPositionAndRotation(position, rotation);
         previewAnchor.transform.localScale = Vector3.one;
@@ -861,11 +881,15 @@ public class TapToPlaceController : MonoBehaviour
 
         // Lưu vào danh sách linh kiện và ghi nhận vào Lịch Sử Thao Tác (Requirement 1 & 2)
         GameObject placedObject = previewAnchor;
-        nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
+        if (!nativeAnchor.gameObject.name.StartsWith("SurfaceAnchor_"))
+            nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
         objectAnchors[placedObject] = nativeAnchor;
         var stabilizer = placedObject.AddComponent<ARPlacedObjectStabilizer>();
         stabilizer.Bind(this, nativeAnchor);
         placedObjectsHistory.Add(placedObject);
+        RememberPlacedContact(placedObject, placementRequestPlaneId);
+        Debug.Log($"[ARBinding] {placedObject.name}#{placedObject.GetInstanceID()}; anchor={nativeAnchor.trackableId}; " +
+            $"world={placedObject.transform.position:F3}; local={placedObject.transform.localPosition:F3}");
         placementConfirmedUntil = Time.unscaledTime + 2.5f;
         // A closed placement gesture, including a hand re-detected still
         // closed, must never silently become a new grab of the placed object.
@@ -940,6 +964,12 @@ public class TapToPlaceController : MonoBehaviour
                 unpinchGraceTimer = 0f;
                 lastDragSurfaceHitTime = Time.time;
                 dragSurfaceTrackableId = TrackableId.invalidId;
+                dragHasMeasuredSupport = false;
+                if (placedContacts.TryGetValue(draggedObject, out PlacedContact contact))
+                {
+                    contact.settling = false;
+                    contact.confirmation.Reset();
+                }
 
                 SelectComponent(draggedObject);
                 Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
@@ -1011,6 +1041,7 @@ public class TapToPlaceController : MonoBehaviour
                         lastValidDragPos = currentSmoothedDragPos;
                         lastValidDragRot = dragTargetRot;
                         dragSurfaceTrackableId = dragPlaneId;
+                        dragHasMeasuredSupport = true;
 
                         if (SelectedComponent == draggedObject)
                         {
@@ -1073,6 +1104,8 @@ public class TapToPlaceController : MonoBehaviour
             // Keep a nearby genuine anchor. Distant moves need an async native
             // replacement; a pending request is not a reason to bounce the
             // component back up onto its original tabletop.
+            if (dragHasMeasuredSupport)
+                RememberPlacedContact(draggedObject, dragSurfaceTrackableId);
             if (Vector3.Distance(dragStartPos, draggedObject.transform.position) > 0.006f &&
                 (!HasReusableDragAnchor(draggedObject) ||
                  !IsSameDragSupportLevel(dragStartPos.y, draggedObject.transform.position.y)))
@@ -1103,6 +1136,7 @@ public class TapToPlaceController : MonoBehaviour
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
         dragSurfaceTrackableId = TrackableId.invalidId;
+        dragHasMeasuredSupport = false;
         dragPointerOffset = Vector2.zero;
         dragHandLostAt = float.NegativeInfinity;
         dragLevelTransition.CancelPending();
@@ -1121,6 +1155,11 @@ public class TapToPlaceController : MonoBehaviour
         Vector3 localPosition = obj.transform.localPosition;
         Quaternion localRotation = obj.transform.localRotation;
         Pose requested = new Pose(obj.transform.position, obj.transform.rotation);
+        if (TryGetNearbySupportAnchor(requested.position, obj, out ARAnchor shared) && shared != previous)
+        {
+            AdoptSupportAnchor(obj, shared, requested, previous);
+            return;
+        }
         int request = ++nextDragAnchorRequest;
         dragAnchorRequests[obj] = request;
         var stabilizer = obj.GetComponent<ARPlacedObjectStabilizer>();
@@ -1148,17 +1187,10 @@ public class TapToPlaceController : MonoBehaviour
             if (replacement == null || !StillCurrent() || replacement.pending ||
                 replacement.trackingState != TrackingState.Tracking || ARSession.state != ARSessionState.SessionTracking) return;
 
-            replacement.gameObject.name = "SurfaceAnchor_" + obj.name;
-            obj.transform.SetParent(replacement.transform, true);
-            obj.transform.SetPositionAndRotation(replacement.transform.position, requested.rotation);
-            objectAnchors[obj] = replacement;
-            if (stabilizer != null) stabilizer.Bind(this, replacement);
+            // Keep the currently presented contact through the async handoff.
+            // The old native frame may have refined while the new one was pending.
+            AdoptSupportAnchor(obj, replacement, new Pose(obj.transform.position, obj.transform.rotation), previous);
             replacement = null; // Ownership transferred to the component.
-            bool shared = false;
-            foreach (var entry in objectAnchors)
-                if (entry.Key != obj && entry.Value == previous) { shared = true; break; }
-            if (!shared && previous != null) Destroy(previous.gameObject);
-            wireConnectionController?.UpdateActiveWirePositionsExternal();
         }
         catch (System.Exception ex)
         {
@@ -1175,12 +1207,235 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    private void OnApplicationPause(bool paused)
+    {
+        if (paused) CancelContactCorrections();
+    }
+
+    private void CancelContactCorrections()
+    {
+        contactDepth.Reset();
+        foreach (PlacedContact contact in placedContacts.Values)
+        {
+            contact.settling = false;
+            contact.confirmation.Reset();
+        }
+    }
+
+    private void RememberPlacedContact(GameObject obj, TrackableId planeId)
+    {
+        placedContacts[obj] = new PlacedContact { planeId = planeId,
+            parent = obj.transform.parent, expectedLocal = obj.transform.localPosition };
+    }
+
+    private void UpdatePlacedContacts()
+    {
+        bool idle = ARSession.state == ARSessionState.SessionTracking && !isDragging && !placementPending &&
+            currentPrefabToPlace == null && !(menuHUD != null && menuHUD.HasSelection) &&
+            !(buttonInteractor != null && buttonInteractor.isPinching) &&
+            !(wireConnectionController != null && wireConnectionController.IsWireMode);
+        bool wiresChanged = false;
+        foreach (var entry in placedContacts)
+        {
+            GameObject obj = entry.Key;
+            PlacedContact contact = entry.Value;
+            if (obj == null) continue;
+            if (!idle || !obj.activeInHierarchy || !objectAnchors.TryGetValue(obj, out ARAnchor anchor) ||
+                anchor == null || anchor.pending || anchor.trackingState != TrackingState.Tracking ||
+                dragAnchorRequests.ContainsKey(obj))
+            {
+                contact.settling = false;
+                contact.confirmation.Reset();
+                continue;
+            }
+            if (obj.transform.parent != contact.parent)
+            {
+                contact.parent = obj.transform.parent;
+                contact.expectedLocal = obj.transform.localPosition;
+                contact.settling = false;
+                contact.confirmation.Reset();
+            }
+            else if (Vector3.Distance(obj.transform.localPosition, contact.expectedLocal) > 0.006f)
+            {
+                // Undo/redo or another authored move owns the new contact. Do not
+                // settle it back onto the surface associated with the old pose.
+                contact.planeId = TrackableId.invalidId;
+                contact.settling = false;
+                contact.confirmation.Reset();
+            }
+            if (contact.settling)
+            {
+                StepContactCorrection(obj.transform, contact.targetHeight, Time.unscaledDeltaTime);
+                wiresChanged = true;
+                if (Mathf.Abs(obj.transform.position.y - contact.targetHeight) < 0.0001f)
+                {
+                    contact.settling = false;
+                    ReanchorDraggedObject(obj);
+                }
+            }
+            contact.expectedLocal = obj.transform.localPosition;
+        }
+        if (wiresChanged) wireConnectionController?.UpdateActiveWirePositionsExternal();
+        if (!idle || mainCamera == null || arPlaneManager == null ||
+            placedObjectsHistory.Count == 0 || Time.unscaledTime < nextContactProbeAt) return;
+
+        // At most one eight-sample environment query per 250 ms, only while no
+        // placement/drag is querying depth. Each object has its own confirmation.
+        nextContactProbeAt = Time.unscaledTime + 0.25f;
+        contactProbeIndex = (contactProbeIndex + 1) % placedObjectsHistory.Count;
+        GameObject candidate = placedObjectsHistory[contactProbeIndex];
+        if (candidate == null || !candidate.activeInHierarchy ||
+            !placedContacts.TryGetValue(candidate, out PlacedContact state) || state.settling ||
+            dragAnchorRequests.ContainsKey(candidate) ||
+            !objectAnchors.TryGetValue(candidate, out ARAnchor native) || native == null || native.pending ||
+            native.trackingState != TrackingState.Tracking) return;
+        if (!TryGetVerticalContactSupport(candidate.transform.position, state.planeId,
+            out Vector3 support, out TrackableId supportId))
+        {
+            state.confirmation.Reset();
+            LogContactProbe(candidate, "no bounded vertical correction; intendedPlane=" + state.planeId);
+            return;
+        }
+        Vector3 screen = mainCamera.WorldToScreenPoint(support);
+        if (screen.z <= mainCamera.nearClipPlane || screen.x < 0f || screen.y < 0f ||
+            screen.x >= Screen.width || screen.y >= Screen.height)
+        {
+            state.confirmation.Reset();
+            return;
+        }
+        contactDepth.Configure(mainCamera, arRaycastManager, buttonInteractor);
+        // Never reuse another component's finite patch or temporal confirmation.
+        contactDepth.Reset();
+        bool measured = contactDepth.TryGetSurface(new Vector2(screen.x, screen.y), out Pose depth);
+        if (!measured && contactDepth.IsConfirmingSurface)
+        {
+            depth = contactDepth.ConfirmingSurfacePose;
+            measured = true; // The per-object confirmation below supplies the dwell.
+        }
+        if (!measured || Mathf.Abs(depth.position.y - support.y) > 0.025f ||
+            Vector2.Distance(new Vector2(depth.position.x, depth.position.z), new Vector2(support.x, support.z)) > 0.08f)
+        {
+            state.confirmation.Reset();
+            LogContactProbe(candidate, $"depthAgreement=false; planeY={support.y:F3}; " +
+                $"depthY={(measured ? depth.position.y.ToString("F3") : "missing")}; samples={contactDepth.LastSupportSampleCount}");
+            return;
+        }
+        if (state.planeId != supportId) state.confirmation.Reset();
+        state.planeId = supportId;
+        // The depth fit, rather than the broad plane estimate, sets final height.
+        float height = depth.position.y + surfaceContactOffset;
+        LogContactProbe(candidate, $"depthAgreement=true; currentY={candidate.transform.position.y:F3}; measuredY={height:F3}");
+        if (state.confirmation.Observe(candidate.transform.position.y, height, Time.unscaledTime))
+        {
+            state.targetHeight = height;
+            state.settling = true;
+            state.confirmation.Reset();
+            Debug.Log($"[ARGroundContact] {candidate.name}#{candidate.GetInstanceID()}; " +
+                $"fromY={candidate.transform.position.y:F3}; measuredY={height:F3}; plane={supportId}; XZ=preserved");
+        }
+    }
+
+    private static void StepContactCorrection(Transform body, float height, float deltaTime)
+    {
+        Vector3 position = body.position;
+        position.y = Mathf.MoveTowards(position.y, height, 1.2f * Mathf.Clamp(deltaTime, 0f, 0.05f));
+        body.position = position;
+    }
+
+    private void LogContactProbe(GameObject obj, string detail)
+    {
+        if (!Debug.isDebugBuild || Time.unscaledTime < nextContactDiagnosticAt) return;
+        nextContactDiagnosticAt = Time.unscaledTime + 5f;
+        Debug.Log($"[ARGroundContact] Probe {obj.name}#{obj.GetInstanceID()}; {detail}");
+    }
+
+    private bool TryGetVerticalContactSupport(Vector3 contact, TrackableId preferred,
+        out Vector3 support, out TrackableId id)
+    {
+        support = default;
+        id = TrackableId.invalidId;
+        ARPlane preferredPlane = preferred != TrackableId.invalidId ? arPlaneManager.GetPlane(preferred) : null;
+        for (int i = 0; i < 16 && preferredPlane != null && preferredPlane.subsumedBy != null; i++)
+            preferredPlane = preferredPlane.subsumedBy;
+        if (preferredPlane != null)
+        {
+            if (!TryGetVerticalContactOnPlane(contact, preferredPlane, out support)) return false;
+            id = preferredPlane.trackableId;
+            return true;
+        }
+        float bestGap = float.PositiveInfinity;
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!TryGetVerticalContactOnPlane(contact, plane, out Vector3 point)) continue;
+            float gap = Mathf.Abs(contact.y - point.y);
+            if (gap >= bestGap) continue;
+            bestGap = gap;
+            support = point;
+            id = plane.trackableId;
+        }
+        return id != TrackableId.invalidId;
+    }
+
+    private bool TryGetVerticalContactOnPlane(Vector3 contact, ARPlane plane, out Vector3 point)
+    {
+        point = default;
+        if (!IsUsableSurfacePlane(plane)) return false;
+        Vector2 center = plane.center;
+        Vector3 planePoint = plane.transform.TransformPoint(new Vector3(center.x, 0f, center.y));
+        if (!ARSupportPolicy.TryProjectContactVertically(contact, planePoint, plane.transform.up, out point) ||
+            !ARSupportPolicy.CanCorrectContactHeight(contact.y, point.y + surfaceContactOffset) ||
+            mainCamera.transform.position.y <= point.y + 0.02f) return false;
+        Vector3 local = plane.transform.InverseTransformPoint(point);
+        return IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary);
+    }
+
     private bool HasReusableDragAnchor(GameObject obj)
     {
         if (!objectAnchors.TryGetValue(obj, out ARAnchor anchor) || anchor == null)
             anchor = obj.GetComponentInParent<ARAnchor>();
         return anchor != null && CanReuseDragAnchor(anchor.trackingState, anchor.pending,
             anchor.transform.position, obj.transform.position);
+    }
+
+    private bool TryGetNearbySupportAnchor(Vector3 measuredContact, GameObject ignore, out ARAnchor result)
+    {
+        result = null;
+        float nearest = float.PositiveInfinity;
+        // Content on one nearby support must move in one native coordinate frame.
+        // Independent anchors can refine differently, even with the same plane ID.
+        foreach (GameObject placed in placedObjectsHistory)
+        {
+            if (placed == null || placed == ignore || !placed.activeInHierarchy ||
+                (isDragging && draggedObject == placed) || dragAnchorRequests.ContainsKey(placed) ||
+                !objectAnchors.TryGetValue(placed, out ARAnchor candidate) || candidate == null ||
+                !candidate.isActiveAndEnabled || placed.transform.parent != candidate.transform ||
+                (mainCamera != null && candidate.transform.IsChildOf(mainCamera.transform)) ||
+                !ARSupportPolicy.CanShareAnchor(candidate.trackingState, candidate.pending, candidate.transform.position,
+                    placed.transform.position, measuredContact)) continue;
+            float distance = (placed.transform.position - measuredContact).sqrMagnitude;
+            if (distance >= nearest) continue;
+            nearest = distance;
+            result = candidate;
+        }
+        return result != null;
+    }
+
+    private void AdoptSupportAnchor(GameObject obj, ARAnchor target, Pose contact, ARAnchor previous)
+    {
+        if (!target.gameObject.name.StartsWith("SurfaceAnchor_"))
+            target.gameObject.name = "SurfaceAnchor_" + obj.name;
+        obj.transform.SetParent(target.transform, true);
+        // A shared anchor's origin is another component's contact, not this one.
+        obj.transform.SetPositionAndRotation(contact.position, contact.rotation);
+        objectAnchors[obj] = target;
+        obj.GetComponent<ARPlacedObjectStabilizer>()?.Bind(this, target);
+        bool stillUsed = false;
+        foreach (var entry in objectAnchors)
+            if (entry.Key != null && entry.Key != obj && entry.Value == previous) { stillUsed = true; break; }
+        if (!stillUsed && previous != null && previous != target) Destroy(previous.gameObject);
+        Debug.Log($"[ARBinding] Rebound {obj.name}#{obj.GetInstanceID()}; anchor={target.trackableId}; " +
+            $"world={obj.transform.position:F3}; local={obj.transform.localPosition:F3}");
+        wireConnectionController?.UpdateActiveWirePositionsExternal();
     }
 
     private static bool CanReuseDragAnchor(TrackingState state, bool pending, Vector3 anchorPosition, Vector3 objectPosition)
@@ -1690,11 +1945,18 @@ public class TapToPlaceController : MonoBehaviour
     private async void TryPlaceObject(Pose pose, TrackableId planeId)
     {
         if (placementPending || previewAnchor == null || !previewAnchor.activeSelf) return;
-        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(planeId) : null;
         bool isDepth = placementRequestHasSurface && placementRequestIsDepth;
         if (!CanCreateMeasuredSurfaceAnchor(planeId, isDepth))
         {
             SetPlacementStatus("Chưa bám chắc mặt thật — hãy thử lại.");
+            return;
+        }
+
+        if (TryGetNearbySupportAnchor(pose.position, null, out ARAnchor sharedAnchor))
+        {
+            // The measured contact remains authoritative. Do not snap a new
+            // component to the shared anchor origin or to a neighbouring object.
+            PlaceObject(pose.position, pose.rotation, sharedAnchor);
             return;
         }
 
@@ -1706,14 +1968,12 @@ public class TapToPlaceController : MonoBehaviour
         SetPlacementStatus("Đang cố định linh kiện lên mặt thật…");
         try
         {
-            // ARCore plane anchor giữ vật gắn với chính bề mặt trúng tia, thay vì
-            // chỉ thêm một Transform tên Anchor rồi mặc định coi là đã đặt thành công.
-            if (!isDepth) nativeAnchor = arAnchorManager.AttachAnchor(plane, pose);
-            if (nativeAnchor == null)
-            {
-                var result = await arAnchorManager.TryAddAnchorAsync(pose);
-                if (result.status.IsSuccess()) nativeAnchor = result.value;
-            }
+            // Use the plane/depth only to measure the contact. A plane-attached
+            // anchor inherits later plane refits/merges, which lifted the whole
+            // placed group on device. A session anchor tracks this measured world
+            // point without remaining welded to that changing plane estimate.
+            var result = await arAnchorManager.TryAddAnchorAsync(pose);
+            if (result.status.IsSuccess()) nativeAnchor = result.value;
 
             if (this == null || generation != placementGeneration || requestedPreview != previewAnchor)
             {
@@ -1996,20 +2256,26 @@ public class TapToPlaceController : MonoBehaviour
         {
             GameObject obj = placedObjectsHistory[i];
             if (obj == null || !obj.activeInHierarchy || !objectAnchors.TryGetValue(obj, out ARAnchor anchor) || anchor == null) continue;
-            bool same = obj == diagnosticObject;
-            Debug.Log($"[ARObjectState] {obj.name}; tracking={anchor.trackingState}; pending={anchor.pending}; " +
+            bool same = anchorDiagnostics.TryGetValue(obj, out AnchorDiagnostic old);
+            Vector3 contactScreen = mainCamera.WorldToScreenPoint(obj.transform.position);
+            Pose diagnosticSupport = default;
+            bool hasMeasuredSupport = contactScreen.z > mainCamera.nearClipPlane &&
+                TryProjectPointerToTrackedPlane(new Vector2(contactScreen.x, contactScreen.y),
+                    TrackableId.invalidId, out diagnosticSupport, out _);
+            // Diagnostics only: never reproject/move placed objects from this ray.
+            string supportGap = hasMeasuredSupport
+                ? (obj.transform.position.y - diagnosticSupport.position.y).ToString("F3") : "unseen";
+            Debug.Log($"[ARObjectState] {obj.name}#{obj.GetInstanceID()}; anchor={anchor.trackableId}; " +
+                $"tracking={anchor.trackingState}; pending={anchor.pending}; world={obj.transform.position:F3}; " +
+                $"supportGapM={supportGap}; cameraLocal={mainCamera.transform.localPosition:F3}; " +
                 $"dragging={isDragging && draggedObject == obj}; pinch={buttonInteractor != null && buttonInteractor.isPinching}; " +
                 $"cameraParent={anchor.transform.IsChildOf(mainCamera.transform)}; " +
-                $"worldDeltaMm={(same ? Vector3.Distance(obj.transform.position, diagnosticWorldPosition) * 1000f : 0f):F1}; " +
-                $"localDeltaMm={(same ? Vector3.Distance(obj.transform.localPosition, diagnosticLocalPosition) * 1000f : 0f):F1}; " +
-                $"anchorDeltaMm={(same ? Vector3.Distance(anchor.transform.position, diagnosticAnchorPosition) * 1000f : 0f):F1}; " +
-                $"cameraDeltaMm={(same ? Vector3.Distance(mainCamera.transform.position, diagnosticCameraPosition) * 1000f : 0f):F1}");
-            diagnosticObject = obj;
-            diagnosticWorldPosition = obj.transform.position;
-            diagnosticLocalPosition = obj.transform.localPosition;
-            diagnosticAnchorPosition = anchor.transform.position;
-            diagnosticCameraPosition = mainCamera.transform.position;
-            break;
+                $"worldDeltaMm={(same ? Vector3.Distance(obj.transform.position, old.world) * 1000f : 0f):F1}; " +
+                $"localDeltaMm={(same ? Vector3.Distance(obj.transform.localPosition, old.local) * 1000f : 0f):F1}; " +
+                $"anchorDeltaMm={(same ? Vector3.Distance(anchor.transform.position, old.anchor) * 1000f : 0f):F1}; " +
+                $"cameraDeltaMm={(same ? Vector3.Distance(mainCamera.transform.position, old.camera) * 1000f : 0f):F1}");
+            anchorDiagnostics[obj] = new AnchorDiagnostic { world = obj.transform.position, local = obj.transform.localPosition,
+                anchor = anchor.transform.position, camera = mainCamera.transform.position };
         }
     }
 

@@ -17,7 +17,13 @@ public class CustomARFrameBridge : ImageSource
     private bool _acceptCpuFrames;
     private int _frameReceivedCount = 0; // DEBUG: đếm số lần frameReceived gọi tới
     private float _nextCpuFrameAt;
-    public int FrameVersion { get; private set; }
+    private int _frameVersion;
+    private XRCpuImage.AsyncConversion _cpuConversion;
+    private XRCpuImage _pendingCpuImage;
+    private bool _cpuConversionPending;
+    private Vector2Int _pendingDimensions;
+    private long _cpuConversionStartedAt;
+    public int FrameVersion { get { CompleteCpuConversionIfReady(); return _frameVersion; } }
     private readonly object _displayMatrixLock = new object();
     private Matrix4x4 _displayMatrix;
     private bool _hasDisplayMatrix;
@@ -45,7 +51,7 @@ public class CustomARFrameBridge : ImageSource
 
     public override double frameRate => CpuFramesPerSecond;
 
-    public override bool isPrepared => _texture != null;
+    public override bool isPrepared { get { CompleteCpuConversionIfReady(); return _texture != null && _frameVersion > 0; } }
     public override bool isPlaying => _isPlaying;
     public override bool isFrontFacing => false;
     public override bool isHorizontallyFlipped => false;
@@ -93,6 +99,7 @@ public class CustomARFrameBridge : ImageSource
     public override void Pause()
     {
         _acceptCpuFrames = false;
+        DisposeCpuConversion();
         _isPlaying = false;
         ClearDisplayMatrix();
     }
@@ -100,6 +107,7 @@ public class CustomARFrameBridge : ImageSource
     public override void Stop()
     {
         _acceptCpuFrames = false;
+        DisposeCpuConversion();
         _isPlaying = false;
         Interlocked.Exchange(ref _latestFrameReadyTimestamp, 0);
         ClearDisplayMatrix();
@@ -116,7 +124,54 @@ public class CustomARFrameBridge : ImageSource
 
     public override Texture GetCurrentTexture()
     {
+        CompleteCpuConversionIfReady();
         return _texture;
+    }
+
+    private void DisposeCpuConversion()
+    {
+        if (_pendingCpuImage.valid)
+        {
+            _pendingCpuImage.Dispose();
+            _pendingCpuImage = default;
+        }
+        if (!_cpuConversionPending) return;
+        _cpuConversionPending = false;
+        _cpuConversion.Dispose();
+        _cpuConversion = default;
+    }
+
+    private void CompleteCpuConversionIfReady()
+    {
+        if (!_cpuConversionPending || _cpuConversion.status == XRCpuImage.AsyncConversionStatus.Processing) return;
+        try
+        {
+            if (!_acceptCpuFrames || _cpuConversion.status != XRCpuImage.AsyncConversionStatus.Ready) return;
+            var convertedData = _cpuConversion.GetData<byte>();
+            if (convertedData.Length != _pendingDimensions.x * _pendingDimensions.y * 4) return;
+            if (_texture == null || _texture.width != _pendingDimensions.x || _texture.height != _pendingDimensions.y)
+            {
+                if (_texture != null) UnityEngine.Object.Destroy(_texture);
+                _texture = new Texture2D(_pendingDimensions.x, _pendingDimensions.y, TextureFormat.RGBA32, false);
+                resolution = new ResolutionStruct { width = _pendingDimensions.x, height = _pendingDimensions.y };
+            }
+            // Copy before disposing the native request. Inference owns a separate
+            // texture-frame copy, so the next completed camera image is safe.
+            convertedData.CopyTo(_texture.GetRawTextureData<byte>());
+            long completedAt = Stopwatch.GetTimestamp();
+            long conversionTicks = completedAt - _cpuConversionStartedAt;
+            _perfConversionTicks += conversionTicks;
+            _perfMaxConversionTicks = System.Math.Max(_perfMaxConversionTicks, conversionTicks);
+            _perfConvertedFrames++;
+            Interlocked.Exchange(ref _latestFrameReadyTimestamp, completedAt);
+            _frameVersion++;
+        }
+        catch (System.Exception error)
+        {
+            _perfAcquireMisses++;
+            Debug.LogWarning("[ARBridge] Async CPU frame was discarded: " + error.Message);
+        }
+        finally { DisposeCpuConversion(); }
     }
 
     /// <summary>
@@ -219,7 +274,7 @@ public class CustomARFrameBridge : ImageSource
         long latestFrameAt = LatestFrameReadyTimestamp;
         double frameReadyAgeMs = latestFrameAt == 0 ? -1d : (now - latestFrameAt) * 1000d / Stopwatch.Frequency;
         Debug.Log($"[ARHandPerf] bridge cameraFps={_perfCameraFrames / elapsed:F1}; copyFps={_perfConvertedFrames / elapsed:F1}; " +
-            $"convertMeanMs={meanMs:F2}; convertMaxMs={_perfMaxConversionTicks * 1000d / Stopwatch.Frequency:F2}; " +
+            $"convertAsyncMeanMs={meanMs:F2}; convertAsyncMaxMs={_perfMaxConversionTicks * 1000d / Stopwatch.Frequency:F2}; " +
             $"acquireMisses={_perfAcquireMisses}; latestReadyAgeMs={frameReadyAgeMs:F1}; image={textureWidth}x{textureHeight}");
         _perfWindowStartedAt = now;
         _perfCameraFrames = 0;
@@ -241,11 +296,12 @@ public class CustomARFrameBridge : ImageSource
             }
         }
         if (!_acceptCpuFrames) return;
+        CompleteCpuConversionIfReady();
         _perfCameraFrames++;
         LogPerformanceIfDue();
         // Native AR background continues independently. Only the small, readable
         // inference copy is produced here; it is never uploaded then read back.
-        if (Time.unscaledTime < _nextCpuFrameAt) return;
+        if (_cpuConversionPending || Time.unscaledTime < _nextCpuFrameAt) return;
         _nextCpuFrameAt = Mathf.Max(_nextCpuFrameAt + 1f / CpuFramesPerSecond, Time.unscaledTime);
 
         if (!cameraManager.TryAcquireLatestCpuImage(out XRCpuImage image))
@@ -260,14 +316,6 @@ public class CustomARFrameBridge : ImageSource
 
         var format = TextureFormat.RGBA32;
         Vector2Int inferenceDimensions = GetInferenceDimensions(image.width, image.height);
-
-        if (_texture == null || _texture.width != inferenceDimensions.x || _texture.height != inferenceDimensions.y)
-        {
-            if (_texture != null) UnityEngine.Object.Destroy(_texture);
-            _texture = new Texture2D(inferenceDimensions.x, inferenceDimensions.y, format, false);
-            resolution = new ResolutionStruct { width = inferenceDimensions.x, height = inferenceDimensions.y };
-            Debug.Log($"[ARBridge] CPU inference {inferenceDimensions.x}x{inferenceDimensions.y}, source {image.width}x{image.height}; direct CPU input, no GPU readback.");
-        }
 
         if (!_coordinateDiagnosticLogged && eventArgs.displayMatrix.HasValue)
         {
@@ -288,28 +336,18 @@ public class CustomARFrameBridge : ImageSource
 
         var conversionParams = new XRCpuImage.ConversionParams(image, format, XRCpuImage.Transformation.None);
         conversionParams.outputDimensions = inferenceDimensions;
-        var rawTextureData = _texture.GetRawTextureData<byte>();
 
         try
         {
-            long convertStartedAt = Stopwatch.GetTimestamp();
-            image.Convert(conversionParams, rawTextureData);
-            long convertedAt = Stopwatch.GetTimestamp();
-            long convertTicks = convertedAt - convertStartedAt;
-            _perfConversionTicks += convertTicks;
-            _perfMaxConversionTicks = System.Math.Max(_perfMaxConversionTicks, convertTicks);
-            _perfConvertedFrames++;
-            Interlocked.Exchange(ref _latestFrameReadyTimestamp, convertedAt);
-            // HandLandmarkerRunner reads this CPU buffer directly. AR camera
-            // imagery is rendered by ARCameraBackground, not this texture.
-            FrameVersion++;
+            _cpuConversionStartedAt = Stopwatch.GetTimestamp();
+            _pendingDimensions = inferenceDimensions;
+            _cpuConversion = image.ConvertAsync(conversionParams);
+            _cpuConversionPending = true;
+            _pendingCpuImage = image;
         }
         catch (System.Exception e)
         {
             Debug.LogError("[ARBridge] Loi khi Convert CPU texture: " + e.Message);
-        }
-        finally
-        {
             image.Dispose();
         }
     }

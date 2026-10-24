@@ -53,8 +53,9 @@ public class InstruConnector : MonoBehaviour
     {
         parentInstrument = gameObject.transform.parent.GetComponent<Instrument>();
         ConnectedWires = new List<Wire>();
-        errorText = GameObject.Find("DisconnectionIndicator").GetComponent<Text>();
-        connectionSound = GameObject.Find("ConnectionSound").GetComponent<AudioSource>();        
+        // These legacy scene helpers are optional in the AR assembly scene.
+        errorText = GameObject.Find("DisconnectionIndicator")?.GetComponent<Text>();
+        connectionSound = GameObject.Find("ConnectionSound")?.GetComponent<AudioSource>();
     }    
 
     private void ApplyConnection(Collision collision)
@@ -65,7 +66,7 @@ public class InstruConnector : MonoBehaviour
         joint.connectedBody = collision.rigidbody;        
         collision.rigidbody.constraints = RigidbodyConstraints.FreezeRotation;
 
-        connectionSound.Play();
+        connectionSound?.Play();
 
         //Set connected body information
         isConnected = true;
@@ -75,7 +76,7 @@ public class InstruConnector : MonoBehaviour
         //wireConnector.ApplyConnection(parentInstrument);
         wireConnector.ApplyInstrConnection(this);
         //errorText.text = "Connection between " + parentInstrument + " and " + ConnectedWire.name;
-        errorText.text = "";
+        if (errorText != null) errorText.text = "";
         //errorText.text += "\nconnector name: " + this.name;
         //errorText.text += "\nWire connector name: " + wireConnector.name;
         //errorText.text += "\nWire connected instruments: ";

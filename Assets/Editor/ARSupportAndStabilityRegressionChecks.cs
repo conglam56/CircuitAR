@@ -5,12 +5,24 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
 
 /// <summary>Measured-surface policy and bounded presentation checks, not native tracking tests.</summary>
 internal static class ARSupportAndStabilityRegressionChecks
 {
     public static void Run(List<string> results)
     {
+        Require(ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, false, Vector3.zero,
+                Vector3.right * 0.1f, new Vector3(0.4f, 0.01f, 0.1f)),
+            "Nearby measured contacts on one support must share a tracked anchor, regardless of prefab type.");
+        Require(!ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, false, Vector3.zero, Vector3.zero, Vector3.up * 0.75f) &&
+            !ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, false, Vector3.up * 0.75f, Vector3.zero, Vector3.right * 0.1f) &&
+            !ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, false, Vector3.zero, Vector3.zero, Vector3.right * 1.1f) &&
+            !ARSupportPolicy.CanShareAnchor(TrackingState.Limited, false, Vector3.zero, Vector3.zero, Vector3.right * 0.1f) &&
+            !ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, true, Vector3.zero, Vector3.zero, Vector3.right * 0.1f) &&
+            !ARSupportPolicy.CanShareAnchor(TrackingState.Tracking, false, Vector3.zero, Vector3.zero, Vector3.one * float.NaN),
+            "A shared anchor cannot bridge floor/table heights (including old table anchors retaining a dragged floor item), distance, missing tracking, pending anchors or invalid data.");
+        results.Add("PASS: nearby same-level measured contacts share anchors; table/floor, distance and native-tracking boundaries remain separate");
         Pose table = new Pose(Vector3.up * 0.75f, Quaternion.identity);
         Pose floor = Pose.identity;
         Require(ARSupportPolicy.PreferMeasuredDepth(table, floor) &&
@@ -44,6 +56,42 @@ internal static class ARSupportAndStabilityRegressionChecks
             !level.Accept(floor.position, new Vector2(float.NaN, 0f), 4f),
             "Invalid target/pointer values cannot finish a support transition.");
         results.Add("PASS: support switching is canceled by misses, moving pointers and invalid geometry instead of extrapolating into air");
+
+        Require(ARSupportPolicy.CanCorrectContactHeight(0.45f, 0f) &&
+            !ARSupportPolicy.CanCorrectContactHeight(0.75f, 0f) &&
+            !ARSupportPolicy.CanCorrectContactHeight(0f, 0.23f) &&
+            !ARSupportPolicy.CanCorrectContactHeight(0f, 0.008f) &&
+            !ARSupportPolicy.CanCorrectContactHeight(float.NaN, 0f),
+            "Contact reconciliation may lower an obsolete floor contact, but cannot cross a tabletop height, amplify jitter or accept invalid data.");
+        var contactConfirmation = new ARSupportPolicy.ContactConfirmation();
+        Require(!contactConfirmation.Observe(0.45f, 0f, 0f) &&
+            !contactConfirmation.Observe(0.45f, 0.002f, 0.3f) &&
+            !contactConfirmation.Observe(0.45f, 0.002f, 0.3f) &&
+            contactConfirmation.Observe(0.45f, -0.001f, 0.61f),
+            "A ground correction requires three distinct observations and a 600ms stable-height dwell.");
+        results.Add("PASS: floor contact correction is bounded and needs three stable, distinct measurements rather than cached frames");
+        contactConfirmation.Reset();
+        Require(!contactConfirmation.Observe(0.45f, 0f, 1f) &&
+            !contactConfirmation.Observe(0.45f, 0.04f, 1.7f) &&
+            !contactConfirmation.Observe(0.45f, 0.04f, 1.9f),
+            "Changing measured heights must restart confirmation instead of completing an obsolete floor correction.");
+        contactConfirmation.Reset();
+        Require(!contactConfirmation.Observe(0.45f, 0.04f, 2.5f) &&
+            !contactConfirmation.Observe(0.45f, float.NaN, 3f) &&
+            !contactConfirmation.Observe(0.45f, 0.04f, 3.5f) &&
+            !contactConfirmation.Observe(0.45f, 0.04f, 3.8f) &&
+            !contactConfirmation.Observe(0.45f, 0.04f, 6f),
+            "Misses/invalid data and stale observations must cancel ground contact confirmation.");
+        results.Add("PASS: changing/missing/stale support cannot finish an automatic height correction");
+        Vector3 oldContact = new Vector3(0.2f, 0.4f, 0.1f);
+        Vector3 slopeNormal = Quaternion.Euler(10f, 0f, 0f) * Vector3.up;
+        Require(ARSupportPolicy.TryProjectContactVertically(oldContact, Vector3.zero, slopeNormal, out Vector3 foot) &&
+            foot.x == oldContact.x && foot.z == oldContact.z &&
+            Mathf.Abs(Vector3.Dot(foot, slopeNormal)) < 0.00001f &&
+            !ARSupportPolicy.TryProjectContactVertically(oldContact, Vector3.zero, Vector3.right, out _) &&
+            !ARSupportPolicy.TryProjectContactVertically(oldContact, Vector3.zero, Vector3.one * float.NaN, out _),
+            "Contact correction must project vertically at the object's fixed XZ, never along the changing camera/finger ray.");
+        results.Add("PASS: ground projection preserves world XZ and rejects steep/invalid support geometry");
 
         var filter = new ARSupportPolicy.PoseDeadband();
         Require(filter.Apply(floor, false).position == Vector3.zero,
@@ -107,6 +155,48 @@ internal static class ARSupportAndStabilityRegressionChecks
             Require(Vector3.Distance(body.transform.position, native) < 0.00001f,
                 "Recovery must immediately adopt the current native height without smoothing it through the floor.");
             results.Add("PASS: anchored presentation preserves hierarchy, cumulative corrections, undo/rotation and native-anchor handoff/recovery");
+
+            body.transform.position = new Vector3(0.2f, 0.45f, 0.3f);
+            Vector3 fixedXZ = body.transform.position;
+            Quaternion fixedRotation = body.transform.rotation;
+            var stepContact = typeof(TapToPlaceController).GetMethod("StepContactCorrection", BindingFlags.Static | BindingFlags.NonPublic);
+            for (int i = 0; i < 10; i++)
+            {
+                stepContact.Invoke(null, new object[] { body.transform, 0f, 0.05f });
+                Tick();
+                Require(body.transform.position.x == fixedXZ.x && body.transform.position.z == fixedXZ.z &&
+                    body.transform.parent == anchorRoot.transform && Quaternion.Angle(body.transform.rotation, fixedRotation) < 0.001f,
+                    "Settling must retain world XZ, orientation and the native anchor hierarchy, including the presentation filter.");
+            }
+            Require(Mathf.Abs(body.transform.position.y) < 0.0001f,
+                "The presentation filter must accept the final authored floor contact rather than restoring its obsolete height.");
+            results.Add("PASS: floor settling reaches the measured height without camera-follow, rotation or stabilizer rollback");
+
+            var neighbour = new GameObject("Placed_Neighbour");
+            neighbour.transform.SetParent(anchorRoot.transform, false);
+            var controller = root.AddComponent<TapToPlaceController>();
+            controller.enabled = false;
+            var bindings = (Dictionary<GameObject, ARAnchor>)typeof(TapToPlaceController)
+                .GetField("objectAnchors", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+            bindings[body] = anchor;
+            bindings[neighbour] = anchor;
+            var destination = new GameObject("SharedDestination");
+            destination.transform.SetParent(root.transform, false);
+            destination.transform.SetPositionAndRotation(new Vector3(0.4f, 0f, 0.3f), Quaternion.Euler(0f, 25f, 0f));
+            var destinationAnchor = destination.AddComponent<ARAnchor>();
+            destinationAnchor.enabled = false;
+            Pose contact = new Pose(new Vector3(0.6f, 0f, 0.3f), Quaternion.Euler(0f, 90f, 0f));
+            Vector3 neighbourBefore = neighbour.transform.position;
+            typeof(TapToPlaceController).GetMethod("AdoptSupportAnchor", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(controller, new object[] { body, destinationAnchor, contact, anchor });
+            Require(body.transform.parent == destination.transform && bindings[body] == destinationAnchor &&
+                Vector3.Distance(body.transform.position, contact.position) < 0.00001f &&
+                Quaternion.Angle(body.transform.rotation, contact.rotation) < 0.001f,
+                "Anchor sharing must preserve the measured contact and rotation instead of snapping onto the anchor's origin.");
+            Require(anchor != null && neighbour.transform.parent == anchorRoot.transform &&
+                neighbour.transform.position == neighbourBefore && bindings[neighbour] == anchor,
+                "Reanchoring one member cannot destroy or move a sibling's shared anchor.");
+            results.Add("PASS: sharing/reanchoring preserves each measured contact, orientation and the previous anchor's remaining members");
         }
         finally { EditorSceneManager.ClosePreviewScene(scene); }
     }

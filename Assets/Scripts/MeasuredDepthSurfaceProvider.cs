@@ -38,6 +38,10 @@ public sealed class MeasuredDepthSurfaceProvider
     private bool hasReportedSupport;
     private bool reportedMissingManager;
 
+    // Placement probes require a hand by default. A separate, idle contact
+    // verifier measures the environment without requiring a pointing gesture.
+    public bool RequireVisibleHand { get; set; } = true;
+
     public int LastSupportSampleCount => samples.Count;
     public int HandMaskedProbeCount { get; private set; }
     public float LastProbeRadiusPixels { get; private set; }
@@ -46,7 +50,7 @@ public sealed class MeasuredDepthSurfaceProvider
     public int LastNativeQueryCount { get; private set; }
     public int LastNativeHitCount { get; private set; }
     public int LastNativeNoHitCount { get; private set; }
-    public int LastRejectedNormalCount { get; private set; }
+    public int LastUnreliableNormalCount { get; private set; }
     public int LastRejectedRangeCount { get; private set; }
     public int LastRejectedHeightCount { get; private set; }
     public int LastRejectedInvalidCount { get; private set; }
@@ -83,7 +87,7 @@ public sealed class MeasuredDepthSurfaceProvider
             occlusion = camera.GetComponent<AROcclusionManager>();
         }
 
-        if (!EnsureDepthReady() || (this.handInput != null && !this.handInput.IsHandVisible))
+        if (!EnsureDepthReady() || (RequireVisibleHand && this.handInput != null && !this.handInput.IsHandVisible))
             Reset();
     }
 
@@ -147,7 +151,7 @@ public sealed class MeasuredDepthSurfaceProvider
         pose = default;
         if (!IsFinite(screenPoint.x) || !IsFinite(screenPoint.y) ||
             screenPoint.x < 0f || screenPoint.y < 0f || screenPoint.x >= Screen.width || screenPoint.y >= Screen.height ||
-            !EnsureDepthReady() || (handInput != null && !handInput.IsHandVisible))
+            !EnsureDepthReady() || (RequireVisibleHand && handInput != null && !handInput.IsHandVisible))
         {
             Reset();
             return false;
@@ -232,10 +236,13 @@ public sealed class MeasuredDepthSurfaceProvider
             // for another hit and pretending the foreground was not present.
             pose = hit.pose;
             LastNativeHitCount++;
+            // Pixel normals can be noisy even when neighbouring measured points
+            // form a flat floor. Validate the patch's 3D geometry below instead.
+            if (Vector3.Dot(pose.rotation * Vector3.up, Vector3.up) < MinimumUpDot)
+                LastUnreliableNormalCount++;
             var rejection = GetSampleRejection(pose, camera.transform.position);
             switch (rejection)
             {
-                case SampleRejection.Normal: LastRejectedNormalCount++; break;
                 case SampleRejection.Range: LastRejectedRangeCount++; break;
                 case SampleRejection.Height: LastRejectedHeightCount++; break;
                 case SampleRejection.Invalid: LastRejectedInvalidCount++; break;
@@ -251,7 +258,7 @@ public sealed class MeasuredDepthSurfaceProvider
         LastNativeQueryCount = 0;
         LastNativeHitCount = 0;
         LastNativeNoHitCount = 0;
-        LastRejectedNormalCount = 0;
+        LastUnreliableNormalCount = 0;
         LastRejectedRangeCount = 0;
         LastRejectedHeightCount = 0;
         LastRejectedInvalidCount = 0;
@@ -320,14 +327,15 @@ public sealed class MeasuredDepthSurfaceProvider
     public static bool TryValidatePatch(Ray targetRay, Vector3 cameraPosition,
         IReadOnlyList<Pose> measuredSamples, out Pose pose)
     {
-        return TryValidatePatch(targetRay, cameraPosition, measuredSamples, out pose, out _);
+        return TryValidatePatch(targetRay, cameraPosition, measuredSamples, out pose, out _, out _);
     }
 
     private static bool TryValidatePatch(Ray targetRay, Vector3 cameraPosition,
-        IReadOnlyList<Pose> measuredSamples, out Pose pose, out List<Vector2> supportedHull)
+        IReadOnlyList<Pose> measuredSamples, out Pose pose, out List<Vector2> supportedHull, out Vector3 supportNormal)
     {
         pose = default;
         supportedHull = null;
+        supportNormal = Vector3.up;
         if (measuredSamples == null || measuredSamples.Count < MinimumSupportSamples ||
             !IsFinite(cameraPosition) || !IsFinite(targetRay.origin) || !IsFinite(targetRay.direction) ||
             targetRay.direction.y >= -0.01f)
@@ -359,6 +367,7 @@ public sealed class MeasuredDepthSurfaceProvider
         float seedHeight = measuredSamples[bestSeed].position.y;
         var points = new List<Vector2>(bestCount);
         var heights = new List<float>(bestCount);
+        var support = new List<Vector3>(bestCount);
         for (int i = 0; i < count; i++)
         {
             var sample = measuredSamples[i];
@@ -366,6 +375,7 @@ public sealed class MeasuredDepthSurfaceProvider
             {
                 points.Add(new Vector2(sample.position.x, sample.position.z));
                 heights.Add(sample.position.y);
+                support.Add(sample.position);
             }
         }
         heights.Sort();
@@ -376,7 +386,7 @@ public sealed class MeasuredDepthSurfaceProvider
         for (int seed = 0; seed < count; seed++)
         {
             if (!IsUsableSample(measuredSamples[seed], cameraPosition) ||
-                Mathf.Abs(measuredSamples[seed].position.y - height) <= HeightTolerance * 2f)
+                Mathf.Abs(measuredSamples[seed].position.y - height) <= HeightTolerance)
                 continue;
             int otherLevelCount = 0;
             for (int i = 0; i < count; i++)
@@ -387,12 +397,12 @@ public sealed class MeasuredDepthSurfaceProvider
                 return false;
         }
 
-        float distanceAlongRay = (height - targetRay.origin.y) / targetRay.direction.y;
-        if (distanceAlongRay <= 0f)
+        if (!TryFitHorizontalSupport(support, out Vector3 supportPoint, out supportNormal) ||
+            !new Plane(supportNormal, supportPoint).Raycast(targetRay, out float distanceAlongRay) || distanceAlongRay <= 0f)
             return false;
         var position = targetRay.GetPoint(distanceAlongRay);
         float range = Vector3.Distance(position, cameraPosition);
-        if (!IsFinite(position) || range < MinimumRange || range > MaximumRange || cameraPosition.y <= height + 0.02f)
+        if (!IsFinite(position) || range < MinimumRange || range > MaximumRange || cameraPosition.y <= position.y + 0.02f)
             return false;
         for (int i = 0; i < points.Count; i++)
             for (int j = i + 1; j < points.Count; j++)
@@ -408,6 +418,40 @@ public sealed class MeasuredDepthSurfaceProvider
         return true;
     }
 
+    private static bool TryFitHorizontalSupport(List<Vector3> samples, out Vector3 center, out Vector3 normal)
+    {
+        center = Vector3.zero;
+        normal = Vector3.up;
+        foreach (Vector3 point in samples) center += point;
+        center /= samples.Count;
+        double xx = 0, zz = 0, xz = 0, xy = 0, zy = 0;
+        foreach (Vector3 point in samples)
+        {
+            Vector3 d = point - center;
+            xx += (double)d.x * d.x;
+            zz += (double)d.z * d.z;
+            xz += (double)d.x * d.z;
+            xy += (double)d.x * d.y;
+            zy += (double)d.z * d.y;
+        }
+        double determinant = xx * zz - xz * xz;
+        if (xx < 0.000001 || zz < 0.000001 || determinant <= xx * zz * 0.0001) return false;
+        float slopeX = (float)((xy * zz - zy * xz) / determinant);
+        float slopeZ = (float)((zy * xx - xy * xz) / determinant);
+        normal = new Vector3(-slopeX, 1f, -slopeZ).normalized;
+        if (!IsFinite(normal) || Vector3.Dot(normal, Vector3.up) < MinimumUpDot) return false;
+        float squaredResidual = 0f;
+        foreach (Vector3 point in samples)
+        {
+            Vector3 d = point - center;
+            float residual = d.y - slopeX * d.x - slopeZ * d.z;
+            if (Mathf.Abs(residual) > 0.012f) return false;
+            squaredResidual += residual * residual;
+        }
+        // Keep the fit within 6 mm RMS; a warped/mixed patch is not a floor.
+        return squaredResidual / samples.Count <= 0.006f * 0.006f;
+    }
+
     /// <summary>
     /// Bounded geometric cache only. Runtime callers must confirm temporal stability
     /// before using it. It never retains an infinite plane or the old screen contact.
@@ -416,7 +460,7 @@ public sealed class MeasuredDepthSurfaceProvider
     {
         public const float MaximumAge = 0.12f;
         private List<Vector2> hull;
-        private float height;
+        private Plane supportPlane;
         private float observedAt;
 
         public bool TryCapture(Ray targetRay, Vector3 cameraPosition, IReadOnlyList<Pose> measuredSamples,
@@ -425,9 +469,9 @@ public sealed class MeasuredDepthSurfaceProvider
             Reset();
             pose = default;
             if (!IsFinite(now) || !TryValidatePatch(targetRay, cameraPosition, measuredSamples,
-                out pose, out var supportedHull)) return false;
+                out pose, out var supportedHull, out var normal)) return false;
             hull = supportedHull;
-            height = pose.position.y;
+            supportPlane = new Plane(normal, pose.position);
             observedAt = now;
             return true;
         }
@@ -438,13 +482,12 @@ public sealed class MeasuredDepthSurfaceProvider
             float age = now - observedAt;
             if (hull == null || !IsFinite(now) || age < 0f || age > MaximumAge ||
                 !IsFinite(cameraPosition) || !IsFinite(targetRay.origin) || !IsFinite(targetRay.direction) ||
-                targetRay.direction.y >= -0.01f || cameraPosition.y <= height + 0.02f)
+                targetRay.direction.y >= -0.01f)
                 return false;
-            float distance = (height - targetRay.origin.y) / targetRay.direction.y;
-            if (distance <= 0f) return false;
+            if (!supportPlane.Raycast(targetRay, out float distance) || distance <= 0f) return false;
             Vector3 position = targetRay.GetPoint(distance);
             float range = Vector3.Distance(position, cameraPosition);
-            if (!IsFinite(position) || range < MinimumRange || range > MaximumRange ||
+            if (!IsFinite(position) || range < MinimumRange || range > MaximumRange || cameraPosition.y <= position.y + 0.02f ||
                 !ContainsSupportedPoint(hull, new Vector2(position.x, position.z))) return false;
             pose = new Pose(position, Quaternion.identity);
             return true;
@@ -453,7 +496,7 @@ public sealed class MeasuredDepthSurfaceProvider
         public void Reset()
         {
             hull = null;
-            height = 0f;
+            supportPlane = default;
             observedAt = float.NegativeInfinity;
         }
     }
@@ -463,7 +506,7 @@ public sealed class MeasuredDepthSurfaceProvider
         return GetSampleRejection(sample, cameraPosition) == SampleRejection.None;
     }
 
-    private enum SampleRejection { None, Invalid, Normal, Range, Height }
+    private enum SampleRejection { None, Invalid, Range, Height }
 
     private static SampleRejection GetSampleRejection(Pose sample, Vector3 cameraPosition)
     {
@@ -474,9 +517,6 @@ public sealed class MeasuredDepthSurfaceProvider
             sample.rotation.z * sample.rotation.z + sample.rotation.w * sample.rotation.w;
         if (rotationLength < 0.9f || rotationLength > 1.1f)
             return SampleRejection.Invalid;
-        var normal = sample.rotation * Vector3.up;
-        if (Vector3.Dot(normal.normalized, Vector3.up) < MinimumUpDot)
-            return SampleRejection.Normal;
         float range = Vector3.Distance(sample.position, cameraPosition);
         if (range < MinimumRange || range > MaximumRange)
             return SampleRejection.Range;
