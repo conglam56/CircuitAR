@@ -123,6 +123,8 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private static Sprite rotateSprite;
     private Canvas targetCanvas;
     private CanvasScaler targetScaler;
+    private const float TopActionsOffset = -270f;
+    private const float TopActionsGap = 24f;
     private bool menuVisibilityRequested = true;
     private bool hiddenForSizeDialog;
     private Coroutine animCoroutine;
@@ -260,6 +262,31 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     void Update()
     {
         UpdateCanvasOrientation();
+    }
+
+    void LateUpdate()
+    {
+        LayoutTopActions();
+    }
+
+    private void LayoutTopActions()
+    {
+        if (targetCanvas == null || !targetCanvas.isActiveAndEnabled) return;
+        float topOffset = TopActionsOffset;
+        var hud = ARScanFloatingHUD.Instance;
+        if (btnRotateComp != null && btnRotateComp.parent is RectTransform parent &&
+            hud != null && hud.TryGetBottomScreenY(out float hudBottom))
+        {
+            // Convert between canvases to retain the gap in both orientations.
+            Camera camera = targetCanvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : targetCanvas.worldCamera;
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parent,
+                new Vector2(Screen.width * 0.5f, hudBottom), camera, out Vector2 local))
+                topOffset = Mathf.Min(topOffset, local.y - parent.rect.yMax - TopActionsGap);
+        }
+        if (btnRotateComp != null)
+            btnRotateComp.anchoredPosition = new Vector2(btnRotateComp.anchoredPosition.x, topOffset);
+        if (btnDeleteComp != null)
+            btnDeleteComp.anchoredPosition = new Vector2(btnDeleteComp.anchoredPosition.x, topOffset);
     }
 
     private void UpdateCanvasOrientation()
@@ -2143,7 +2170,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         btnRotateComp.anchorMax = new Vector2(0.5f, 1f);
         btnRotateComp.pivot = new Vector2(0.5f, 1f);
         btnRotateComp.sizeDelta = new Vector2(bubbleDiameter, bubbleDiameter);
-        btnRotateComp.anchoredPosition = new Vector2(-halfSpan, -140f);
+        btnRotateComp.anchoredPosition = new Vector2(-halfSpan, TopActionsOffset);
 
         Image img = btnObj.GetComponent<Image>();
         img.sprite = circleSprite;
@@ -2231,7 +2258,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         btnDeleteComp.anchorMax = new Vector2(0.5f, 1f);
         btnDeleteComp.pivot = new Vector2(0.5f, 1f);
         btnDeleteComp.sizeDelta = new Vector2(bubbleDiameter, bubbleDiameter);
-        btnDeleteComp.anchoredPosition = new Vector2(halfSpan, -140f);
+        btnDeleteComp.anchoredPosition = new Vector2(halfSpan, TopActionsOffset);
 
         Image img = btnObj.GetComponent<Image>();
         img.sprite = circleSprite;
@@ -2360,6 +2387,7 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         {
             btnRotateComp.gameObject.SetActive(hasSelection);
         }
+        LayoutTopActions();
     }
 
     public static Sprite GetTrashIconSprite()

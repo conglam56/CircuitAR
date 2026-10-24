@@ -66,6 +66,7 @@ public class TapToPlaceController : MonoBehaviour
     private Vector2 dragPointerOffset;
     private float dragHandLostAt = float.NegativeInfinity;
     private bool dragNeedsOpenHandAfterPlacement;
+    private readonly ARSupportPolicy.LevelTransition dragLevelTransition = new ARSupportPolicy.LevelTransition();
     private Quaternion dragStartRot = Quaternion.identity;
     private Vector3 currentSmoothedDragPos = Vector3.zero;
     private bool isDragBlocked = false;
@@ -105,6 +106,9 @@ public class TapToPlaceController : MonoBehaviour
     private ButtonInteractor.PlacementFeedback lastPlacementFeedback;
     private readonly MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
     private bool previewSurfaceIsDepth;
+    private bool hasDepthSupportEvidence;
+    private Pose lastDepthSupportEvidence;
+    private Vector2 lastDepthEvidencePointer;
     private bool loggedMeasuredPreviewGeometry;
     private GameObject placementStatusRoot;
     private TMPro.TextMeshProUGUI placementStatusText;
@@ -126,6 +130,8 @@ public class TapToPlaceController : MonoBehaviour
     private bool? previewIsInvalid;
     private TrackableId dragSurfaceTrackableId = TrackableId.invalidId;
     private readonly Dictionary<GameObject, ARAnchor> objectAnchors = new Dictionary<GameObject, ARAnchor>();
+    private readonly Dictionary<GameObject, int> dragAnchorRequests = new Dictionary<GameObject, int>();
+    private int nextDragAnchorRequest;
 
     [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY ---")]
     public GameObject SelectedComponent { get; private set; }
@@ -507,6 +513,7 @@ public class TapToPlaceController : MonoBehaviour
         }
         if (ARSession.state != ARSessionState.SessionTracking)
         {
+            hasDepthSupportEvidence = false;
             canPlace = false;
             if (!placementRequestAwaitingSurface) ClearPlacementRequest();
             surfaceTransitionActive = false;
@@ -856,6 +863,8 @@ public class TapToPlaceController : MonoBehaviour
         GameObject placedObject = previewAnchor;
         nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
         objectAnchors[placedObject] = nativeAnchor;
+        var stabilizer = placedObject.AddComponent<ARPlacedObjectStabilizer>();
+        stabilizer.Bind(this, nativeAnchor);
         placedObjectsHistory.Add(placedObject);
         placementConfirmedUntil = Time.unscaledTime + 2.5f;
         // A closed placement gesture, including a hand re-detected still
@@ -921,6 +930,7 @@ public class TapToPlaceController : MonoBehaviour
                 isDragging = true;
                 dragStartPos = draggedObject.transform.position;
                 dragStartRot = draggedObject.transform.rotation;
+                dragLevelTransition.Begin(dragStartPos.y);
                 Vector3 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
                 dragPointerOffset = new Vector2(baseScreen.x, baseScreen.y) - screenPos;
                 lastValidDragPos = dragStartPos;
@@ -1060,44 +1070,13 @@ public class TapToPlaceController : MonoBehaviour
                 draggedObject.transform.rotation = lastValidDragRot;
             }
 
-            // Keep a nearby tracked native anchor for normal same-level moves.
-            // Only distant/untracked moves need a replacement; do not leave an
-            // object far from its anchor if that replacement cannot be tracked.
+            // Keep a nearby genuine anchor. Distant moves need an async native
+            // replacement; a pending request is not a reason to bounce the
+            // component back up onto its original tabletop.
             if (Vector3.Distance(dragStartPos, draggedObject.transform.position) > 0.006f &&
-                !HasReusableDragAnchor(draggedObject))
-            {
-                ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(dragSurfaceTrackableId) : null;
-                ARAnchor replacement = null;
-                if (plane != null && plane.trackingState == TrackingState.Tracking &&
-                    ARSession.state == ARSessionState.SessionTracking && arAnchorManager != null &&
-                    arAnchorManager.isActiveAndEnabled && arAnchorManager.subsystem != null)
-                {
-                    try
-                    {
-                        replacement = arAnchorManager.AttachAnchor(plane,
-                            new Pose(draggedObject.transform.position, draggedObject.transform.rotation));
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Debug.LogWarning("[TapToPlace] Reanchor failed: " + ex.Message);
-                    }
-                }
-
-                if (replacement != null && replacement.trackingState == TrackingState.Tracking)
-                {
-                    objectAnchors.TryGetValue(draggedObject, out ARAnchor previous);
-                    replacement.gameObject.name = "SurfaceAnchor_" + draggedObject.name;
-                    draggedObject.transform.SetParent(replacement.transform, true);
-                    objectAnchors[draggedObject] = replacement;
-                    if (previous != null) Destroy(previous.gameObject);
-                }
-                else
-                {
-                    if (replacement != null) Destroy(replacement.gameObject);
-                    draggedObject.transform.SetPositionAndRotation(dragStartPos, dragStartRot);
-                    wireConnectionController?.UpdateActiveWirePositionsExternal();
-                }
-            }
+                (!HasReusableDragAnchor(draggedObject) ||
+                 !IsSameDragSupportLevel(dragStartPos.y, draggedObject.transform.position.y)))
+                ReanchorDraggedObject(draggedObject);
 
             if (SelectedComponent == draggedObject)
             {
@@ -1126,7 +1105,74 @@ public class TapToPlaceController : MonoBehaviour
         dragSurfaceTrackableId = TrackableId.invalidId;
         dragPointerOffset = Vector2.zero;
         dragHandLostAt = float.NegativeInfinity;
+        dragLevelTransition.CancelPending();
         worldPinchArmed = false;
+    }
+
+    private async void ReanchorDraggedObject(GameObject obj)
+    {
+        if (obj == null || arAnchorManager == null || !arAnchorManager.isActiveAndEnabled ||
+            arAnchorManager.subsystem == null || !arAnchorManager.subsystem.running ||
+            ARSession.state != ARSessionState.SessionTracking) return;
+        ARAnchor previous = obj.GetComponentInParent<ARAnchor>();
+        // Never replace a real binding with a free-floating Transform fallback.
+        if (previous == null) return;
+        Transform oldParent = obj.transform.parent;
+        Vector3 localPosition = obj.transform.localPosition;
+        Quaternion localRotation = obj.transform.localRotation;
+        Pose requested = new Pose(obj.transform.position, obj.transform.rotation);
+        int request = ++nextDragAnchorRequest;
+        dragAnchorRequests[obj] = request;
+        var stabilizer = obj.GetComponent<ARPlacedObjectStabilizer>();
+        if (stabilizer != null) stabilizer.SuspendFiltering = true;
+        ARAnchor replacement = null;
+        bool StillCurrent() => this != null && obj != null && obj.activeInHierarchy && isActiveAndEnabled &&
+            dragAnchorRequests.TryGetValue(obj, out int current) && current == request &&
+            !(isDragging && draggedObject == obj) && obj.transform.parent == oldParent &&
+            Vector3.Distance(obj.transform.localPosition, localPosition) < 0.0001f &&
+            Quaternion.Angle(obj.transform.localRotation, localRotation) < 0.1f;
+        try
+        {
+            // ReleaseDraggedObject clears its interaction state in this frame.
+            // Even a synchronously completed native API must not mistake that
+            // original release for a new grab and discard its replacement.
+            await Awaitable.NextFrameAsync();
+            if (!StillCurrent() || ARSession.state != ARSessionState.SessionTracking) return;
+            var result = await arAnchorManager.TryAddAnchorAsync(requested);
+            if (result.status.IsSuccess()) replacement = result.value;
+            float deadline = Time.realtimeSinceStartup + 2f;
+            while (replacement != null && StillCurrent() && ARSession.state == ARSessionState.SessionTracking &&
+                (replacement.pending || replacement.trackingState != TrackingState.Tracking) &&
+                Time.realtimeSinceStartup < deadline)
+                await Awaitable.NextFrameAsync();
+            if (replacement == null || !StillCurrent() || replacement.pending ||
+                replacement.trackingState != TrackingState.Tracking || ARSession.state != ARSessionState.SessionTracking) return;
+
+            replacement.gameObject.name = "SurfaceAnchor_" + obj.name;
+            obj.transform.SetParent(replacement.transform, true);
+            obj.transform.SetPositionAndRotation(replacement.transform.position, requested.rotation);
+            objectAnchors[obj] = replacement;
+            if (stabilizer != null) stabilizer.Bind(this, replacement);
+            replacement = null; // Ownership transferred to the component.
+            bool shared = false;
+            foreach (var entry in objectAnchors)
+                if (entry.Key != obj && entry.Value == previous) { shared = true; break; }
+            if (!shared && previous != null) Destroy(previous.gameObject);
+            wireConnectionController?.UpdateActiveWirePositionsExternal();
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning("[TapToPlace] New support anchor not ready; retaining the genuine previous anchor: " + ex.Message);
+        }
+        finally
+        {
+            if (replacement != null) Destroy(replacement.gameObject);
+            if (this != null && dragAnchorRequests.TryGetValue(obj, out int current) && current == request)
+            {
+                dragAnchorRequests.Remove(obj);
+                if (stabilizer != null) stabilizer.SuspendFiltering = false;
+            }
+        }
     }
 
     private bool HasReusableDragAnchor(GameObject obj)
@@ -1217,36 +1263,17 @@ public class TapToPlaceController : MonoBehaviour
     {
         pose = default;
         planeId = TrackableId.invalidId;
-        if (mainCamera == null || arPlaneManager == null ||
+        if (mainCamera == null ||
             ARSession.state != ARSessionState.SessionTracking) return false;
-        Ray ray = mainCamera.ScreenPointToRay(screenPoint);
-        float nearest = float.PositiveInfinity;
-        foreach (ARPlane plane in arPlaneManager.trackables)
+        bool planeHit = TryProjectPointerToTrackedPlane(screenPoint, dragSurfaceTrackableId, out Pose planePose, out TrackableId id);
+        if (!TryChooseMeasuredSupport(screenPoint, planeHit, planePose, id, out pose, out planeId, out _))
         {
-            if (!IsUsableSurfacePlane(plane)) continue;
-            Plane support = new Plane(plane.transform.up, plane.transform.position);
-            if (!support.Raycast(ray, out float distance) || distance <= mainCamera.nearClipPlane || distance > 20f) continue;
-            Vector3 point = ray.GetPoint(distance);
-            // One drag stays on the original support level. A pointer beyond a
-            // table edge must not select a distant floor and shrink the component.
-            if (!IsSameDragSupportLevel(dragStartPos.y, GetContactPosition(new Pose(point, plane.transform.rotation)).y)) continue;
-            if (Vector3.Dot(mainCamera.transform.position - point, plane.transform.up) <= 0f) continue;
-            Vector3 local = plane.transform.InverseTransformPoint(point);
-            if (!IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary) || distance >= nearest) continue;
-            nearest = distance;
-            pose = new Pose(point, plane.transform.rotation);
-            planeId = plane.trackableId;
+            dragLevelTransition.CancelPending();
+            return false;
         }
-        if (planeId != TrackableId.invalidId) return true;
-        // A real depth-placed component must not be immovable while ARCore is
-        // still building polygons. Keep the same measured support-height gate.
-        if (measuredDepth.TryGetSurface(screenPoint, out Pose depthPose) &&
-            IsSameDragSupportLevel(dragStartPos.y, GetContactPosition(depthPose).y))
-        {
-            pose = depthPose;
-            return true;
-        }
-        return false;
+        // Crossing a measured table/floor height is intentional only after a
+        // short stable hold. A single ray beyond an edge must not teleport.
+        return dragLevelTransition.Accept(GetContactPosition(pose), screenPoint, Time.unscaledTime);
     }
 
     private static bool IsSameDragSupportLevel(float startHeight, float contactHeight)
@@ -1323,12 +1350,50 @@ public class TapToPlaceController : MonoBehaviour
     private bool TryGetMeasuredPlacementSurface(Vector2 screenPosition, TrackableId preferredPlaneId,
         out Pose pose, out TrackableId planeId, out bool isDepth)
     {
+        bool planeHit = TryGetRealHorizontalSurface(screenPosition, preferredPlaneId, out Pose planePose, out TrackableId id);
+        if (TryChooseMeasuredSupport(screenPosition, planeHit, planePose, id, out pose, out planeId, out isDepth)) return true;
+        // Do not snap an edge upward over a real lower depth patch, including
+        // its first still-confirming observation.
+        if (measuredDepth.IsConfirmingSurface) return false;
+        return !planeHit && TryFindNearbyTrackedSurface(screenPosition, out pose, out planeId);
+    }
+
+    private bool TryChooseMeasuredSupport(Vector2 screenPoint, bool planeHit, Pose planePose, TrackableId id,
+        out Pose pose, out TrackableId planeId, out bool isDepth)
+    {
+        pose = planePose;
+        planeId = id;
         isDepth = false;
-        if (TryGetPlacementSurface(screenPosition, preferredPlaneId, out pose, out planeId)) return true;
-        if (!measuredDepth.TryGetSurface(screenPosition, out pose)) return false;
-        planeId = TrackableId.invalidId;
-        isDepth = true;
-        return true;
+        bool depthHit = measuredDepth.TryGetSurface(screenPoint, out Pose depthPose);
+        if (depthHit)
+        {
+            hasDepthSupportEvidence = true;
+            lastDepthSupportEvidence = depthPose;
+            lastDepthEvidencePointer = screenPoint;
+        }
+        if (depthHit && (!planeHit || ARSupportPolicy.PreferMeasuredDepth(planePose, depthPose)))
+        {
+            pose = depthPose;
+            planeId = TrackableId.invalidId;
+            isDepth = true;
+            return true;
+        }
+        if (planeHit && measuredDepth.IsConfirmingSurface &&
+            ARSupportPolicy.PreferMeasuredDepth(planePose, measuredDepth.ConfirmingSurfacePose)) return false;
+        if (planeHit && !depthHit && hasDepthSupportEvidence && mainCamera != null &&
+            ARSupportPolicy.PreferMeasuredDepth(planePose, lastDepthSupportEvidence) &&
+            Vector2.Distance(screenPoint, lastDepthEvidencePointer) <= 40f)
+        {
+            // Missing depth is not evidence that the previously disproved table
+            // height became correct again. This only REJECTS a conflicting plane
+            // near the same measured spot; it never authorizes stale-depth placement.
+            Ray ray = mainCamera.ScreenPointToRay(screenPoint);
+            var previousLevel = new Plane(Vector3.up, lastDepthSupportEvidence.position);
+            if (previousLevel.Raycast(ray, out float distance) && distance > 0f &&
+                Vector3.Distance(ray.GetPoint(distance), lastDepthSupportEvidence.position) <= 0.08f)
+                return false;
+        }
+        return planeHit;
     }
 
     private static bool IsUsableSurfacePlane(ARPlane plane)
@@ -1871,7 +1936,15 @@ public class TapToPlaceController : MonoBehaviour
         }
         if (isDragging)
         {
-            surfaceGuidanceHUD.ShowDetected("Đang kéo linh kiện", "Mở tay để thả; chỉ di chuyển trên mặt đỡ đã nhận diện");
+            if (dragLevelTransition.IsPending)
+                surfaceGuidanceHUD.ShowScanning("Đang chuyển sang mặt đỡ mới", "Giữ con trỏ trên sàn / bàn mới một chút rồi mở tay để thả");
+            else
+                surfaceGuidanceHUD.ShowDetected("Đang kéo linh kiện", "Mở tay để thả; chỉ di chuyển trên mặt đỡ đã nhận diện");
+            return;
+        }
+        if (dragAnchorRequests.Count > 0)
+        {
+            surfaceGuidanceHUD.ShowScanning("Đang neo lên mặt đỡ mới", "Giữ máy ổn định; vật giữ nguyên điểm sàn / bàn vừa đo được");
             return;
         }
         if (currentPrefabToPlace != null)
@@ -2066,6 +2139,7 @@ public class TapToPlaceController : MonoBehaviour
         hasPreviewSurfacePose = false;
         previewSurfaceIsDepth = false;
         measuredDepth.Reset();
+        hasDepthSupportEvidence = false;
         hasUngroundedPreviewFrame = false;
         canPlace = false;
         if (menuHUD != null) menuHUD.ClearSelection();

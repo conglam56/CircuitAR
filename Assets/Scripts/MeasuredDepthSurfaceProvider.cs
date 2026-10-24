@@ -41,6 +41,8 @@ public sealed class MeasuredDepthSurfaceProvider
     public int LastSupportSampleCount => samples.Count;
     public int HandMaskedProbeCount { get; private set; }
     public float LastProbeRadiusPixels { get; private set; }
+    public bool IsConfirmingSurface { get; private set; }
+    public Pose ConfirmingSurfacePose { get; private set; }
     public int LastNativeQueryCount { get; private set; }
     public int LastNativeHitCount { get; private set; }
     public int LastNativeNoHitCount { get; private set; }
@@ -167,6 +169,7 @@ public sealed class MeasuredDepthSurfaceProvider
         // carrying it across a table edge until its timeout.
         finitePatch.Reset();
         samples.Clear();
+        IsConfirmingSurface = false;
         HandMaskedProbeCount = 0;
         ResetNativeDiagnostics();
 
@@ -202,6 +205,8 @@ public sealed class MeasuredDepthSurfaceProvider
 
         if (!stability.Observe(measuredPose, screenPoint, querySequence))
         {
+            IsConfirmingSurface = true;
+            ConfirmingSurfacePose = measuredPose;
             finitePatch.Reset();
             return false;
         }
@@ -260,6 +265,7 @@ public sealed class MeasuredDepthSurfaceProvider
         samples.Clear();
         HandMaskedProbeCount = 0;
         LastProbeRadiusPixels = 0f;
+        IsConfirmingSurface = false;
         ResetNativeDiagnostics();
         stability.Reset();
         finitePatch.Reset();

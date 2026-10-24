@@ -805,6 +805,10 @@ internal static class ARPlacementRegressionChecks
                 }
                 Require(DragHit(Vector3.zero), "A drag must still move on the original measured tabletop.");
                 Require(!DragHit(Vector3.right * 0.5f), "A drag outside the table polygon must not hit the lower floor instead.");
+                var levelTransition = (ARSupportPolicy.LevelTransition)Get(controller, "dragLevelTransition");
+                Set(levelTransition, "startedAt", Time.unscaledTime - ARSupportPolicy.LevelTransition.HoldDuration - 0.01f);
+                Require(DragHit(Vector3.right * 0.5f), "A stable deliberate hold over the measured lower floor must allow changing support levels.");
+                levelTransition.Begin(controller.surfaceContactOffset);
                 SetPlaneTracking(table, tableId, TrackingState.Limited, PlaneAlignment.HorizontalUp);
                 Require(!DragHit(Vector3.zero), "Losing tabletop tracking must freeze the drag, not jump to the tracked floor.");
             }
@@ -813,7 +817,7 @@ internal static class ARPlacementRegressionChecks
                 controller.arPlaneManager = originalManager;
                 camera.transform.SetPositionAndRotation(oldCameraPosition, oldCameraRotation);
             }
-            results.Add("PASS: actual drag rays accept tabletop interior and reject table edges/lost tracking with a floor behind");
+            results.Add("PASS: drag rays reject accidental floor jumps but allow a stable deliberate hold over the lower measured floor");
 
             controller.StartPreview("Test");
             Set(controller, "placementRequestHasSurface", true);
@@ -888,6 +892,7 @@ internal static class ARPlacementRegressionChecks
             ARDragUsabilityRegressionChecks.Run(results);
             ARContactRegressionChecks.Run(results);
             ARSurfaceGuidanceRegressionChecks.Run(results);
+            ARSupportAndStabilityRegressionChecks.Run(results);
 
             string report = string.Join(Environment.NewLine, results);
             WriteReport("ar-placement-checks.txt", "ARPlacementRegressionChecks.txt", report);

@@ -4,7 +4,7 @@ using TMPro;
 
 /// <summary>
 /// ARScanFloatingHUD - HUD chỉ dẫn quét mặt phẳng AR dạng Floating Pill (Chuẩn Dynamic Island / Cyber Glassmorphism):
-/// 1. Nằm ở đỉnh màn hình tại cao độ an toàn (Y = -170px), hoàn toàn KHÔNG đè lên nút Quay Lại (Y = -65px).
+/// 1. Giữ cố định dưới hàng điều hướng; hàng nút xoay / xóa được đặt bên dưới thanh.
 /// 2. 100% Procedural Vector Icons: Dùng Image Texture2D thay vì ký tự emoji, triệt tiêu 100% lỗi ô vuông (tofu glyph).
 /// 3. Icon trạng thái động: Biểu tượng điện thoại quét đung đưa tự nhiên khi tìm mặt bàn, checkmark phát sáng khi bắt được.
 /// 4. TextMeshPro sắc nét: Tiêu đề rõ ràng kèm chú thích hướng dẫn người dùng tinh tế.
@@ -16,6 +16,8 @@ public class ARScanFloatingHUD : MonoBehaviour
     private Canvas hudCanvas;
     private CanvasGroup canvasGroup;
     private RectTransform cardRT;
+    private readonly Vector3[] cardCorners = new Vector3[4];
+    private const float DefaultTopOffset = -170f;
     private Image cardBg;
     private Outline cardOutline;
 
@@ -96,8 +98,7 @@ public class ARScanFloatingHUD : MonoBehaviour
         canvasGroup.interactable = false;
         canvasGroup.blocksRaycasts = false;
 
-        // 2. Thẻ Card Floating Pill ở đỉnh màn hình:
-        // Đặt tại Y = -170px (dưới nút Quay Lại ở Y = -65px -> -145px) để KHÔNG BAO GIỜ bị đè!
+        // 2. Thẻ chỉ dẫn cố định dưới hàng điều hướng.
         GameObject cardObj = new GameObject("Floating_Pill", typeof(RectTransform), typeof(Image));
         cardObj.transform.SetParent(transform, false);
         cardRT = cardObj.GetComponent<RectTransform>();
@@ -105,7 +106,7 @@ public class ARScanFloatingHUD : MonoBehaviour
         cardRT.anchorMax = new Vector2(0.5f, 1f);
         cardRT.pivot = new Vector2(0.5f, 1f);
         cardRT.sizeDelta = new Vector2(560, 76);
-        cardRT.anchoredPosition = new Vector2(0, -170f);
+        cardRT.anchoredPosition = new Vector2(0, DefaultTopOffset);
 
         cardBg = cardObj.GetComponent<Image>();
         cardBg.sprite = roundedPillSprite;
@@ -359,6 +360,18 @@ public class ARScanFloatingHUD : MonoBehaviour
         }
 
         if (!gameObject.activeSelf) gameObject.SetActive(true);
+    }
+
+    public bool TryGetBottomScreenY(out float bottom)
+    {
+        bottom = float.PositiveInfinity;
+        if (cardRT == null || hudCanvas == null || !hudCanvas.isActiveAndEnabled || cardRT.rect.height <= 0f)
+            return false;
+        Camera hudCamera = hudCanvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : hudCanvas.worldCamera;
+        cardRT.GetWorldCorners(cardCorners);
+        foreach (Vector3 corner in cardCorners)
+            bottom = Mathf.Min(bottom, RectTransformUtility.WorldToScreenPoint(hudCamera, corner).y);
+        return true;
     }
 
     public void Hide()
