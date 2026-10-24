@@ -549,11 +549,11 @@ public class ARFloatingBubbleMenu : MonoBehaviour
 
     public void OnClickScan()
     {
-        Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Yêu cầu QUÉT LẠI MẶT PHẲNG -> Mở hộp thoại xác nhận an toàn...");
+        Debug.Log("<color=yellow>[ARFloatingBubbleMenu]</color> Yêu cầu QUÉT LẠI BỀ MẶT -> Mở hộp thoại xác nhận an toàn...");
 
         ShowConfirmationDialog(
-            title: "QUÉT MẶT PHẲNG",
-            message: "Thao tác này sẽ xóa toàn bộ mạch điện và hiệu chuẩn lại mặt bàn AR.\nBạn có chắc chắn muốn quét lại không?",
+            title: "QUÉT LẠI BỀ MẶT",
+            message: "Thao tác này sẽ xóa toàn bộ mạch điện và cho AR nhận diện lại sàn/bàn thật.\nBạn có chắc chắn muốn quét lại không?",
             actionButtonText: "QUÉT LẠI",
             actionColor: new Color(0.08f, 0.55f, 0.85f, 0.98f),
             glowColor: new Color(0f, 0.85f, 1f, 0.95f),
@@ -1109,6 +1109,16 @@ public class ARFloatingBubbleMenu : MonoBehaviour
             {
                 Destroy(obj);
                 count++;
+            }
+        }
+
+        // ARAnchor được tạo riêng cho từng linh kiện. Xóa cả anchor rỗng khi reset
+        // để phiên AR không tích lũy trackable không còn sử dụng.
+        foreach (var obj in allObjects)
+        {
+            if (obj != null && obj.name.StartsWith("SurfaceAnchor_"))
+            {
+                Destroy(obj);
             }
         }
 

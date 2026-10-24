@@ -532,6 +532,16 @@ MonoBehaviour:
   pressColor: {r: 0, g: 1, b: 0, a: 1}
   indexNormalColor: {r: 1, g: 0.88, b: 0.1, a: 0.95}
   thumbNormalColor: {r: 0.15, g: 0.85, b: 1, a: 0.95}
+  cursorDiameter: 34
+  cursorFollowSpeed: 60
+  pinchPressedScale: 0.8
+  pinchCompressDuration: 0.08
+  pinchReleaseDuration: 0.1
+  pinchHaloDuration: 0.18
+  pinchHaloEndScale: 2.35
+  pinchHaloOpacity: 0.62
+  cursorColor: {r: 1, g: 1, b: 1, a: 1}
+  cursorOutlineColor: {r: 0.08, g: 0.09, b: 0.11, a: 0.92}
   pinchThreshold: 0.042
   pinchExitThreshold: 0.052
   minStablePinchFrames: 2
@@ -1747,14 +1757,14 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1108259499}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
-  m_RaycastTarget: 1
+  m_RaycastTarget: 0
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
   m_OnCullStateChanged:
@@ -1793,6 +1803,7 @@ GameObject:
   - component: {fileID: 1222358475}
   - component: {fileID: 1222358474}
   - component: {fileID: 1222358479}
+  - component: {fileID: 1222358480}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -1993,7 +2004,7 @@ Camera:
     y: 0
     width: 1
     height: 1
-  near clip plane: 0.1
+  near clip plane: 0.03
   far clip plane: 20
   field of view: 60
   orthographic: 0
@@ -2057,6 +2068,23 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
+--- !u!114 &1222358480
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1222358472}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b15f82cc229284894964d2d30806969d, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Unity.XR.ARFoundation::UnityEngine.XR.ARFoundation.AROcclusionManager
+  m_HumanSegmentationStencilMode: 0
+  m_HumanSegmentationDepthMode: 0
+  m_EnvironmentDepthMode: 0
+  m_EnvironmentDepthTemporalSmoothing: 1
+  m_OcclusionPreferenceMode: 0
 --- !u!224 &1229135957 stripped
 RectTransform:
   m_CorrespondingSourceObject: {fileID: 3259285889726014650, guid: 5713b959e3c77a58fb258133fc8e4aef, type: 3}
@@ -2095,6 +2123,9 @@ MonoBehaviour:
   menuHUD: {fileID: 372488932}
   planeLock: {fileID: 0}
   wireConnectionController: {fileID: 0}
+  arRaycastManager: {fileID: 1315578853}
+  arPlaneManager: {fileID: 1315578854}
+  arAnchorManager: {fileID: 1315578860}
   componentPrefabs:
   - {fileID: 7794568006292757454, guid: 9c16deacc8f5f8145b4564b239f3889a, type: 3}
   - {fileID: 5722648397485223672, guid: 37e1a6c12f070ca4a99316aaf66fc9d2, type: 3}
@@ -2111,6 +2142,10 @@ MonoBehaviour:
   - Von Ke
   previewAlpha: 0.5
   scaleMultiplier: 0.03
+  surfaceContactOffset: 0
+  surfaceLossGracePeriod: 0.3
+  cursorSmoothingSpeed: 90
+  previewFollowSpeed: 80
   placedObjectsHistory: []
 --- !u!4 &1289296881
 Transform:
@@ -2235,6 +2270,8 @@ MonoBehaviour:
   defaultBoardWidth: 1.2
   defaultBoardDepth: 0.8
   defaultBoardThickness: 0.01
+  useDirectRealSurfacePlacement: 1
+  showPlacementSurface: 0
   alignBoardToUserOnPlacement: 1
   lockBoardOrientationToUser: 1
   spatialCalibrationUI: {fileID: 1817308243}
@@ -2254,7 +2291,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 071571a529e95e8469c24004a9866e4f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SinglePlaneLockController
-  planeManager: {fileID: 0}
+  planeManager: {fileID: 1315578854}
+  showDetectedPlaneVisuals: 0
 --- !u!114 &1315578860
 MonoBehaviour:
   m_ObjectHideFlags: 0

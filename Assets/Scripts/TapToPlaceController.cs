@@ -1,6 +1,8 @@
 using UnityEngine;
 using System.Collections.Generic;
 using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
+using Unity.Collections;
 
 public class TapToPlaceController : MonoBehaviour
 {
@@ -9,6 +11,9 @@ public class TapToPlaceController : MonoBehaviour
     public MenuHUDController menuHUD;
     public SinglePlaneLockController planeLock;
     public WireConnectionController wireConnectionController;
+    public ARRaycastManager arRaycastManager;
+    public ARPlaneManager arPlaneManager;
+    public ARAnchorManager arAnchorManager;
 
     [Header("Prefab linh kiện (Khớp tên với Menu HUD)")]
     public GameObject[] componentPrefabs;
@@ -17,6 +22,22 @@ public class TapToPlaceController : MonoBehaviour
     [Header("Cấu hình Preview & Di chuyển")]
     [Range(0.1f, 1f)] public float previewAlpha = 0.6f;
     public float scaleMultiplier = 0.035f;
+    [Tooltip("Độ lệch đáy hình học khỏi mặt thật (mét). Để 0 để đáy chạm đúng mặt đo được.")]
+    [Range(-0.03f, 0.02f)] public float surfaceContactOffset = 0f;
+    [Tooltip("Thời gian chờ trước khi báo vị trí kéo không hợp lệ khi AR raycast hụt tạm thời.")]
+    [Range(0.05f, 0.75f)] public float surfaceLossGracePeriod = 0.3f;
+    [Tooltip("Tốc độ làm mượt con trỏ tay trước khi raycast lên mặt thật.")]
+    [Range(5f, 120f)] public float cursorSmoothingSpeed = 90f;
+    [Tooltip("Tốc độ preview bám theo vị trí raycast; trục Y vẫn luôn áp sát mặt thật.")]
+    [Range(5f, 120f)] public float previewFollowSpeed = 80f;
+    [Tooltip("Khoảng cách dự phòng khi prefab không có bounds. Preview có bounds tự căn theo khung hình, không đổi tỉ lệ linh kiện.")]
+    [Range(0.3f, 1.5f)] public float ungroundedPreviewDistance = 0.9f;
+    [Tooltip("Tỉ lệ khung hình dành cho preview tạm trước khi tìm được sàn/bàn thật.")]
+    [Range(0.15f, 0.75f)] public float ungroundedPreviewScreenFraction = 0.65f;
+    [Tooltip("Thời gian preview chuyển sang điểm trên mặt thật; không đổi scale linh kiện.")]
+    [Range(0.1f, 0.5f)] public float previewSurfaceTransitionDuration = 0.25f;
+    [Tooltip("Chỉ hút vào mép polygon đã đo trong khoảng rất nhỏ, không kéo dài mặt bàn ra vô hạn (mét).")]
+    [Range(0f, 0.04f)] public float surfaceEdgeSnapDistance = 0.025f;
 
     [Header("--- LỊCH SỬ LINH KIỆN (HỖ TRỢ UNDO / THU HỒI) ---")]
     public List<GameObject> placedObjectsHistory = new List<GameObject>();
@@ -42,11 +63,69 @@ public class TapToPlaceController : MonoBehaviour
     private Vector3 lastValidDragPos = Vector3.zero;
     private Quaternion lastValidDragRot = Quaternion.identity;
     private Vector3 dragStartPos = Vector3.zero;
+    private Vector2 dragPointerOffset;
+    private float dragHandLostAt = float.NegativeInfinity;
+    private bool dragNeedsOpenHandAfterPlacement;
     private Quaternion dragStartRot = Quaternion.identity;
     private Vector3 currentSmoothedDragPos = Vector3.zero;
     private bool isDragBlocked = false;
     private Camera mainCamera;
-    private TwoPointSpatialCalibrator boardCalibrator;
+    private static readonly List<ARRaycastHit> surfaceHits = new List<ARRaycastHit>();
+    private float lastDragSurfaceHitTime = float.NegativeInfinity;
+    private TrackableId lastPreviewTrackableId = TrackableId.invalidId;
+    private Vector2 smoothedPlacementScreenPosition;
+    private bool hasSmoothedPlacementScreenPosition = false;
+    private bool hasPreviewSurfacePose = false;
+    private float previewBoundsRadius;
+    private Vector3 previewBoundsLocalCenter;
+    private bool hasUngroundedPreviewFrame;
+    private Matrix4x4 ungroundedPreviewProjection;
+    private ARSessionState ungroundedPreviewSessionState;
+    private Pose lastKnownPlacementPose = Pose.identity;
+    private TrackableId lastKnownSurfaceTrackableId = TrackableId.invalidId;
+    private bool hasLastKnownPlacementPose = false;
+    private bool placementPending;
+    private int placementGeneration;
+    private bool worldPinchArmed;
+    private float placementRequestExpiresAt = float.NegativeInfinity;
+    private Vector2 placementRequestScreenPosition;
+    private bool placementRequestAwaitingSurface;
+    private bool placementRequestHasSurface;
+    private bool placementRequestIsDepth;
+    private Pose placementRequestDepthPose;
+    private TrackableId placementRequestPlaneId = TrackableId.invalidId;
+    private Vector3 placementRequestLocalPoint;
+    private bool placementRetryEligible;
+    private float nextPlacementAttemptAt;
+    private bool surfaceTransitionActive;
+    private float surfaceTransitionStartedAt;
+    private Pose surfaceTransitionStartPose;
+    private TrackableId surfaceTransitionTrackableId = TrackableId.invalidId;
+    private float nextPlacementDiagnosticAt;
+    private ButtonInteractor.PlacementFeedback lastPlacementFeedback;
+    private readonly MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
+    private bool previewSurfaceIsDepth;
+    private bool loggedMeasuredPreviewGeometry;
+    private GameObject placementStatusRoot;
+    private TMPro.TextMeshProUGUI placementStatusText;
+    private ARScanFloatingHUD surfaceGuidanceHUD;
+    private bool surfaceGuidanceEnabled;
+    private float nextSurfaceGuidanceAt;
+    private float guidanceSurfaceReadySince = float.NegativeInfinity;
+    private float placementConfirmedUntil;
+    private float nextAnchorDiagnosticAt;
+    private GameObject diagnosticObject;
+    private Vector3 diagnosticWorldPosition, diagnosticLocalPosition, diagnosticAnchorPosition, diagnosticCameraPosition;
+    private static readonly Vector2[] GuidanceProbeViewports =
+    {
+        new Vector2(0.5f, 0.45f), new Vector2(0.35f, 0.45f),
+        new Vector2(0.65f, 0.45f), new Vector2(0.5f, 0.3f)
+    };
+    private string selectedDisplayName;
+    private MaterialPropertyBlock previewPropertyBlock;
+    private bool? previewIsInvalid;
+    private TrackableId dragSurfaceTrackableId = TrackableId.invalidId;
+    private readonly Dictionary<GameObject, ARAnchor> objectAnchors = new Dictionary<GameObject, ARAnchor>();
 
     [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY ---")]
     public GameObject SelectedComponent { get; private set; }
@@ -268,6 +347,16 @@ public class TapToPlaceController : MonoBehaviour
 
     void OnDisable()
     {
+        EndSurfaceGuidance();
+        placementGeneration++;
+        placementPending = false;
+        ClearPlacementRequest();
+        placementRetryEligible = false;
+        nextPlacementAttemptAt = 0f;
+        surfaceTransitionActive = false;
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.None);
+        worldPinchArmed = false;
+        if (placementStatusRoot != null) placementStatusRoot.SetActive(false);
         if (CircuitSimulationManager.Instance != null)
         {
             CircuitSimulationManager.Instance.OnSimulationModeChanged -= HandleSimulationModeChanged;
@@ -296,17 +385,21 @@ public class TapToPlaceController : MonoBehaviour
     {
         mainCamera = Camera.main;
 #if UNITY_2023_1_OR_NEWER
-        boardCalibrator = FindFirstObjectByType<TwoPointSpatialCalibrator>();
         if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
         if (menuHUD == null) menuHUD = FindFirstObjectByType<MenuHUDController>();
         if (planeLock == null) planeLock = FindFirstObjectByType<SinglePlaneLockController>();
         if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
+        if (arRaycastManager == null) arRaycastManager = FindFirstObjectByType<ARRaycastManager>();
+        if (arPlaneManager == null) arPlaneManager = FindFirstObjectByType<ARPlaneManager>();
+        if (arAnchorManager == null) arAnchorManager = FindFirstObjectByType<ARAnchorManager>();
 #else
-        boardCalibrator = FindObjectOfType<TwoPointSpatialCalibrator>();
         if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
         if (menuHUD == null) menuHUD = FindObjectOfType<MenuHUDController>();
         if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
         if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
+        if (arRaycastManager == null) arRaycastManager = FindObjectOfType<ARRaycastManager>();
+        if (arPlaneManager == null) arPlaneManager = FindObjectOfType<ARPlaneManager>();
+        if (arAnchorManager == null) arAnchorManager = FindObjectOfType<ARAnchorManager>();
 #endif
         if (CircuitSimulationManager.Instance != null)
         {
@@ -317,44 +410,21 @@ public class TapToPlaceController : MonoBehaviour
 
     void Update()
     {
+        RefreshSurfaceGuidance();
         // Nếu đang bật Chế độ Mô phỏng, khóa hoàn toàn các thao tác chọn, nhấc và di chuyển linh kiện
         if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
         {
             return; // Dừng toàn bộ xử lý cử chỉ chọn/kéo phía dưới
         }
 
-        if (boardCalibrator != null && !boardCalibrator.IsBoardTracking)
-        {
-            if (previewAnchor != null) previewAnchor.SetActive(false);
-            canPlace = false;
-            // Đã loại bỏ hoàn toàn các dòng tàn dư gây lỗi CS0103 & CS1061 ở đây:
-            if (isDragging)
-            {
-                isDragging = false;
-                draggedObject = null;
-                unpinchGraceTimer = 0f;
-                isDragBlocked = false;
-            }
-            return;
-        }
-
-#if UNITY_2023_1_OR_NEWER
-        if (planeLock == null) planeLock = FindFirstObjectByType<SinglePlaneLockController>();
-#else
-        if (planeLock == null) planeLock = FindObjectOfType<SinglePlaneLockController>();
-#endif
-        if (planeLock == null || !planeLock.HasLockedPlane)
-        {
-            if (previewAnchor != null) Destroy(previewAnchor);
-            return;
-        }
-
 #if UNITY_2023_1_OR_NEWER
         if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
+        if (arRaycastManager == null) arRaycastManager = FindFirstObjectByType<ARRaycastManager>();
 #else
         if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
+        if (arRaycastManager == null) arRaycastManager = FindObjectOfType<ARRaycastManager>();
 #endif
-        if (buttonInteractor == null) return;
+        if (buttonInteractor == null || arRaycastManager == null) return;
 
 #if UNITY_2023_1_OR_NEWER
         if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
@@ -368,7 +438,15 @@ public class TapToPlaceController : MonoBehaviour
             if (mainCamera == null) return;
         }
 
+        // Request measured geometry separately from visual occlusion. The latter
+        // must stay disabled: enabling it previously cut the components in half.
+        measuredDepth.Configure(mainCamera, arRaycastManager, buttonInteractor);
+
         if (cooldownTimer > 0) cooldownTimer -= Time.deltaTime;
+        if (buttonInteractor.IsHandVisible && !buttonInteractor.isPinching && !buttonInteractor.IsPointerOverUI)
+            worldPinchArmed = true;
+        if (!buttonInteractor.IsHandVisible || buttonInteractor.PinchConsumedByUI)
+            worldPinchArmed = false;
 
         // 1. CHẾ ĐỘ ĐẶT VẬT MỚI
         bool hasSelection = (menuHUD != null && menuHUD.HasSelection);
@@ -401,79 +479,325 @@ public class TapToPlaceController : MonoBehaviour
     private void UpdatePreviewAndPlacement()
     {
         if (currentPrefabToPlace == null || previewAnchor == null) return;
-
-        Vector2 screenPos = GetCursorScreenPosition();
-        Ray ray = mainCamera.ScreenPointToRay(screenPos);
-
-        // Dùng RaycastAll để tia nhìn xuyên qua preview và không bao giờ tự chặn chính nó
-        RaycastHit[] hits = Physics.RaycastAll(ray, 20f);
-        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
-
-        bool foundBoard = false;
-        RaycastHit boardHit = default;
-
-        foreach (var h in hits)
+        if (placementPending)
         {
-            if (previewAnchor != null && h.transform.IsChildOf(previewAnchor.transform)) continue;
-
-            if (h.collider.CompareTag("CircuitBoard") || h.collider.name.Contains("Board"))
+            if (ShouldCancelPendingPlacement())
             {
-                boardHit = h;
-                foundBoard = true;
-                break;
+                CancelPendingPlacementAttempt();
+                return;
             }
+            ObservePendingPlacementGesture();
+            SetPlacementFeedback(ButtonInteractor.PlacementFeedback.Anchoring);
+            if (buttonInteractor.JustPinched) SetPlacementStatus("Pinch: đang chờ neo AR của lần đặt trước.");
+            return;
         }
-
-        if (foundBoard)
+        bool hasWorldPointer = HasWorldPlacementPointer();
+        Vector2 placementScreenPosition = hasWorldPointer
+            ? GetStablePlacementScreenPosition()
+            : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+        UpdatePlacementRequest(hasWorldPointer, placementScreenPosition);
+        if (!hasWorldPointer && !placementRequestHasSurface &&
+            buttonInteractor.IsGestureTemporarilyOccluded)
         {
-            // Cố định vị trí và xoay áp sát mặt bảng mạch TRƯỚC KHI kiểm tra va chạm
-            previewAnchor.transform.position = boardHit.point;
-            previewAnchor.transform.rotation = boardHit.collider.transform.rotation;
-
-            // Kiểm tra chống chồng lấn linh kiện (Anti-Overlap Requirement 2)
-            bool isOverlapping = CheckOverlap(boardHit.point, null, out GameObject overlapObj);
-
-            if (!previewAnchor.activeSelf) previewAnchor.SetActive(true);
-
-            if (isOverlapping)
-            {
-                // Cảnh báo thị giác trực quan: Đổi màu bóng Preview sang ĐỎ CẢNH BÁO
-                SetPreviewColor(previewVisual, new Color(1f, 0.22f, 0.22f, 0.75f));
-                canPlace = false;
-            }
-            else
-            {
-                // Vị trí hợp lệ: Khôi phục màu sắc gốc từ prefab và điều chỉnh độ trong suốt (Requirement 5)
-                RestoreOriginalMaterials(previewVisual, currentPrefabToPlace);
-                SetPreviewTransparent(previewVisual, previewAlpha);
-                if (!buttonInteractor.isPinching && cooldownTimer <= 0)
-                {
-                    canPlace = true;
-                }
-            }
-
-            if (canPlace && !isOverlapping && buttonInteractor.isPinching && cooldownTimer <= 0)
-            {
-                PlaceObject(boardHit.point, boardHit.collider.transform.rotation, boardHit.collider.transform);
-                canPlace = false;
-                cooldownTimer = 0.8f;
-            }
+            // Preserve intent through a short missing-hand sample, but never
+            // capture a real surface using the stale pointer during that gap.
+            canPlace = false;
+            SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+            return;
+        }
+        if (ARSession.state != ARSessionState.SessionTracking)
+        {
+            canPlace = false;
+            if (!placementRequestAwaitingSurface) ClearPlacementRequest();
+            surfaceTransitionActive = false;
+            SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+            if (buttonInteractor.JustPinched)
+                SetPlacementStatus("Pinch: AR chưa tracking (" + ARSession.state + ").");
+            if (!hasPreviewSurfacePose) ShowUngroundedPreview();
             return;
         }
 
-        // Khi con trỏ chưa trúng mặt bàn: hiển thị linh kiện lơ lửng trước camera theo hướng nhìn/con trỏ
-        Vector3 floatingPos = ray.GetPoint(0.55f);
-        previewAnchor.transform.position = floatingPos;
-        previewAnchor.transform.rotation = Quaternion.LookRotation(mainCamera.transform.forward, Vector3.up);
-        RestoreOriginalMaterials(previewVisual, currentPrefabToPlace);
-        SetPreviewTransparent(previewVisual, previewAlpha);
-        if (!previewAnchor.activeSelf) previewAnchor.SetActive(true);
+        // Chụp điểm thật ngay khi tia pinch có hit, không đợi anchor subsystem.
+        // Từ đây tay/camera dịch chuyển không được đổi điểm đang xác nhận.
+        if (!placementRequestHasSurface && Time.unscaledTime <= placementRequestExpiresAt)
+        {
+            if (TryGetMeasuredPlacementSurface(placementRequestScreenPosition, lastPreviewTrackableId,
+                out Pose requestPose, out TrackableId requestPlaneId, out bool requestIsDepth))
+                TryCaptureMeasuredPlacementRequest(requestPose, requestPlaneId, requestIsDepth);
+            else if (IsWorldPinchHeld()) placementRequestAwaitingSurface = true;
+        }
+
+        Pose surfacePose = default;
+        TrackableId hitTrackableId = TrackableId.invalidId;
+        bool surfaceIsDepth = placementRequestHasSurface && placementRequestIsDepth;
+        bool hasSurface = placementRequestHasSurface &&
+            TryResolvePlacementRequestSurface(out surfacePose, out hitTrackableId);
+        if (placementRequestHasSurface && !hasSurface)
+        {
+            ClearPlacementRequest();
+            surfaceTransitionActive = false;
+        }
+        if (!hasSurface && hasWorldPointer)
+            hasSurface = TryGetMeasuredPlacementSurface(placementScreenPosition, lastPreviewTrackableId,
+                out surfacePose, out hitTrackableId, out surfaceIsDepth);
+
+        if (hasSurface)
+        {
+            Vector3 contactPosition = GetContactPosition(surfacePose);
+            Quaternion rotation = previewAnchor.activeSelf ? previewAnchor.transform.rotation : GetPlacementRotation();
+            UpdatePreviewSurfacePose(contactPosition, rotation, hitTrackableId);
+            previewSurfaceIsDepth = surfaceIsDepth;
+            if (!loggedMeasuredPreviewGeometry)
+            {
+                LogPreviewGeometry("measured-" + (surfaceIsDepth ? "depth" : "plane"));
+                loggedMeasuredPreviewGeometry = true;
+            }
+            lastKnownPlacementPose = new Pose(contactPosition, rotation);
+            lastKnownSurfaceTrackableId = hitTrackableId;
+            hasLastKnownPlacementPose = true;
+
+            // Đỏ chỉ có nghĩa va chạm linh kiện, không phải raycast hụt mép bàn.
+            bool overlapping = CheckOverlap(contactPosition, null, out _);
+            UpdatePreviewVisual(overlapping);
+            canPlace = !overlapping && !surfaceTransitionActive && cooldownTimer <= 0f &&
+                CanCreateMeasuredSurfaceAnchor(hitTrackableId, surfaceIsDepth);
+            SetPlacementFeedback(overlapping ? ButtonInteractor.PlacementFeedback.Blocked :
+                (canPlace ? ButtonInteractor.PlacementFeedback.Ready : ButtonInteractor.PlacementFeedback.Anchoring));
+            if (!overlapping) TryCommitPlacementRequest();
+            return;
+        }
+
         canPlace = false;
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+        if (!hasPreviewSurfacePose) ShowUngroundedPreview();
+        else UpdatePreviewVisual(false);
     }
 
-    private void PlaceObject(Vector3 position, Quaternion rotation, Transform boardParent)
+    private bool HasWorldPlacementPointer()
+    {
+        return buttonInteractor != null && buttonInteractor.IsHandVisible && !buttonInteractor.PinchConsumedByUI &&
+            (!buttonInteractor.IsPointerOverUI || buttonInteractor.isPinching);
+    }
+
+    private void ClearPlacementRequest()
+    {
+        placementRequestExpiresAt = float.NegativeInfinity;
+        placementRequestAwaitingSurface = false;
+        placementRequestHasSurface = false;
+        placementRequestIsDepth = false;
+        placementRequestDepthPose = Pose.identity;
+        placementRequestPlaneId = TrackableId.invalidId;
+        placementRequestLocalPoint = Vector3.zero;
+    }
+
+    private void UpdatePlacementRequest(bool hasWorldPointer, Vector2 screenPosition)
+    {
+        if (placementRequestHasSurface)
+        {
+            // Pinch đã trúng điểm thật là một lệnh đã nhận: nhả/mất tay ngắn
+            // không được nuốt lệnh trong chuyển tiếp. Một cử chỉ UI mới vẫn hủy.
+            if (buttonInteractor.JustPinched && buttonInteractor.PinchConsumedByUI)
+                ClearPlacementRequest();
+            else if (Time.unscaledTime > placementRequestExpiresAt) ClearPlacementRequest();
+            else if (hasWorldPointer && buttonInteractor.isPinching)
+                placementRequestExpiresAt = Time.unscaledTime + previewSurfaceTransitionDuration + 0.7f;
+            return;
+        }
+        if (!hasWorldPointer && buttonInteractor.IsGestureTemporarilyOccluded &&
+            !buttonInteractor.PinchConsumedByUI && Time.unscaledTime <= placementRequestExpiresAt)
+            return;
+        if (!hasWorldPointer)
+        {
+            ClearPlacementRequest();
+            if (buttonInteractor.JustPinched)
+                SetPlacementStatus("Pinch: cử chỉ đang thuộc UI hoặc không còn dữ liệu tay hợp lệ.");
+            return;
+        }
+
+        if (buttonInteractor.JustPinched)
+        {
+            // JustPinched đã là cạnh một lần; không bắt thêm khóa worldPinchArmed.
+            ClearPlacementRequest();
+            placementRequestScreenPosition = screenPosition;
+            placementRequestExpiresAt = Time.unscaledTime + Mathf.Max(0f, cooldownTimer) + 0.35f;
+            placementRequestAwaitingSurface = !hasPreviewSurfacePose ||
+                ARSession.state != ARSessionState.SessionTracking;
+            worldPinchArmed = false;
+        }
+
+        if (!placementRequestAwaitingSurface) return;
+        if (!buttonInteractor.isPinching)
+        {
+            // Không tự đặt muộn khi người dùng đã nhả pinch từ lúc chưa có mặt thật.
+            ClearPlacementRequest();
+            return;
+        }
+
+        // Khi chưa có mặt thật, giữ ý định trong chính cử chỉ đang giữ và dữ liệu
+        // tay còn mới. Chỉ chụp cố định tia sau khi đã có một điểm đặt thật.
+        placementRequestScreenPosition = screenPosition;
+        placementRequestExpiresAt = Time.unscaledTime + Mathf.Max(0f, cooldownTimer) + 0.35f;
+    }
+
+    private bool TryCapturePlacementRequestSurface(Pose surfacePose, TrackableId planeId)
+    {
+        if (placementRequestHasSurface || Time.unscaledTime > placementRequestExpiresAt ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(planeId) : null;
+        if (!IsUsableSurfacePlane(plane)) return false;
+        Vector3 local = plane.transform.InverseTransformPoint(surfacePose.position);
+        if (Mathf.Abs(local.y) > 0.03f || !IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary)) return false;
+        placementRequestLocalPoint = new Vector3(local.x, 0f, local.z);
+        placementRequestPlaneId = planeId;
+        placementRequestHasSurface = true;
+        placementRequestIsDepth = false;
+        placementRequestAwaitingSurface = false;
+        placementRequestExpiresAt = Time.unscaledTime + Mathf.Max(0f, cooldownTimer) + previewSurfaceTransitionDuration + 0.7f;
+        return true;
+    }
+
+    private bool TryCaptureMeasuredPlacementRequest(Pose surfacePose, TrackableId planeId, bool isDepth)
+    {
+        if (!isDepth) return TryCapturePlacementRequestSurface(surfacePose, planeId);
+        if (placementRequestHasSurface || Time.unscaledTime > placementRequestExpiresAt ||
+            ARSession.state != ARSessionState.SessionTracking || !measuredDepth.IsReady ||
+            planeId != TrackableId.invalidId) return false;
+
+        // This pose has passed the finite measured-depth patch and temporal tests.
+        // Freeze it in world space; never re-project the moving finger/camera while
+        // the native anchor request is in flight.
+        placementRequestDepthPose = surfacePose;
+        placementRequestPlaneId = TrackableId.invalidId;
+        placementRequestHasSurface = true;
+        placementRequestIsDepth = true;
+        placementRequestAwaitingSurface = false;
+        placementRequestExpiresAt = Time.unscaledTime + Mathf.Max(0f, cooldownTimer) +
+            previewSurfaceTransitionDuration + 0.7f;
+        return true;
+    }
+
+    private bool TryResolvePlacementRequestSurface(out Pose pose, out TrackableId planeId)
+    {
+        pose = default;
+        planeId = TrackableId.invalidId;
+        if (!placementRequestHasSurface || ARSession.state != ARSessionState.SessionTracking) return false;
+        if (placementRequestIsDepth)
+        {
+            if (!measuredDepth.IsReady) return false;
+            pose = placementRequestDepthPose;
+            return true;
+        }
+        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(placementRequestPlaneId) : null;
+        if (!IsUsableSurfacePlane(plane) || !IsPointInSurfaceBoundary(
+            new Vector2(placementRequestLocalPoint.x, placementRequestLocalPoint.z), plane.boundary)) return false;
+        pose = new Pose(plane.transform.TransformPoint(placementRequestLocalPoint), plane.transform.rotation);
+        planeId = plane.trackableId;
+        return true;
+    }
+
+    private bool TryCommitPlacementRequest()
+    {
+        if (Time.unscaledTime > placementRequestExpiresAt || cooldownTimer > 0f || surfaceTransitionActive ||
+            Time.unscaledTime < nextPlacementAttemptAt) return false;
+        if (!TryResolvePlacementRequestSurface(out Pose surfacePose, out TrackableId planeId)) return false;
+
+        // SessionTracking/plane có thể sẵn sàng trước anchor subsystem trong vài
+        // frame đầu. Đừng nuốt lệnh pinch trong khoảng khởi động ngắn đó.
+        if (!CanCreateMeasuredSurfaceAnchor(planeId, placementRequestIsDepth))
+            return false;
+
+        Vector3 contactPosition = GetContactPosition(surfacePose);
+        Quaternion rotation = hasPreviewSurfacePose ? previewAnchor.transform.rotation : GetPlacementRotation();
+        placementRequestExpiresAt = float.NegativeInfinity;
+        // Kiểm tra đúng điểm sẽ xác nhận, không kiểm tra điểm preview còn đang lerp.
+        if (CheckOverlap(contactPosition, null, out _))
+        {
+            UpdatePreviewVisual(true);
+            canPlace = false;
+            ClearPlacementRequest();
+            SetPlacementStatus("Pinch: vị trí đặt chồng lên linh kiện khác.");
+            return false;
+        }
+
+        previewAnchor.transform.SetPositionAndRotation(contactPosition, rotation);
+        previewAnchor.SetActive(true);
+        hasPreviewSurfacePose = true;
+        lastPreviewTrackableId = planeId;
+        UpdatePreviewVisual(false);
+        TryPlaceObject(new Pose(contactPosition, rotation), planeId);
+        canPlace = false;
+        return placementPending || currentPrefabToPlace == null;
+    }
+
+    private void UpdatePreviewSurfacePose(Vector3 contactPosition, Quaternion rotation, TrackableId planeId)
+    {
+        bool firstSurface = !hasPreviewSurfacePose;
+        bool changedLevel = (planeId != lastPreviewTrackableId ||
+            (planeId == TrackableId.invalidId && previewSurfaceIsDepth)) &&
+            Mathf.Abs(contactPosition.y - previewAnchor.transform.position.y) > 0.08f;
+        if (previewAnchor.activeSelf && (firstSurface || changedLevel) &&
+            (!surfaceTransitionActive || surfaceTransitionTrackableId != planeId))
+        {
+            surfaceTransitionActive = true;
+            surfaceTransitionStartedAt = Time.unscaledTime;
+            surfaceTransitionStartPose = new Pose(previewAnchor.transform.position, previewAnchor.transform.rotation);
+            surfaceTransitionTrackableId = planeId;
+            canPlace = false;
+        }
+
+        if (surfaceTransitionActive)
+        {
+            float t = Mathf.Clamp01((Time.unscaledTime - surfaceTransitionStartedAt) /
+                Mathf.Max(0.01f, previewSurfaceTransitionDuration));
+            float smooth = Mathf.SmoothStep(0f, 1f, t);
+            previewAnchor.transform.SetPositionAndRotation(
+                Vector3.Lerp(surfaceTransitionStartPose.position, contactPosition, smooth),
+                Quaternion.Slerp(surfaceTransitionStartPose.rotation, rotation, smooth));
+            if (t >= 1f) surfaceTransitionActive = false;
+        }
+        else if (firstSurface || !previewAnchor.activeSelf)
+            previewAnchor.transform.SetPositionAndRotation(contactPosition, rotation);
+        else
+        {
+            Vector3 position = Vector3.Lerp(previewAnchor.transform.position, contactPosition,
+                1f - Mathf.Exp(-previewFollowSpeed * Time.unscaledDeltaTime));
+            position.y = contactPosition.y;
+            previewAnchor.transform.SetPositionAndRotation(position, rotation);
+        }
+        previewAnchor.SetActive(true);
+        hasPreviewSurfacePose = true;
+        lastPreviewTrackableId = planeId;
+    }
+
+    private void SetPlacementFeedback(ButtonInteractor.PlacementFeedback feedback)
+    {
+        if (buttonInteractor != null) buttonInteractor.SetPlacementFeedback(feedback);
+        if (feedback != ButtonInteractor.PlacementFeedback.None &&
+            Time.unscaledTime >= nextPlacementDiagnosticAt)
+        {
+            int trackedPlanes = 0;
+            if (arPlaneManager != null)
+                foreach (ARPlane plane in arPlaneManager.trackables)
+                    if (IsUsableSurfacePlane(plane)) trackedPlanes++;
+            Debug.Log($"[ARPlacement] {feedback}; session={ARSession.state}; trackingReason={ARSession.notTrackingReason}; horizontalPlanes={trackedPlanes}; " +
+                $"captured={placementRequestHasSurface}; transition={surfaceTransitionActive}; " +
+                $"source={(hasPreviewSurfacePose ? (previewSurfaceIsDepth ? "depth" : "plane") : "unmeasured")}; " +
+                $"depthReady={measuredDepth.IsReady}; depthSamples={measuredDepth.LastSupportSampleCount}; " +
+                $"handMasked={measuredDepth.HandMaskedProbeCount}; probeRadius={measuredDepth.LastProbeRadiusPixels:F0}; " +
+                $"depthHits={measuredDepth.LastNativeHitCount}/{measuredDepth.LastNativeQueryCount}; " +
+                $"rejectNormal={measuredDepth.LastRejectedNormalCount}; rejectRange={measuredDepth.LastRejectedRangeCount}; " +
+                $"rejectHeight={measuredDepth.LastRejectedHeightCount}");
+            nextPlacementDiagnosticAt = Time.unscaledTime + 2f;
+        }
+        lastPlacementFeedback = feedback;
+    }
+
+    private void PlaceObject(Vector3 position, Quaternion rotation, ARAnchor nativeAnchor)
     {
         if (!previewAnchor.activeSelf) return;
+        if (nativeAnchor == null || (mainCamera != null &&
+            nativeAnchor.transform.IsChildOf(mainCamera.transform)))
+            throw new System.InvalidOperationException("Placed content requires a native anchor outside the camera hierarchy.");
 
         // Bật lại toàn bộ collider cho vật thể khi đặt xuống
         Collider[] colliders = previewVisual.GetComponentsInChildren<Collider>();
@@ -487,15 +811,17 @@ public class TapToPlaceController : MonoBehaviour
         RestoreOriginalMaterials(previewVisual, currentPrefabToPlace);
         previewAnchor.name = "Placed_" + currentPrefabToPlace.name;
 
-        // 2. KHẮC PHỤC TRIỆT ĐỂ LỖI HÌNH BỊ MÉO:
-        Transform rootAnchor = boardParent.parent != null ? boardParent.parent : boardParent;
-        previewAnchor.transform.SetParent(rootAnchor, true);
-
-        // Ép Scale chuẩn xác tuyệt đối
+        // Chỉ chuyển sang vật đã đặt sau khi native anchor được tạo thành công.
+        // Từ đây không có code raycast/camera nào ghi lại pose của vật ngoài thao tác kéo.
+        previewAnchor.transform.SetParent(nativeAnchor.transform, true);
+        previewAnchor.transform.SetPositionAndRotation(position, rotation);
         previewAnchor.transform.localScale = Vector3.one;
         if (previewVisual != null)
         {
             previewVisual.transform.localScale = Vector3.one * scaleMultiplier;
+            // Tính lại sau khi gắn native anchor để sai số transform/pivot không
+            // làm đáy vật nhấc khỏi mặt thật ở frame xác nhận.
+            AlignVisualBaseToAnchor(previewAnchor, previewVisual);
         }
 
         bool hasBodyCollider = false;
@@ -527,72 +853,91 @@ public class TapToPlaceController : MonoBehaviour
         }
 
         // Lưu vào danh sách linh kiện và ghi nhận vào Lịch Sử Thao Tác (Requirement 1 & 2)
-        placedObjectsHistory.Add(previewAnchor);
-        History.RecordAction(new PlaceComponentAction(previewAnchor, this));
-        Debug.Log($"<color=green>[TapToPlace]</color> Đã đặt thành công: [{previewAnchor.name}]. Tổng số linh kiện: {placedObjectsHistory.Count}");
+        GameObject placedObject = previewAnchor;
+        nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
+        objectAnchors[placedObject] = nativeAnchor;
+        placedObjectsHistory.Add(placedObject);
+        placementConfirmedUntil = Time.unscaledTime + 2.5f;
+        // A closed placement gesture, including a hand re-detected still
+        // closed, must never silently become a new grab of the placed object.
+        dragNeedsOpenHandAfterPlacement = true;
+        History.RecordAction(new PlaceComponentAction(placedObject, this));
+        Debug.Log($"<color=green>[TapToPlace]</color> Đã đặt thành công: [{placedObject.name}]. Tổng số linh kiện: {placedObjectsHistory.Count}");
 
         previewAnchor = null;
         previewVisual = null;
         currentPrefabToPlace = null;
-        menuHUD.ClearSelection();
+        if (menuHUD != null) menuHUD.ClearSelection();
+        cooldownTimer = 0.5f;
+        placementRetryEligible = false;
+        ClearPlacementRequest();
+        surfaceTransitionActive = false;
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.None);
+        worldPinchArmed = false;
+        if (placementStatusRoot != null) placementStatusRoot.SetActive(false);
         OnPlacementFinished?.Invoke();
     }
 
     private void HandleDragAndDrop()
     {
-        // QUY TẮC RÀNG BUỘC REQUIREMENT 3:
-        // Trong Chế Độ Nối Dây (Wire Mode ON), KHÔNG được xử lý kéo di chuyển linh kiện!
-        if (wireConnectionController != null && wireConnectionController.IsWireMode)
+        if (dragNeedsOpenHandAfterPlacement)
+        {
+            if (buttonInteractor.IsHandVisible && !buttonInteractor.isPinching &&
+                !buttonInteractor.IsGestureTemporarilyOccluded)
+                dragNeedsOpenHandAfterPlacement = false;
+            return;
+        }
+        // Tracking/UI ownership ends a drag immediately. A brief hand occlusion
+        // below freezes the last measured world pose instead of dropping it.
+        if ((!isDragging && buttonInteractor.IsPointerOverUI) ||
+            buttonInteractor.PinchConsumedByUI || ARSession.state != ARSessionState.SessionTracking ||
+            (wireConnectionController != null && wireConnectionController.IsWireMode))
         {
             if (isDragging) ReleaseDraggedObject();
             return;
         }
-
-        Vector2 screenPos = GetCursorScreenPosition();
-        Ray ray = mainCamera.ScreenPointToRay(screenPos);
-
-        // 1. BẮT ĐẦU KÉO / CHỌN LINH KIỆN
-        if (buttonInteractor.JustPinched && !isDragging)
+        if (!buttonInteractor.IsHandVisible)
         {
-            RaycastHit[] allHits = Physics.RaycastAll(ray, 20f);
-            System.Array.Sort(allHits, (a, b) => a.distance.CompareTo(b.distance));
-
-            // Nếu người dùng pinch trúng trực tiếp vào cực (Terminal) đầu tiên -> nhường cho WireConnectionController
-            if (allHits.Length > 0 && allHits[0].collider.CompareTag("Terminal"))
+            if (isDragging)
             {
-                return;
+                if (float.IsNegativeInfinity(dragHandLostAt)) dragHandLostAt = Time.unscaledTime;
+                // No stale ray movement: freeze, but survive a brief occluded hand.
+                if (draggedObject != null)
+                    draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
+                if (Time.unscaledTime - dragHandLostAt >= 0.35f) ReleaseDraggedObject();
             }
-
+            return;
+        }
+        dragHandLostAt = float.NegativeInfinity;
+        Vector2 screenPos = GetCursorScreenPosition();
+        // 1. BẮT ĐẦU KÉO / CHỌN LINH KIỆN
+        if (buttonInteractor.JustPinched && cooldownTimer <= 0 && !isDragging)
+        {
+            worldPinchArmed = false;
             bool hitPlaced = false;
-            for (int i = 0; i < allHits.Length; i++)
+            if (TryFindDragTarget(screenPos, out GameObject target))
             {
-                if (allHits[i].collider.CompareTag("Terminal")) continue;
+                draggedObject = target;
+                isDragging = true;
+                dragStartPos = draggedObject.transform.position;
+                dragStartRot = draggedObject.transform.rotation;
+                Vector3 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
+                dragPointerOffset = new Vector2(baseScreen.x, baseScreen.y) - screenPos;
+                lastValidDragPos = dragStartPos;
+                lastValidDragRot = dragStartRot;
+                currentSmoothedDragPos = dragStartPos;
+                isDragBlocked = false;
+                unpinchGraceTimer = 0f;
+                lastDragSurfaceHitTime = Time.time;
+                dragSurfaceTrackableId = TrackableId.invalidId;
 
-                Transform rootObj = allHits[i].collider.transform;
-                while (rootObj != null)
-                {
-                    if (rootObj.name.StartsWith("Placed_"))
-                    {
-                        draggedObject = rootObj.gameObject;
-                        isDragging = true;
-                        dragStartPos = draggedObject.transform.position;
-                        dragStartRot = draggedObject.transform.rotation;
-                        lastValidDragPos = dragStartPos;
-                        lastValidDragRot = dragStartRot;
-                        currentSmoothedDragPos = dragStartPos;
-                        isDragBlocked = false;
-                        unpinchGraceTimer = 0f;
-
-                        SelectComponent(draggedObject);
-                        hitPlaced = true;
-                        break;
-                    }
-                    rootObj = rootObj.parent;
-                }
-                if (isDragging) break;
+                SelectComponent(draggedObject);
+                Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
+                hitPlaced = true;
             }
 
-            // Nếu pinch vào mặt bàn trống -> Bỏ chọn
+            // Nếu pinch vào vùng trống -> Bỏ chọn. AR raycast được dùng thay cho
+            // collider của tấm bảng ảo nên người dùng không cần xác định bảng trước.
             if (!hitPlaced)
             {
 #if UNITY_2023_1_OR_NEWER
@@ -605,13 +950,9 @@ public class TapToPlaceController : MonoBehaviour
                     return;
                 }
 
-                for (int i = 0; i < allHits.Length; i++)
+                if (TryGetRealHorizontalSurface(screenPos, out _))
                 {
-                    if (allHits[i].collider.CompareTag("CircuitBoard") || allHits[i].collider.name.Contains("Board"))
-                    {
-                        ClearSelectedComponent();
-                        break;
-                    }
+                    ClearSelectedComponent();
                 }
             }
         }
@@ -623,38 +964,34 @@ public class TapToPlaceController : MonoBehaviour
             {
                 unpinchGraceTimer = 0f;
 
-                RaycastHit[] hits = Physics.RaycastAll(ray, 20f);
-                System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
-
-                bool foundBoard = false;
-                RaycastHit boardHit = default;
-
-                foreach (var h in hits)
+                if (TryGetDragSurface(screenPos + dragPointerOffset, out Pose surfacePose, out TrackableId dragPlaneId))
                 {
-                    if (h.transform.IsChildOf(draggedObject.transform)) continue;
-                    if (h.collider.CompareTag("Terminal")) continue;
-
-                    if (h.collider.CompareTag("CircuitBoard") || h.collider.name.Contains("Board"))
-                    {
-                        boardHit = h;
-                        foundBoard = true;
-                        break;
-                    }
-                }
-
-                if (foundBoard)
-                {
-                    Vector3 targetPoint = boardHit.point;
+                    lastDragSurfaceHitTime = Time.time;
+                    Vector3 targetPoint = GetContactPosition(surfacePose);
                     if (Vector3.Distance(targetPoint, currentSmoothedDragPos) > 0.0015f)
                     {
-                        float followSpeed = 26f;
-                        currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.deltaTime));
+                        if (Mathf.Abs(targetPoint.y - currentSmoothedDragPos.y) > 0.04f)
+                        {
+                            // Chuyển giữa hai mặt có cao độ khác nhau (ví dụ bàn -> sàn)
+                            // phải snap cả điểm, nếu không quỹ đạo làm mượt sẽ đi xuyên
+                            // mép bàn hoặc bay giữa hai mặt.
+                            currentSmoothedDragPos = targetPoint;
+                        }
+                        else
+                        {
+                            float followSpeed = 70f;
+                            currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.deltaTime));
+                            // Trên cùng một mặt, chỉ cần làm mượt XZ; Y luôn áp sát mặt thật.
+                            currentSmoothedDragPos.y = targetPoint.y;
+                        }
                     }
 
                     float margin = isDragBlocked ? 0.008f : 0f;
                     bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, margin);
 
-                    Quaternion dragTargetRot = boardHit.collider.transform.rotation * (Quaternion.Inverse(boardHit.collider.transform.rotation) * dragStartRot);
+                    // Kéo trên mặt thật chỉ thay đổi vị trí; hướng xoay do người dùng
+                    // đã chọn được giữ nguyên, tránh vật xoay theo trục ngẫu nhiên của plane.
+                    Quaternion dragTargetRot = dragStartRot;
 
                     if (!isOverlapping)
                     {
@@ -663,6 +1000,7 @@ public class TapToPlaceController : MonoBehaviour
                         draggedObject.transform.rotation = dragTargetRot;
                         lastValidDragPos = currentSmoothedDragPos;
                         lastValidDragRot = dragTargetRot;
+                        dragSurfaceTrackableId = dragPlaneId;
 
                         if (SelectedComponent == draggedObject)
                         {
@@ -688,11 +1026,21 @@ public class TapToPlaceController : MonoBehaviour
                         wireConnectionController.UpdateActiveWirePositionsExternal();
                     }
                 }
+                else
+                {
+                    // No measured support: hold the last valid position. Never
+                    // extend a table into empty space or choose a distant floor.
+                    draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
+                    // A missed support ray is not a collision. Keep the measured
+                    // world position and normal selected appearance, without flashing red.
+                    if (SelectedComponent == draggedObject)
+                        UpdateSelectedComponentVisual();
+                }
             }
             else
             {
                 unpinchGraceTimer += Time.deltaTime;
-                if (unpinchGraceTimer > 0.12f)
+                if (unpinchGraceTimer > 0.22f)
                 {
                     ReleaseDraggedObject();
                 }
@@ -710,6 +1058,45 @@ public class TapToPlaceController : MonoBehaviour
             {
                 draggedObject.transform.position = lastValidDragPos;
                 draggedObject.transform.rotation = lastValidDragRot;
+            }
+
+            // Keep a nearby tracked native anchor for normal same-level moves.
+            // Only distant/untracked moves need a replacement; do not leave an
+            // object far from its anchor if that replacement cannot be tracked.
+            if (Vector3.Distance(dragStartPos, draggedObject.transform.position) > 0.006f &&
+                !HasReusableDragAnchor(draggedObject))
+            {
+                ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(dragSurfaceTrackableId) : null;
+                ARAnchor replacement = null;
+                if (plane != null && plane.trackingState == TrackingState.Tracking &&
+                    ARSession.state == ARSessionState.SessionTracking && arAnchorManager != null &&
+                    arAnchorManager.isActiveAndEnabled && arAnchorManager.subsystem != null)
+                {
+                    try
+                    {
+                        replacement = arAnchorManager.AttachAnchor(plane,
+                            new Pose(draggedObject.transform.position, draggedObject.transform.rotation));
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning("[TapToPlace] Reanchor failed: " + ex.Message);
+                    }
+                }
+
+                if (replacement != null && replacement.trackingState == TrackingState.Tracking)
+                {
+                    objectAnchors.TryGetValue(draggedObject, out ARAnchor previous);
+                    replacement.gameObject.name = "SurfaceAnchor_" + draggedObject.name;
+                    draggedObject.transform.SetParent(replacement.transform, true);
+                    objectAnchors[draggedObject] = replacement;
+                    if (previous != null) Destroy(previous.gameObject);
+                }
+                else
+                {
+                    if (replacement != null) Destroy(replacement.gameObject);
+                    draggedObject.transform.SetPositionAndRotation(dragStartPos, dragStartRot);
+                    wireConnectionController?.UpdateActiveWirePositionsExternal();
+                }
             }
 
             if (SelectedComponent == draggedObject)
@@ -736,14 +1123,842 @@ public class TapToPlaceController : MonoBehaviour
         draggedObject = null;
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
+        dragSurfaceTrackableId = TrackableId.invalidId;
+        dragPointerOffset = Vector2.zero;
+        dragHandLostAt = float.NegativeInfinity;
+        worldPinchArmed = false;
+    }
+
+    private bool HasReusableDragAnchor(GameObject obj)
+    {
+        if (!objectAnchors.TryGetValue(obj, out ARAnchor anchor) || anchor == null)
+            anchor = obj.GetComponentInParent<ARAnchor>();
+        return anchor != null && CanReuseDragAnchor(anchor.trackingState, anchor.pending,
+            anchor.transform.position, obj.transform.position);
+    }
+
+    private static bool CanReuseDragAnchor(TrackingState state, bool pending, Vector3 anchorPosition, Vector3 objectPosition)
+    {
+        // Small same-surface moves can stay children of their genuine native
+        // anchor. Recreating it on every release caused pending-anchor rollbacks.
+        return state == TrackingState.Tracking && !pending &&
+            (objectPosition - anchorPosition).sqrMagnitude <= 1f;
+    }
+
+    private static GameObject FindPlacedRoot(Transform hit)
+    {
+        while (hit != null)
+        {
+            if (hit.name.StartsWith("Placed_")) return hit.gameObject;
+            hit = hit.parent;
+        }
+        return null;
+    }
+
+    private bool TryFindDragTarget(Vector2 screenPoint, out GameObject target)
+    {
+        target = null;
+        RaycastHit[] hits = Physics.RaycastAll(mainCamera.ScreenPointToRay(screenPoint), 20f);
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+        foreach (RaycastHit hit in hits)
+        {
+            // Wire Mode is rejected before this method. Terminals belong to
+            // their component in Move Mode, not to an invisible dead zone.
+            target = FindPlacedRoot(hit.collider.transform);
+            if (target != null) return true;
+        }
+        return TryFindNearbyDragTarget(screenPoint, out target);
+    }
+
+    private bool TryFindNearbyDragTarget(Vector2 screenPoint, out GameObject target)
+    {
+        target = null;
+        float margin = Mathf.Max(14f, Screen.height * 0.0125f);
+        float bestDistance = float.PositiveInfinity;
+        float bestDepth = float.PositiveInfinity;
+        foreach (GameObject obj in placedObjectsHistory)
+        {
+            if (obj == null || !obj.activeInHierarchy) continue;
+            Bounds bounds = default;
+            bool hasBounds = false;
+            foreach (Renderer renderer in obj.GetComponentsInChildren<Renderer>())
+            {
+                if (!renderer.enabled || renderer is LineRenderer ||
+                    (mainCamera.cullingMask & (1 << renderer.gameObject.layer)) == 0) continue;
+                if (!hasBounds) { bounds = renderer.bounds; hasBounds = true; }
+                else bounds.Encapsulate(renderer.bounds);
+            }
+            if (!hasBounds) continue;
+            Vector2 min = Vector2.one * float.PositiveInfinity, max = Vector2.one * float.NegativeInfinity;
+            bool inFront = true;
+            for (int x = -1; x <= 1; x += 2)
+            for (int y = -1; y <= 1; y += 2)
+            for (int z = -1; z <= 1; z += 2)
+            {
+                Vector3 corner = mainCamera.WorldToScreenPoint(bounds.center + Vector3.Scale(bounds.extents, new Vector3(x, y, z)));
+                if (corner.z <= mainCamera.nearClipPlane) inFront = false;
+                min = Vector2.Min(min, corner);
+                max = Vector2.Max(max, corner);
+            }
+            if (!inFront) continue;
+            Vector2 nearest = new Vector2(Mathf.Clamp(screenPoint.x, min.x, max.x), Mathf.Clamp(screenPoint.y, min.y, max.y));
+            float distance = (screenPoint - nearest).sqrMagnitude;
+            float depth = mainCamera.WorldToScreenPoint(bounds.center).z;
+            if (distance > margin * margin || distance > bestDistance ||
+                (Mathf.Approximately(distance, bestDistance) && depth >= bestDepth)) continue;
+            bestDistance = distance;
+            bestDepth = depth;
+            target = obj;
+        }
+        return target != null;
+    }
+
+    private bool TryGetDragSurface(Vector2 screenPoint, out Pose pose, out TrackableId planeId)
+    {
+        pose = default;
+        planeId = TrackableId.invalidId;
+        if (mainCamera == null || arPlaneManager == null ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+        Ray ray = mainCamera.ScreenPointToRay(screenPoint);
+        float nearest = float.PositiveInfinity;
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!IsUsableSurfacePlane(plane)) continue;
+            Plane support = new Plane(plane.transform.up, plane.transform.position);
+            if (!support.Raycast(ray, out float distance) || distance <= mainCamera.nearClipPlane || distance > 20f) continue;
+            Vector3 point = ray.GetPoint(distance);
+            // One drag stays on the original support level. A pointer beyond a
+            // table edge must not select a distant floor and shrink the component.
+            if (!IsSameDragSupportLevel(dragStartPos.y, GetContactPosition(new Pose(point, plane.transform.rotation)).y)) continue;
+            if (Vector3.Dot(mainCamera.transform.position - point, plane.transform.up) <= 0f) continue;
+            Vector3 local = plane.transform.InverseTransformPoint(point);
+            if (!IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary) || distance >= nearest) continue;
+            nearest = distance;
+            pose = new Pose(point, plane.transform.rotation);
+            planeId = plane.trackableId;
+        }
+        if (planeId != TrackableId.invalidId) return true;
+        // A real depth-placed component must not be immovable while ARCore is
+        // still building polygons. Keep the same measured support-height gate.
+        if (measuredDepth.TryGetSurface(screenPoint, out Pose depthPose) &&
+            IsSameDragSupportLevel(dragStartPos.y, GetContactPosition(depthPose).y))
+        {
+            pose = depthPose;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsSameDragSupportLevel(float startHeight, float contactHeight)
+    {
+        return !float.IsNaN(contactHeight) && !float.IsInfinity(contactHeight) &&
+            Mathf.Abs(startHeight - contactHeight) <= 0.05f;
     }
 
     private Vector2 GetCursorScreenPosition()
     {
-        if (buttonInteractor.debugPoint == null) return new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        Canvas canvas = buttonInteractor.debugPoint.GetComponentInParent<Canvas>();
-        Camera uiCam = (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay) ? canvas.worldCamera : null;
-        return RectTransformUtility.WorldToScreenPoint(uiCam, buttonInteractor.debugPoint.position);
+        if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
+            return new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+        return buttonInteractor.CurrentScreenPos;
+    }
+
+    private Vector2 GetStablePlacementScreenPosition()
+    {
+        Vector2 rawPosition = GetCursorScreenPosition();
+        if (!hasSmoothedPlacementScreenPosition)
+        {
+            smoothedPlacementScreenPosition = rawPosition;
+            hasSmoothedPlacementScreenPosition = true;
+            return rawPosition;
+        }
+
+        // Khi người dùng đổi hẳn vùng trỏ thì snap ngay; dao động nhỏ của hand tracking
+        // mới được lọc để tránh raycast liên tục chạy ra/vào mép polygon.
+        float snapDistance = Mathf.Max(80f, Screen.height * 0.12f);
+        if (Vector2.Distance(rawPosition, smoothedPlacementScreenPosition) > snapDistance)
+        {
+            smoothedPlacementScreenPosition = rawPosition;
+        }
+        else
+        {
+            float follow = 1f - Mathf.Exp(-cursorSmoothingSpeed * Time.deltaTime);
+            smoothedPlacementScreenPosition = Vector2.Lerp(smoothedPlacementScreenPosition, rawPosition, follow);
+        }
+
+        return smoothedPlacementScreenPosition;
+    }
+
+    /// <summary>
+    /// Raycast trực tiếp lên polygon của mặt phẳng ngang do AR Foundation nhận diện.
+    /// Không dùng estimated plane và không dùng một collider vô hạn, vì cả hai trường
+    /// hợp đều có thể cho phép thả vật ra ngoài mép bàn rồi treo trong không khí.
+    /// </summary>
+    private bool TryGetRealHorizontalSurface(Vector2 screenPosition, out Pose pose)
+    {
+        return TryGetRealHorizontalSurface(screenPosition, TrackableId.invalidId, out pose, out _);
+    }
+
+    private bool TryGetRealHorizontalSurface(
+        Vector2 screenPosition,
+        TrackableId preferredTrackableId,
+        out Pose pose,
+        out TrackableId hitTrackableId)
+    {
+        if (TryGetHorizontalSurface(screenPosition, preferredTrackableId,
+            TrackableType.PlaneWithinPolygon, out pose, out hitTrackableId)) return true;
+
+        // Use the same tracked polygon if the provider raycast temporarily misses.
+        // Unlike bounds/extended-plane previews, this result is valid for placement.
+        return TryProjectPointerToTrackedPlane(screenPosition, preferredTrackableId,
+            out pose, out hitTrackableId);
+    }
+
+    private bool TryGetPlacementSurface(Vector2 screenPosition, TrackableId preferredPlaneId,
+        out Pose pose, out TrackableId planeId)
+    {
+        if (TryGetRealHorizontalSurface(screenPosition, preferredPlaneId, out pose, out planeId)) return true;
+        return TryFindNearbyTrackedSurface(screenPosition, out pose, out planeId);
+    }
+
+    private bool TryGetMeasuredPlacementSurface(Vector2 screenPosition, TrackableId preferredPlaneId,
+        out Pose pose, out TrackableId planeId, out bool isDepth)
+    {
+        isDepth = false;
+        if (TryGetPlacementSurface(screenPosition, preferredPlaneId, out pose, out planeId)) return true;
+        if (!measuredDepth.TryGetSurface(screenPosition, out pose)) return false;
+        planeId = TrackableId.invalidId;
+        isDepth = true;
+        return true;
+    }
+
+    private static bool IsUsableSurfacePlane(ARPlane plane)
+    {
+        return plane != null && plane.alignment == PlaneAlignment.HorizontalUp &&
+            plane.trackingState == TrackingState.Tracking && plane.subsumedBy == null;
+    }
+
+    private bool TryFindNearbyTrackedSurface(Vector2 screenPosition, out Pose pose, out TrackableId planeId)
+    {
+        pose = default;
+        planeId = TrackableId.invalidId;
+        if (mainCamera == null || arPlaneManager == null || surfaceEdgeSnapDistance <= 0f ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+        Ray ray = mainCamera.ScreenPointToRay(screenPosition);
+        float nearestDistance = float.PositiveInfinity;
+        float screenTolerance = Mathf.Max(12f, Screen.height * 0.015f);
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!IsUsableSurfacePlane(plane) ||
+                Vector3.Dot(mainCamera.transform.position - plane.transform.position, plane.transform.up) <= 0f) continue;
+            Plane measuredPlane = new Plane(plane.transform.up, plane.transform.position);
+            if (!measuredPlane.Raycast(ray, out float distance) || distance <= mainCamera.nearClipPlane || distance > 20f) continue;
+            Vector3 intersection = ray.GetPoint(distance);
+            Vector3 local = plane.transform.InverseTransformPoint(intersection);
+            if (!TryGetClosestSurfaceBoundaryPoint(new Vector2(local.x, local.z), plane.boundary, out Vector2 closest)) continue;
+            Vector3 measuredPoint = plane.transform.TransformPoint(new Vector3(closest.x, 0f, closest.y));
+            if (Vector3.Distance(measuredPoint, intersection) > surfaceEdgeSnapDistance) continue;
+            Vector3 projected = mainCamera.WorldToScreenPoint(measuredPoint);
+            if (projected.z <= mainCamera.nearClipPlane ||
+                Vector2.Distance(new Vector2(projected.x, projected.y), screenPosition) > screenTolerance) continue;
+            float candidateDistance = Vector3.Distance(mainCamera.transform.position, measuredPoint);
+            if (candidateDistance >= nearestDistance) continue;
+            nearestDistance = candidateDistance;
+            pose = new Pose(measuredPoint, plane.transform.rotation);
+            planeId = plane.trackableId;
+        }
+        return planeId != TrackableId.invalidId;
+    }
+
+    private static bool TryGetClosestSurfaceBoundaryPoint(Vector2 point, NativeArray<Vector2> boundary, out Vector2 closest)
+    {
+        closest = default;
+        if (!boundary.IsCreated || boundary.Length < 3) return false;
+        if (IsPointInSurfaceBoundary(point, boundary)) { closest = point; return true; }
+        float nearest = float.PositiveInfinity;
+        for (int i = 0, j = boundary.Length - 1; i < boundary.Length; j = i++)
+        {
+            Vector2 edge = boundary[i] - boundary[j];
+            float t = edge.sqrMagnitude > 0f
+                ? Mathf.Clamp01(Vector2.Dot(point - boundary[j], edge) / edge.sqrMagnitude) : 0f;
+            Vector2 candidate = boundary[j] + edge * t;
+            float sqrDistance = (candidate - point).sqrMagnitude;
+            if (sqrDistance >= nearest) continue;
+            nearest = sqrDistance;
+            closest = candidate;
+        }
+        return !float.IsPositiveInfinity(nearest);
+    }
+
+    private bool TryProjectPointerToTrackedPlane(
+        Vector2 screenPosition,
+        TrackableId preferredTrackableId,
+        out Pose pose,
+        out TrackableId hitTrackableId)
+    {
+        pose = default;
+        hitTrackableId = TrackableId.invalidId;
+        if (mainCamera == null || arPlaneManager == null ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+
+        Ray ray = mainCamera.ScreenPointToRay(screenPosition);
+        bool found = false;
+        float nearestDistance = float.PositiveInfinity;
+        Pose nearestPose = default;
+        TrackableId nearestTrackableId = TrackableId.invalidId;
+        Pose preferredPose = default;
+        bool foundPreferred = false;
+
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!IsUsableSurfacePlane(plane)) continue;
+
+            Vector2 center = plane.center;
+            Vector3 worldCenter = plane.transform.TransformPoint(new Vector3(center.x, 0f, center.y));
+            Vector3 planeUp = plane.transform.up;
+            if (Vector3.Dot(mainCamera.transform.position - worldCenter, planeUp) <= 0f) continue;
+
+            Plane infinitePlane = new Plane(planeUp, worldCenter);
+            if (!infinitePlane.Raycast(ray, out float distance) ||
+                distance <= mainCamera.nearClipPlane || distance > 20f) continue;
+
+            Vector3 worldPoint = ray.GetPoint(distance);
+            Vector3 localPoint = plane.transform.InverseTransformPoint(worldPoint);
+            if (!IsPointInSurfaceBoundary(
+                new Vector2(localPoint.x, localPoint.z), plane.boundary)) continue;
+
+            Pose candidate = new Pose(worldPoint, plane.transform.rotation);
+            if (plane.trackableId == preferredTrackableId && preferredTrackableId != TrackableId.invalidId)
+            {
+                preferredPose = candidate;
+                foundPreferred = true;
+            }
+
+            if (distance < nearestDistance)
+            {
+                found = true;
+                nearestDistance = distance;
+                nearestPose = candidate;
+                nearestTrackableId = plane.trackableId;
+            }
+        }
+
+        if (!found) return false;
+        bool usePreferred = foundPreferred && Mathf.Abs(preferredPose.position.y - nearestPose.position.y) <= 0.03f;
+        pose = usePreferred ? preferredPose : nearestPose;
+        hitTrackableId = usePreferred ? preferredTrackableId : nearestTrackableId;
+        return true;
+    }
+
+    private static bool IsPointInSurfaceBoundary(Vector2 point, NativeArray<Vector2> boundary)
+    {
+        if (!boundary.IsCreated || boundary.Length < 3) return false;
+        bool inside = false;
+        const float edgeTolerance = 0.001f;
+        for (int i = 0, j = boundary.Length - 1; i < boundary.Length; j = i++)
+        {
+            Vector2 a = boundary[j];
+            Vector2 b = boundary[i];
+            Vector2 edge = b - a;
+            float t = edge.sqrMagnitude > 0f ? Mathf.Clamp01(Vector2.Dot(point - a, edge) / edge.sqrMagnitude) : 0f;
+            if ((point - (a + edge * t)).sqrMagnitude <= edgeTolerance * edgeTolerance) return true;
+            if ((a.y > point.y) != (b.y > point.y) &&
+                point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    private bool TryGetHorizontalSurface(
+        Vector2 screenPosition,
+        TrackableId preferredTrackableId,
+        TrackableType trackableType,
+        out Pose pose,
+        out TrackableId hitTrackableId)
+    {
+        pose = default;
+        hitTrackableId = TrackableId.invalidId;
+        if (arRaycastManager == null || arPlaneManager == null ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+
+        surfaceHits.Clear();
+        if (!arRaycastManager.Raycast(screenPosition, surfaceHits, trackableType))
+        {
+            return false;
+        }
+
+        bool hasFallback = false;
+        Pose fallbackPose = default;
+        TrackableId fallbackTrackableId = TrackableId.invalidId;
+
+        for (int i = 0; i < surfaceHits.Count; i++)
+        {
+            ARRaycastHit hit = surfaceHits[i];
+            ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(hit.trackableId) : null;
+
+            if (!IsUsableSurfacePlane(plane)) continue;
+            if (Vector3.Dot(mainCamera.transform.position - hit.pose.position, plane.transform.up) <= 0f) continue;
+
+            // Chỉ ưu tiên plane cũ nếu nó gần như đồng phẳng với hit gần nhất.
+            // Nhờ vậy các mảnh plane cùng mặt không làm preview rung, nhưng vẫn cho
+            // phép chuyển đúng từ sàn lên mặt bàn (hoặc ngược lại).
+            if (hit.trackableId == preferredTrackableId &&
+                preferredTrackableId != TrackableId.invalidId &&
+                (!hasFallback || Mathf.Abs(hit.pose.position.y - fallbackPose.position.y) <= 0.03f))
+            {
+                pose = hit.pose;
+                hitTrackableId = hit.trackableId;
+                return true;
+            }
+
+            if (!hasFallback)
+            {
+                hasFallback = true;
+                fallbackPose = hit.pose;
+                fallbackTrackableId = hit.trackableId;
+            }
+        }
+
+        if (!hasFallback) return false;
+
+        pose = fallbackPose;
+        hitTrackableId = fallbackTrackableId;
+        return true;
+    }
+
+    private Vector3 GetContactPosition(Pose surfacePose)
+    {
+        Vector3 surfaceUp = surfacePose.rotation * Vector3.up;
+        if (Vector3.Dot(surfaceUp, Vector3.up) < 0f) surfaceUp = -surfaceUp;
+        return surfacePose.position + surfaceUp.normalized * surfaceContactOffset;
+    }
+
+    private void ShowUngroundedPreview()
+    {
+        if (previewAnchor == null) return;
+        canPlace = false;
+        if (mainCamera == null) mainCamera = Camera.main;
+
+        bool hasPointer = HasWorldPlacementPointer();
+        bool initialize = !previewAnchor.activeSelf;
+
+        if (mainCamera == null)
+        {
+            previewAnchor.transform.SetPositionAndRotation(Vector3.forward * ungroundedPreviewDistance, Quaternion.identity);
+            previewAnchor.SetActive(true);
+            return;
+        }
+
+        Matrix4x4 projection = mainCamera.projectionMatrix;
+        bool startupFrameChanged = !hasUngroundedPreviewFrame ||
+            ARSession.state != ARSessionState.SessionTracking ||
+            ungroundedPreviewSessionState != ARSession.state || ungroundedPreviewProjection != projection;
+        // Không giữ một world pose tạo trước camera AR: origin và projection có
+        // thể chỉ có dữ liệu thật ở frame sau. Sau khởi động, mất tay vẫn giữ pose.
+        if (!initialize && !hasPointer && !startupFrameChanged) return;
+
+        Vector2 viewportPoint = hasPointer
+            ? new Vector2(buttonInteractor.CurrentScreenPos.x / Mathf.Max(1f, Screen.width),
+                buttonInteractor.CurrentScreenPos.y / Mathf.Max(1f, Screen.height))
+            : new Vector2(0.5f, 0.55f);
+        // Only frame the initial no-hand ghost. Clamping an active pointer
+        // here made the model stop while the white cursor kept moving.
+        if (!hasPointer)
+        {
+            float framingMargin = Mathf.Max(0.24f, ungroundedPreviewScreenFraction * 0.5f + 0.04f);
+            viewportPoint.x = Mathf.Clamp(viewportPoint.x, framingMargin, 1f - framingMargin);
+            viewportPoint.y = Mathf.Clamp(viewportPoint.y, framingMargin, 1f - framingMargin);
+        }
+
+        // Chỉ căn khoảng cách tạm theo bounds, tuyệt đối không phóng/thu scale
+        // prefab. Dùng projection thật thay vì fieldOfView có thể còn giá trị cũ.
+        float distance = GetUngroundedPreviewDistance();
+        Quaternion rotation = initialize || startupFrameChanged
+            ? GetPlacementRotation() : previewAnchor.transform.rotation;
+        Vector3 center = mainCamera.ViewportToWorldPoint(new Vector3(viewportPoint.x, viewportPoint.y, distance));
+        Vector3 position = center - rotation * previewBoundsLocalCenter;
+        // The cursor is already filtered. A second world-space lerp delays a
+        // camera-relative ghost during both finger and camera movement.
+        if (hasPointer || initialize || startupFrameChanged)
+            previewAnchor.transform.SetPositionAndRotation(position, rotation);
+        else
+            previewAnchor.transform.position = Vector3.Lerp(previewAnchor.transform.position, position,
+                1f - Mathf.Exp(-previewFollowSpeed * Time.unscaledDeltaTime));
+
+        previewAnchor.SetActive(true);
+        UpdatePreviewVisual(false);
+        hasUngroundedPreviewFrame = true;
+        ungroundedPreviewProjection = projection;
+        ungroundedPreviewSessionState = ARSession.state;
+    }
+
+    private float GetUngroundedPreviewDistance()
+    {
+        if (mainCamera == null || previewBoundsRadius <= 0.0001f) return ungroundedPreviewDistance;
+        Matrix4x4 projection = mainCamera.projectionMatrix;
+        float tanHalfFov = 1f / Mathf.Max(Mathf.Max(Mathf.Abs(projection.m00), Mathf.Abs(projection.m11)), 0.001f);
+        float targetTangent = Mathf.Max(0.001f, tanHalfFov * ungroundedPreviewScreenFraction);
+        float fitDistance = previewBoundsRadius * Mathf.Sqrt(1f + targetTangent * targetTangent) / targetTangent;
+        return Mathf.Max(mainCamera.nearClipPlane + previewBoundsRadius + 0.01f, fitDistance);
+    }
+
+    private void LogPreviewGeometry(string stage)
+    {
+        if (mainCamera == null || previewAnchor == null || previewVisual == null) return;
+        Vector3 viewportCenter = mainCamera.WorldToViewportPoint(
+            previewAnchor.transform.TransformPoint(previewBoundsLocalCenter));
+        Debug.Log($"[ARPreview] {stage}; prefab={currentPrefabToPlace?.name}; " +
+            $"scale={previewVisual.transform.localScale}; radius={previewBoundsRadius:F4}; " +
+            $"fitDistance={GetUngroundedPreviewDistance():F3}; viewportCenter={viewportCenter}; " +
+            $"projection=({mainCamera.projectionMatrix.m00:F3},{mainCamera.projectionMatrix.m11:F3}); " +
+            $"screen={Screen.width}x{Screen.height}");
+    }
+
+    private Quaternion GetPlacementRotation()
+    {
+        Vector3 forward = mainCamera != null
+            ? Vector3.ProjectOnPlane(mainCamera.transform.forward, Vector3.up)
+            : Vector3.forward;
+        if (forward.sqrMagnitude < 0.0001f) forward = Vector3.forward;
+        return Quaternion.LookRotation(forward.normalized, Vector3.up);
+    }
+
+    private async void TryPlaceObject(Pose pose, TrackableId planeId)
+    {
+        if (placementPending || previewAnchor == null || !previewAnchor.activeSelf) return;
+        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(planeId) : null;
+        bool isDepth = placementRequestHasSurface && placementRequestIsDepth;
+        if (!CanCreateMeasuredSurfaceAnchor(planeId, isDepth))
+        {
+            SetPlacementStatus("Chưa bám chắc mặt thật — hãy thử lại.");
+            return;
+        }
+
+        placementPending = true;
+        placementRetryEligible = IsWorldPinchHeld();
+        int generation = placementGeneration;
+        GameObject requestedPreview = previewAnchor;
+        ARAnchor nativeAnchor = null;
+        SetPlacementStatus("Đang cố định linh kiện lên mặt thật…");
+        try
+        {
+            // ARCore plane anchor giữ vật gắn với chính bề mặt trúng tia, thay vì
+            // chỉ thêm một Transform tên Anchor rồi mặc định coi là đã đặt thành công.
+            if (!isDepth) nativeAnchor = arAnchorManager.AttachAnchor(plane, pose);
+            if (nativeAnchor == null)
+            {
+                var result = await arAnchorManager.TryAddAnchorAsync(pose);
+                if (result.status.IsSuccess()) nativeAnchor = result.value;
+            }
+
+            if (this == null || generation != placementGeneration || requestedPreview != previewAnchor)
+            {
+                if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                return;
+            }
+            if (ShouldCancelPendingPlacement())
+            {
+                CancelPendingPlacementAttempt();
+                if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                return;
+            }
+
+            // A successful request can still be pending/Limited until a later
+            // subsystem update. Keep the requested world pose while it settles.
+            float anchorDeadline = Time.realtimeSinceStartup + 2f;
+            while (nativeAnchor != null &&
+                   (nativeAnchor.pending || nativeAnchor.trackingState != TrackingState.Tracking) &&
+                   Time.realtimeSinceStartup < anchorDeadline)
+            {
+                await Awaitable.NextFrameAsync();
+                if (this == null || !isActiveAndEnabled || generation != placementGeneration ||
+                    requestedPreview != previewAnchor)
+                {
+                    if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                    return;
+                }
+                if (ShouldCancelPendingPlacement())
+                {
+                    CancelPendingPlacementAttempt();
+                    if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                    return;
+                }
+            }
+
+            if (ShouldCancelPendingPlacement())
+            {
+                CancelPendingPlacementAttempt();
+                if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                return;
+            }
+            if (nativeAnchor == null || nativeAnchor.trackingState != TrackingState.Tracking ||
+                ARSession.state != ARSessionState.SessionTracking)
+            {
+                if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+                SetPlacementStatus("Chưa cố định được vị trí — giữ máy ổn định rồi thử lại.");
+                return;
+            }
+
+            PlaceObject(nativeAnchor.transform.position, pose.rotation, nativeAnchor);
+        }
+        catch (System.Exception ex)
+        {
+            if (nativeAnchor != null) Destroy(nativeAnchor.gameObject);
+            Debug.LogWarning("[TapToPlace] Anchor creation failed: " + ex.Message);
+            if (this != null && generation == placementGeneration)
+                SetPlacementStatus("Chưa cố định được vị trí — hãy thử lại.");
+        }
+        finally
+        {
+            if (this != null && generation == placementGeneration)
+            {
+                placementPending = false;
+                RetryPlacementIfStillHeld(generation, requestedPreview);
+            }
+        }
+    }
+
+    private bool IsWorldPinchHeld()
+    {
+        return HasWorldPlacementPointer() && buttonInteractor.isPinching;
+    }
+
+    private bool ShouldCancelPendingPlacement()
+    {
+        return ARSession.state != ARSessionState.SessionTracking ||
+            (buttonInteractor != null && buttonInteractor.JustPinched && buttonInteractor.PinchConsumedByUI) ||
+            (placementRequestHasSurface && !TryResolvePlacementRequestSurface(out _, out _));
+    }
+
+    private void CancelPendingPlacementAttempt()
+    {
+        // Callback native đến muộn sẽ tự hủy anchor bằng generation guard; không
+        // xóa preview hoặc làm sống lại lệnh đã hủy sau khi session hồi phục.
+        placementGeneration++;
+        placementPending = false;
+        placementRetryEligible = false;
+        ClearPlacementRequest();
+        surfaceTransitionActive = false;
+        canPlace = false;
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+    }
+
+    private void ObservePendingPlacementGesture()
+    {
+        // Một lần nhả/mất tay/UI trong lúc chờ native anchor kết thúc quyền retry
+        // của cử chỉ cũ, kể cả người dùng đã pinch lại trước callback thất bại.
+        if (!IsWorldPinchHeld() || buttonInteractor.JustPinched) placementRetryEligible = false;
+    }
+
+    private void RetryPlacementIfStillHeld(int generation, GameObject requestedPreview)
+    {
+        if (!placementRetryEligible || !isActiveAndEnabled || generation != placementGeneration ||
+            previewAnchor == null || requestedPreview != previewAnchor || currentPrefabToPlace == null ||
+            !IsWorldPinchHeld()) return;
+
+        // Native anchor cũng có thể chưa ổn định dù subsystem đã running. Chỉ
+        // thử lại cho chính pinch còn đang giữ, tối đa 4 lần/giây, không đặt giả.
+        if (!TryResolvePlacementRequestSurface(out _, out _))
+        {
+            ClearPlacementRequest();
+            placementRequestAwaitingSurface = true;
+            placementRequestScreenPosition = buttonInteractor.CurrentScreenPos;
+        }
+        nextPlacementAttemptAt = Time.unscaledTime + 0.25f;
+        placementRequestExpiresAt = nextPlacementAttemptAt + previewSurfaceTransitionDuration + 0.7f;
+        placementRetryEligible = false;
+    }
+
+    private bool CanCreateSurfaceAnchor(TrackableId planeId)
+    {
+        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(planeId) : null;
+        return IsUsableSurfacePlane(plane) &&
+            ARSession.state == ARSessionState.SessionTracking && arAnchorManager != null &&
+            arAnchorManager.isActiveAndEnabled && arAnchorManager.subsystem != null && arAnchorManager.subsystem.running;
+    }
+
+    private bool CanCreateMeasuredSurfaceAnchor(TrackableId planeId, bool isDepth)
+    {
+        if (!isDepth) return CanCreateSurfaceAnchor(planeId);
+        return planeId == TrackableId.invalidId && measuredDepth.IsReady &&
+            ARSession.state == ARSessionState.SessionTracking && arAnchorManager != null &&
+            arAnchorManager.isActiveAndEnabled && arAnchorManager.subsystem != null && arAnchorManager.subsystem.running;
+    }
+
+    private bool TryFindVisibleSurface(out Pose pose, out TrackableId planeId)
+    {
+        pose = default;
+        planeId = TrackableId.invalidId;
+        if (ARSession.state != ARSessionState.SessionTracking) return false;
+        // Vùng trung tâm: ưu tiên điểm ngay trước người dùng, không phải phần UI đáy màn hình.
+        for (int y = 0; y < 3; y++)
+        {
+            for (int x = 0; x < 3; x++)
+            {
+                float u = x == 0 ? 0.5f : (x == 1 ? 0.3f : 0.7f);
+                float v = y == 0 ? 0.5f : (y == 1 ? 0.35f : 0.65f);
+                if (TryGetRealHorizontalSurface(new Vector2(Screen.width * u, Screen.height * v),
+                    TrackableId.invalidId, out pose, out planeId)) return true;
+            }
+        }
+        if (arPlaneManager == null) return false;
+        foreach (var plane in arPlaneManager.trackables)
+        {
+            if (plane.trackingState != TrackingState.Tracking || plane.alignment != PlaneAlignment.HorizontalUp) continue;
+            Vector2 localCenter = plane.center;
+            Vector3 worldCenter = plane.transform.TransformPoint(new Vector3(localCenter.x, 0f, localCenter.y));
+            if (!IsWorldPointVisible(worldCenter)) continue;
+            Vector3 screen = mainCamera.WorldToScreenPoint(worldCenter);
+            if (TryGetRealHorizontalSurface(new Vector2(screen.x, screen.y), plane.trackableId, out pose, out planeId))
+                return true;
+        }
+
+        // Intersect the tracked polygon directly when the native raycast misses.
+        return TryProjectPointerToTrackedPlane(
+            new Vector2(Screen.width * 0.5f, Screen.height * 0.5f),
+            TrackableId.invalidId, out pose, out planeId);
+    }
+
+    private void SetPlacementStatus(string message)
+    {
+        // Technical diagnostics stay in the log. The reused scan pill below
+        // presents concise readiness/gesture states, not a second banner.
+        if (placementStatusRoot != null) placementStatusRoot.SetActive(false);
+        Debug.Log("[TapToPlace] " + message);
+    }
+
+    public void BeginSurfaceGuidance()
+    {
+        surfaceGuidanceEnabled = true;
+        guidanceSurfaceReadySince = float.NegativeInfinity;
+        nextSurfaceGuidanceAt = 0f;
+        surfaceGuidanceHUD = ARScanFloatingHUD.EnsureInstance();
+        RefreshSurfaceGuidance();
+    }
+
+    public void EndSurfaceGuidance()
+    {
+        surfaceGuidanceEnabled = false;
+        guidanceSurfaceReadySince = float.NegativeInfinity;
+        if (surfaceGuidanceHUD != null) surfaceGuidanceHUD.HideImmediate();
+    }
+
+    private void RefreshSurfaceGuidance()
+    {
+        if (!surfaceGuidanceEnabled || Time.unscaledTime < nextSurfaceGuidanceAt) return;
+        nextSurfaceGuidanceAt = Time.unscaledTime + 0.2f;
+        if (surfaceGuidanceHUD == null) surfaceGuidanceHUD = ARScanFloatingHUD.EnsureInstance();
+        LogAnchorStateIfDue();
+        if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
+        {
+            surfaceGuidanceHUD.HideImmediate();
+            return;
+        }
+        if (ARSession.state != ARSessionState.SessionTracking)
+        {
+            guidanceSurfaceReadySince = float.NegativeInfinity;
+            if (placedObjectsHistory.Count > 0)
+                surfaceGuidanceHUD.ShowWarning("Đang tìm lại vị trí AR", "Hướng camera về vùng đã đặt, lia chậm và giữ máy ổn định");
+            else if (ARSession.notTrackingReason == NotTrackingReason.InsufficientLight)
+                surfaceGuidanceHUD.ShowWarning("Chưa đủ ánh sáng", "Hướng camera vào mặt bàn / sàn sáng và có chi tiết");
+            else
+                surfaceGuidanceHUD.ShowScanning("Đang nhận diện không gian", "Lia chậm trái–phải quanh bàn / sàn, chờ thanh chuyển xanh");
+            return;
+        }
+        if (placementPending)
+        {
+            surfaceGuidanceHUD.ShowScanning("Đang neo linh kiện", "Giữ máy ổn định; vật chỉ cố định khi neo AR hoàn tất");
+            return;
+        }
+        if (isDragging)
+        {
+            surfaceGuidanceHUD.ShowDetected("Đang kéo linh kiện", "Mở tay để thả; chỉ di chuyển trên mặt đỡ đã nhận diện");
+            return;
+        }
+        if (currentPrefabToPlace != null)
+        {
+            if (lastPlacementFeedback == ButtonInteractor.PlacementFeedback.Blocked)
+                surfaceGuidanceHUD.ShowWarning("Vị trí đang chồng linh kiện", "Di chuyển con trỏ sang chỗ trống trên mặt bàn / sàn");
+            else if (canPlace)
+                surfaceGuidanceHUD.ShowDetected("Có thể đặt tại đây", "Pinch để đặt; chờ báo đã neo rồi mở tay");
+            else if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
+                surfaceGuidanceHUD.ShowScanning("Linh kiện chưa được đặt", "Đưa tay vào khung hình, trỏ vào mặt đỡ rồi pinch");
+            else
+                surfaceGuidanceHUD.ShowScanning("Đang tìm điểm đặt dưới con trỏ", "Trỏ vào vùng bàn / sàn đã quét; vật hiện tại là xem trước");
+            return;
+        }
+        if (Time.unscaledTime < placementConfirmedUntil)
+        {
+            surfaceGuidanceHUD.ShowDetected("Đã neo linh kiện", "Vật ở lại mặt thật; pinch giữ vào vật nếu muốn kéo");
+            return;
+        }
+
+        bool hasVisibleSupport = HasGuidanceSupport();
+        if (!hasVisibleSupport) guidanceSurfaceReadySince = float.NegativeInfinity;
+        else if (float.IsNegativeInfinity(guidanceSurfaceReadySince)) guidanceSurfaceReadySince = Time.unscaledTime;
+        if (hasVisibleSupport && Time.unscaledTime - guidanceSurfaceReadySince >= 0.5f)
+            surfaceGuidanceHUD.ShowDetected("Đã sẵn sàng đặt linh kiện", "Mở kho dụng cụ để lấy vật, trỏ vào mặt đỡ rồi pinch");
+        else
+            surfaceGuidanceHUD.ShowScanning("Đang tìm mặt bàn / sàn", "Lia chậm quanh bề mặt, chờ thanh xanh rồi lấy linh kiện");
+    }
+
+    private bool HasGuidanceSupport()
+    {
+        if (mainCamera == null || arPlaneManager == null || arAnchorManager == null ||
+            !arAnchorManager.isActiveAndEnabled || arAnchorManager.subsystem == null ||
+            !arAnchorManager.subsystem.running) return false;
+        // Managed polygon intersections only: no extra native depth/camera work
+        // just for displaying the status pill before a component is selected.
+        foreach (Vector2 viewport in GuidanceProbeViewports)
+            if (TryProjectPointerToTrackedPlane(new Vector2(viewport.x * Screen.width, viewport.y * Screen.height),
+                TrackableId.invalidId, out _, out _)) return true;
+        return false;
+    }
+
+    private void LogAnchorStateIfDue()
+    {
+        if (!Application.isPlaying || !Debug.isDebugBuild || mainCamera == null ||
+            Time.unscaledTime < nextAnchorDiagnosticAt) return;
+        nextAnchorDiagnosticAt = Time.unscaledTime + 2f;
+        for (int i = placedObjectsHistory.Count - 1; i >= 0; i--)
+        {
+            GameObject obj = placedObjectsHistory[i];
+            if (obj == null || !obj.activeInHierarchy || !objectAnchors.TryGetValue(obj, out ARAnchor anchor) || anchor == null) continue;
+            bool same = obj == diagnosticObject;
+            Debug.Log($"[ARObjectState] {obj.name}; tracking={anchor.trackingState}; pending={anchor.pending}; " +
+                $"dragging={isDragging && draggedObject == obj}; pinch={buttonInteractor != null && buttonInteractor.isPinching}; " +
+                $"cameraParent={anchor.transform.IsChildOf(mainCamera.transform)}; " +
+                $"worldDeltaMm={(same ? Vector3.Distance(obj.transform.position, diagnosticWorldPosition) * 1000f : 0f):F1}; " +
+                $"localDeltaMm={(same ? Vector3.Distance(obj.transform.localPosition, diagnosticLocalPosition) * 1000f : 0f):F1}; " +
+                $"anchorDeltaMm={(same ? Vector3.Distance(anchor.transform.position, diagnosticAnchorPosition) * 1000f : 0f):F1}; " +
+                $"cameraDeltaMm={(same ? Vector3.Distance(mainCamera.transform.position, diagnosticCameraPosition) * 1000f : 0f):F1}");
+            diagnosticObject = obj;
+            diagnosticWorldPosition = obj.transform.position;
+            diagnosticLocalPosition = obj.transform.localPosition;
+            diagnosticAnchorPosition = anchor.transform.position;
+            diagnosticCameraPosition = mainCamera.transform.position;
+            break;
+        }
+    }
+
+    private void OnDestroy()
+    {
+        placementGeneration++;
+        if (placementStatusRoot != null)
+        {
+            if (Application.isPlaying) Destroy(placementStatusRoot);
+            else DestroyImmediate(placementStatusRoot);
+        }
+    }
+
+    private bool IsWorldPointVisible(Vector3 worldPosition)
+    {
+        if (mainCamera == null) mainCamera = Camera.main;
+        if (mainCamera == null) return false;
+
+        Vector3 viewport = mainCamera.WorldToViewportPoint(worldPosition);
+        return viewport.z > mainCamera.nearClipPlane &&
+               viewport.x >= 0.04f && viewport.x <= 0.96f &&
+               viewport.y >= 0.04f && viewport.y <= 0.96f;
     }
 
     public void StartPreview(string componentName)
@@ -758,6 +1973,9 @@ public class TapToPlaceController : MonoBehaviour
         }
 
         currentPrefabToPlace = prefab;
+        loggedMeasuredPreviewGeometry = false;
+        previewIsInvalid = null;
+        selectedDisplayName = componentName;
         previewAnchor = new GameObject("PreviewAnchor_" + prefab.name);
         previewVisual = Instantiate(prefab);
         previewVisual.transform.SetParent(previewAnchor.transform, false);
@@ -771,22 +1989,84 @@ public class TapToPlaceController : MonoBehaviour
         }
 
         AlignVisualBaseToAnchor(previewAnchor, previewVisual);
+        Bounds previewBounds = default;
+        bool hasPreviewBounds = false;
+        foreach (Renderer renderer in previewVisual.GetComponentsInChildren<Renderer>())
+        {
+            if (renderer is LineRenderer) continue;
+            if (!hasPreviewBounds) { previewBounds = renderer.bounds; hasPreviewBounds = true; }
+            else previewBounds.Encapsulate(renderer.bounds);
+        }
+        previewBoundsRadius = hasPreviewBounds ? previewBounds.extents.magnitude : 0f;
+        previewBoundsLocalCenter = hasPreviewBounds
+            ? previewAnchor.transform.InverseTransformPoint(previewBounds.center) : Vector3.zero;
         SetPreviewTransparent(previewVisual, previewAlpha);
-        previewAnchor.SetActive(true);
+
+        lastPreviewTrackableId = TrackableId.invalidId;
+        hasSmoothedPlacementScreenPosition = false;
+        hasPreviewSurfacePose = false;
+
+        // Nếu trong phiên AR đã có một mặt thật hợp lệ và điểm đó vẫn nằm trong
+        // khung hình, hiển thị linh kiện mới ngay tại đó. Điều này loại bỏ trường hợp
+        // bấm lấy vật nhưng preview không xuất hiện vì tay đang che nút UI.
+        ARPlane knownPlane = arPlaneManager != null ? arPlaneManager.GetPlane(lastKnownSurfaceTrackableId) : null;
+        if (hasLastKnownPlacementPose && knownPlane != null && knownPlane.trackingState == TrackingState.Tracking &&
+            ARSession.state == ARSessionState.SessionTracking && IsWorldPointVisible(lastKnownPlacementPose.position))
+        {
+            previewAnchor.transform.SetPositionAndRotation(
+                lastKnownPlacementPose.position,
+                lastKnownPlacementPose.rotation);
+            previewAnchor.SetActive(true);
+            hasPreviewSurfacePose = true;
+            lastPreviewTrackableId = lastKnownSurfaceTrackableId;
+        }
+        else if (ARSession.state == ARSessionState.SessionTracking &&
+                 TryFindVisibleSurface(out Pose initialSurfacePose, out TrackableId initialTrackableId))
+        {
+            previewAnchor.transform.SetPositionAndRotation(
+                GetContactPosition(initialSurfacePose), GetPlacementRotation());
+            previewAnchor.SetActive(true);
+            hasPreviewSurfacePose = true;
+            lastPreviewTrackableId = initialTrackableId;
+        }
+        else
+        {
+            previewAnchor.SetActive(false);
+            ShowUngroundedPreview();
+        }
 
         canPlace = false;
+        LogPreviewGeometry(hasPreviewSurfacePose ? "selection-plane" : "selection-unmeasured");
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+        worldPinchArmed = false;
         cooldownTimer = 0.4f;
     }
 
     public void ClearPreview()
     {
+        placementGeneration++;
+        placementPending = false;
+        ClearPlacementRequest();
+        placementRetryEligible = false;
+        nextPlacementAttemptAt = 0f;
+        surfaceTransitionActive = false;
+        surfaceTransitionTrackableId = TrackableId.invalidId;
+        SetPlacementFeedback(ButtonInteractor.PlacementFeedback.None);
+        if (placementStatusRoot != null) placementStatusRoot.SetActive(false);
         if (previewAnchor != null)
         {
-            Destroy(previewAnchor);
+            if (Application.isPlaying) Destroy(previewAnchor);
+            else DestroyImmediate(previewAnchor);
             previewAnchor = null;
             previewVisual = null;
             currentPrefabToPlace = null;
         }
+        lastPreviewTrackableId = TrackableId.invalidId;
+        hasSmoothedPlacementScreenPosition = false;
+        hasPreviewSurfacePose = false;
+        previewSurfaceIsDepth = false;
+        measuredDepth.Reset();
+        hasUngroundedPreviewFrame = false;
         canPlace = false;
         if (menuHUD != null) menuHUD.ClearSelection();
     }
@@ -804,18 +2084,65 @@ public class TapToPlaceController : MonoBehaviour
 
     private void AlignVisualBaseToAnchor(GameObject anchor, GameObject visual)
     {
-        Renderer[] renderers = visual.GetComponentsInChildren<Renderer>();
-        if (renderers.Length == 0) return;
-
-        Bounds combined = renderers[0].bounds;
-        for (int i = 1; i < renderers.Length; i++)
+        if (anchor == null || visual == null) return;
+        // Interaction colliders are intentionally generous, and are not the
+        // rendered base. Using their lower face can visibly suspend the model.
+        // This runs only when selecting/committing a model, never per frame.
+        float bottomY = float.PositiveInfinity;
+        foreach (Renderer renderer in visual.GetComponentsInChildren<Renderer>())
         {
-            combined.Encapsulate(renderers[i].bounds);
+            if (!renderer.enabled || renderer is LineRenderer ||
+                IsTerminalVisual(renderer.transform, visual.transform)) continue;
+            MeshFilter filter = renderer.GetComponent<MeshFilter>();
+            Mesh mesh = filter != null ? filter.sharedMesh : null;
+            if (mesh != null)
+            {
+                if (mesh.isReadable)
+                {
+                    foreach (Vector3 vertex in mesh.vertices)
+                        bottomY = Mathf.Min(bottomY, renderer.transform.TransformPoint(vertex).y);
+                }
+                else
+                {
+                    // Imported FBX meshes are not CPU-readable on Android. Their
+                    // local bounds are still available; with the shipped upright
+                    // body meshes and yaw rotation this is the exact lower face.
+                    bottomY = Mathf.Min(bottomY, GetLowestTransformedMeshBound(mesh.bounds, renderer.transform));
+                }
+            }
+            else
+            {
+                // Skinned/custom renderers without MeshFilter retain a safe
+                // geometry-based fallback; never fall back to a grab collider.
+                bottomY = Mathf.Min(bottomY, renderer.bounds.min.y);
+            }
         }
+        if (float.IsInfinity(bottomY) || float.IsNaN(bottomY)) return;
+        visual.transform.position += Vector3.up * (anchor.transform.position.y - bottomY);
+    }
 
-        float bottomOffsetWorld = combined.min.y - anchor.transform.position.y;
-        Vector3 worldCorrection = new Vector3(0, -bottomOffsetWorld, 0);
-        visual.transform.position += worldCorrection;
+    private static bool IsTerminalVisual(Transform transform, Transform visualRoot)
+    {
+        while (transform != null)
+        {
+            if (transform.CompareTag("Terminal")) return true;
+            if (transform == visualRoot) break;
+            transform = transform.parent;
+        }
+        return false;
+    }
+
+    private static float GetLowestTransformedMeshBound(Bounds bounds, Transform transform)
+    {
+        float bottomY = float.PositiveInfinity;
+        for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+        for (int z = -1; z <= 1; z += 2)
+        {
+            Vector3 corner = bounds.center + Vector3.Scale(bounds.extents, new Vector3(x, y, z));
+            bottomY = Mathf.Min(bottomY, transform.TransformPoint(corner).y);
+        }
+        return bottomY;
     }
 
     private GameObject GetPrefabByName(string name)
@@ -865,24 +2192,31 @@ public class TapToPlaceController : MonoBehaviour
 
     private void SetPreviewTransparent(GameObject obj, float alpha)
     {
+        if (previewPropertyBlock == null) previewPropertyBlock = new MaterialPropertyBlock();
         Renderer[] renderers = obj.GetComponentsInChildren<Renderer>();
         foreach (var r in renderers)
         {
             if (r is LineRenderer) continue;
-            foreach (var mat in r.materials)
+            Material[] materials = r.sharedMaterials;
+            for (int i = 0; i < materials.Length; i++)
             {
+                Material mat = materials[i];
+                if (mat == null) continue;
+                previewPropertyBlock.Clear();
+                r.GetPropertyBlock(previewPropertyBlock, i);
                 if (mat.HasProperty("_BaseColor"))
                 {
                     Color c = mat.GetColor("_BaseColor");
                     c.a = alpha;
-                    mat.SetColor("_BaseColor", c);
+                    previewPropertyBlock.SetColor("_BaseColor", c);
                 }
                 else if (mat.HasProperty("_Color"))
                 {
                     Color c = mat.color;
                     c.a = alpha;
-                    mat.color = c;
+                    previewPropertyBlock.SetColor("_Color", c);
                 }
+                r.SetPropertyBlock(previewPropertyBlock, i);
             }
         }
     }
@@ -890,21 +2224,40 @@ public class TapToPlaceController : MonoBehaviour
     private void SetPreviewColor(GameObject obj, Color tintColor)
     {
         if (obj == null) return;
+        if (previewPropertyBlock == null) previewPropertyBlock = new MaterialPropertyBlock();
         Renderer[] renderers = obj.GetComponentsInChildren<Renderer>();
         foreach (var r in renderers)
         {
             if (r is LineRenderer) continue;
-            foreach (var mat in r.materials)
+            Material[] materials = r.sharedMaterials;
+            for (int i = 0; i < materials.Length; i++)
             {
+                Material mat = materials[i];
+                if (mat == null) continue;
+                previewPropertyBlock.Clear();
+                r.GetPropertyBlock(previewPropertyBlock, i);
                 if (mat.HasProperty("_BaseColor"))
                 {
-                    mat.SetColor("_BaseColor", tintColor);
+                    previewPropertyBlock.SetColor("_BaseColor", tintColor);
                 }
                 else if (mat.HasProperty("_Color"))
                 {
-                    mat.color = tintColor;
+                    previewPropertyBlock.SetColor("_Color", tintColor);
                 }
+                r.SetPropertyBlock(previewPropertyBlock, i);
             }
+        }
+    }
+
+    private void UpdatePreviewVisual(bool invalid)
+    {
+        if (previewIsInvalid == invalid) return;
+        previewIsInvalid = invalid;
+        if (invalid) SetPreviewColor(previewVisual, new Color(1f, 0.22f, 0.22f, 0.75f));
+        else
+        {
+            RestoreOriginalMaterials(previewVisual, currentPrefabToPlace);
+            SetPreviewTransparent(previewVisual, previewAlpha);
         }
     }
 
@@ -961,6 +2314,9 @@ public class TapToPlaceController : MonoBehaviour
             if (prefabRenderers[i] != null && prefabRenderers[i].sharedMaterials != null)
             {
                 instanceRenderers[i].sharedMaterials = prefabRenderers[i].sharedMaterials;
+                instanceRenderers[i].SetPropertyBlock(null);
+                for (int j = 0; j < prefabRenderers[i].sharedMaterials.Length; j++)
+                    instanceRenderers[i].SetPropertyBlock(null, j);
             }
         }
     }
@@ -1217,6 +2573,13 @@ public class TapToPlaceController : MonoBehaviour
         {
             GameObject placed = activePlaced[i];
             if (placed == null) continue;
+
+            // Sàn và mặt bàn có thể chồng nhau theo XZ nhưng ở cao độ khác nhau.
+            // Chỉ chống đè lên nhau giữa các vật trên cùng một bề mặt thực.
+            if (Mathf.Abs(candidatePosition.y - placed.transform.position.y) > 0.08f)
+            {
+                continue;
+            }
 
             Vector2 diffXZ = new Vector2(candidatePosition.x - placed.transform.position.x, candidatePosition.z - placed.transform.position.z);
             if (diffXZ.sqrMagnitude > 0.2025f)

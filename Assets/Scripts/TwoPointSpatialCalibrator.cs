@@ -33,6 +33,12 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     [Tooltip("Độ dày mặt bàn. Mặc định 1cm")]
     public float defaultBoardThickness = 0.01f;
 
+    [Header("--- BỀ MẶT ĐẶT VẬT ---")]
+    [Tooltip("Đặt vật trực tiếp lên mọi mặt phẳng ngang AR nhận diện, không tạo hoặc yêu cầu căn chỉnh tấm bảng ảo.")]
+    public bool useDirectRealSurfacePlacement = true;
+    [Tooltip("Chỉ bật để gỡ lỗi. Collider vẫn hoạt động khi tắt, nhưng tấm màu sẽ không được vẽ lên camera AR.")]
+    public bool showPlacementSurface = false;
+
     [Header("--- BOARD ORIENTATION LOCK ---")]
     [Tooltip("Use the user's horizontal viewing direction at placement, instead of the AR plane's changing axis.")]
     public bool alignBoardToUserOnPlacement = true;
@@ -361,13 +367,9 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
                 return true;
             }
 
-            if (hits.Count > 0)
-            {
-                hitPose = hits[0].pose;
-                planeId = hits[0].trackableId;
-                hitPlane = planeManager != null ? planeManager.GetPlane(planeId) : null;
-                return true;
-            }
+            // Không dùng hit dự phòng nếu tất cả kết quả đã bị bộ lọc loại bỏ.
+            // Nhờ vậy ứng dụng không thể đặt vùng linh kiện lên tường, mặt nghiêng
+            // hoặc một mặt phẳng không còn được AR theo dõi ổn định.
         }
 
         return false;
@@ -473,22 +475,23 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         // Góc xoay PHẲNG TUYỆT ĐỐI (Pitch=0, Roll=0) & SONG SONG CẠNH BÀN GỖ THẬT:
         Quaternion rotation = Quaternion.LookRotation(alignedForward, Vector3.up);
 
-        // 2. Cao độ Y: Lấy chính xác từ mặt bàn thực tế (hitPose.position.y) và nâng nhẹ theo độ dày thảm
-        Vector3 center = new Vector3(
+        // 2. Neo nằm đúng trên mặt phẳng thật. Khối collider sẽ được hạ xuống nửa
+        // độ dày để mặt trên của nó trùng với hitPose thay vì đội linh kiện lên cao.
+        Vector3 surfacePosition = new Vector3(
             hitPose.position.x,
-            hitPose.position.y + (defaultBoardThickness * 0.5f),
+            hitPose.position.y,
             hitPose.position.z
         );
 
         // 3. TẠO NEO KHÔNG GIAN ĐỘC LẬP TẠI SCENE ROOT:
         GameObject anchorObj = new GameObject("Board_Anchor");
-        anchorObj.transform.position = center;
+        anchorObj.transform.position = surfacePosition;
         anchorObj.transform.rotation = rotation;
         anchorObj.transform.localScale = Vector3.one;
         anchorObj.transform.SetParent(null, true);
 
         ActiveBoardAnchor = anchorObj;
-        lockedWorldPos = center;
+        lockedWorldPos = surfacePosition;
         lockedWorldRot = rotation;
 
         // Keep content hidden until the native anchor and camera are tracking.
@@ -499,9 +502,9 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         // 4. Khởi tạo Prefab bàn mạch
         if (tableBoardPrefab != null)
         {
-            GameObject board = Instantiate(tableBoardPrefab, center, rotation);
+            GameObject board = Instantiate(tableBoardPrefab, surfacePosition, rotation);
             board.transform.SetParent(anchorObj.transform, true);
-            board.transform.localPosition = Vector3.zero;
+            board.transform.localPosition = Vector3.down * (defaultBoardThickness * 0.5f);
             board.transform.localRotation = Quaternion.identity;
             board.transform.localScale = new Vector3(defaultBoardWidth, defaultBoardThickness, defaultBoardDepth);
             board.name = "ActiveCircuitBoard";
@@ -514,11 +517,11 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         {
             GameObject board = GameObject.CreatePrimitive(PrimitiveType.Cube);
             board.name = "ActiveCircuitBoard";
-            board.transform.position = center;
+            board.transform.position = surfacePosition;
             board.transform.rotation = rotation;
             board.transform.localScale = new Vector3(defaultBoardWidth, defaultBoardThickness, defaultBoardDepth);
             board.transform.SetParent(anchorObj.transform, true);
-            board.transform.localPosition = Vector3.zero;
+            board.transform.localPosition = Vector3.down * (defaultBoardThickness * 0.5f);
             board.transform.localRotation = Quaternion.identity;
 
             Renderer rend = board.GetComponent<Renderer>();
@@ -531,6 +534,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         }
 
         try { ActiveBoard.tag = "CircuitBoard"; } catch { }
+        SetPlacementSurfaceVisuals(showPlacementSurface);
 
         // 5. Ẩn UI hướng dẫn ban đầu và tâm ngắm
         if (spatialCalibrationUI != null) spatialCalibrationUI.SetActive(false);
@@ -542,8 +546,27 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         ShowFineTuneToolbar();
         if (floatingHUD != null)
             floatingHUD.ShowWarning("Đang neo bàn mạch", "Giữ camera hướng về mặt bàn");
-        CreateARAnchor(new Pose(center, rotation));
-        Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã đặt bàn mạch chính diện. Pinch nút xoay trái/phải để chỉnh góc mặt bàn.");
+        CreateARAnchor(new Pose(surfacePosition, rotation));
+        Debug.Log("<color=green>[TwoPointSpatialCalibrator]</color> Đã neo vùng đặt linh kiện vô hình đúng trên mặt phẳng thật.");
+    }
+
+    /// <summary>
+    /// Chỉ thay đổi phần hiển thị. Collider và AR anchor luôn được giữ lại để
+    /// raycast, kéo thả, chống chồng lấn và nối dây tiếp tục hoạt động bình thường.
+    /// </summary>
+    private void SetPlacementSurfaceVisuals(bool visible)
+    {
+        if (ActiveBoard == null) return;
+
+        foreach (Renderer renderer in ActiveBoard.GetComponentsInChildren<Renderer>(true))
+        {
+            renderer.enabled = visible;
+        }
+
+        foreach (LineRenderer line in ActiveBoard.GetComponentsInChildren<LineRenderer>(true))
+        {
+            line.enabled = visible;
+        }
     }
 
     /// <summary>
@@ -784,6 +807,12 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
     /// </summary>
     public void OpenResizeBoardToolbar()
     {
+        if (useDirectRealSurfacePlacement)
+        {
+            Debug.Log("[TwoPointSpatialCalibrator] Chế độ mặt thật không sử dụng kích thước bảng ảo.");
+            return;
+        }
+
         if (ActiveBoard == null)
         {
             GameObject b = GameObject.Find("ActiveCircuitBoard");
@@ -1273,6 +1302,7 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         if (ActiveBoard != null)
         {
             ActiveBoard.transform.localScale = new Vector3(defaultBoardWidth, defaultBoardThickness, defaultBoardDepth);
+            ActiveBoard.transform.localPosition = Vector3.down * (defaultBoardThickness * 0.5f);
         }
     }
 
@@ -1526,7 +1556,6 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
         isPlaced = false;
         isAdjusting = false;
         isWarningActive = false;
-        enabled = true;
 
         if (lockController != null)
         {
@@ -1538,6 +1567,22 @@ public class TwoPointSpatialCalibrator : MonoBehaviour
             planeManager.enabled = true;
             planeManager.requestedDetectionMode = PlaneDetectionMode.Horizontal;
         }
+
+        if (useDirectRealSurfacePlacement)
+        {
+            // Plane detection vẫn chạy nền để TapToPlaceController raycast vào đúng
+            // polygon của sàn/bàn thật, nhưng không hiện bước chọn mặt phẳng hay bảng ảo.
+            enabled = false;
+            if (spatialCalibrationUI != null) spatialCalibrationUI.SetActive(false);
+            if (reticleUI != null) reticleUI.SetActive(false);
+            if (holographicReticle != null) holographicReticle.Hide();
+            if (floatingHUD != null) floatingHUD.Hide();
+            SetText(string.Empty);
+            Debug.Log("<color=cyan>[TwoPointSpatialCalibrator]</color> Đã bật đặt vật trực tiếp trên mặt thật.");
+            return;
+        }
+
+        enabled = true;
 
         if (spatialCalibrationUI != null) spatialCalibrationUI.SetActive(true);
         // AR_Reticle cũ là ô đỏ giữa màn hình; giao diện quét dùng HolographicARReticle.

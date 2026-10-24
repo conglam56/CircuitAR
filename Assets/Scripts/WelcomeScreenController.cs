@@ -307,6 +307,8 @@ public class WelcomeScreenController : MonoBehaviour
     /// </summary>
     public void StopARAndCamera()
     {
+        var placement = FindFirstObjectByType<TapToPlaceController>();
+        if (placement != null) placement.EndSurfaceGuidance();
         if (arSession != null && arSession.enabled)
         {
             arSession.enabled = false;
@@ -443,13 +445,17 @@ public class WelcomeScreenController : MonoBehaviour
         // 3. KÍCH HOẠT CAMERA VÀ AR SESSION NGAY TẠI ĐÂY (CHỈ KHI VÀO CHỨC NĂNG)
         StartARAndCamera();
 
-        // 4. Kích hoạt căn chỉnh mặt phẳng mép bàn
+        // 4. Bật nhận diện bề mặt ngang chạy ngầm; không yêu cầu người dùng
+        // chọn hay căn chỉnh một tấm bảng ảo trước khi đặt linh kiện.
         if (spatialCalibrator != null)
         {
             spatialCalibrator.RestartCalibration();
         }
 
-        Debug.Log("<color=cyan>[WelcomeScreenController]</color> Đã vào thành công chế độ AR Pinch & Căn Chỉnh Mép Bàn!");
+        var placement = FindFirstObjectByType<TapToPlaceController>();
+        if (placement != null) placement.BeginSurfaceGuidance();
+
+        Debug.Log("<color=cyan>[WelcomeScreenController]</color> Đã vào chế độ AR đặt trực tiếp trên sàn/bàn thật!");
     }
 
     /// <summary>

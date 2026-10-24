@@ -283,14 +283,11 @@ public class WireConnectionController : MonoBehaviour
     /// </summary>
     private Vector2 GetCursorScreenPosition()
     {
-        if (buttonInteractor.debugPoint == null)
+        if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
         {
             return new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
         }
-
-        Canvas canvas = buttonInteractor.debugPoint.GetComponentInParent<Canvas>();
-        Camera uiCam = (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay) ? canvas.worldCamera : null;
-        return RectTransformUtility.WorldToScreenPoint(uiCam, buttonInteractor.debugPoint.position);
+        return buttonInteractor.CurrentScreenPos;
     }
 
     /// <summary>

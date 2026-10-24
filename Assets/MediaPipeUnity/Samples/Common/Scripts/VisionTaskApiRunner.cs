@@ -22,7 +22,8 @@ namespace Mediapipe.Unity.Sample
         {
             if (screen != null)
             {
-                screen.gameObject.SetActive(false);
+                // Chỉ ẩn ảnh camera CPU, không tắt cả cây chứa con trỏ ngón tay.
+                screen.SetImageVisible(false);
             }
 
             if (_coroutine != null)
@@ -36,20 +37,25 @@ namespace Mediapipe.Unity.Sample
         public override void Pause()
     {
       base.Pause();
-      ImageSourceProvider.ImageSource.Pause();
+      // Welcome.Awake pauses the runner before Bootstrap.Start has supplied an
+      // image source. Preserve the requested state without dereferencing null.
+      ImageSourceProvider.ImageSource?.Pause();
     }
 
     public override void Resume()
     {
       base.Resume();
-      var _ = StartCoroutine(ImageSourceProvider.ImageSource.Resume());
+      var source = ImageSourceProvider.ImageSource;
+      // Initial startup belongs to BaseRunner.Start/Play after Bootstrap is ready.
+      if (_coroutine != null && source != null) StartCoroutine(source.Resume());
     }
 
     public override void Stop()
     {
       base.Stop();
-      StopCoroutine(_coroutine);
-      ImageSourceProvider.ImageSource.Stop();
+      if (_coroutine != null) StopCoroutine(_coroutine);
+      _coroutine = null;
+      ImageSourceProvider.ImageSource?.Stop();
       taskApi?.Close();
       taskApi = null;
     }

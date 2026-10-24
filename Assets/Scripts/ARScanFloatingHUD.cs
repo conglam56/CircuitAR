@@ -32,6 +32,10 @@ public class ARScanFloatingHUD : MonoBehaviour
     private bool isVisible = false;
     private float currentAlpha = 0f;
     private ScanHUDState currentState = ScanHUDState.Hidden;
+    public bool IsVisible => isVisible;
+    public ScanHUDState CurrentState => currentState;
+    public string CurrentTitle => titleTMP != null ? titleTMP.text : string.Empty;
+    public string CurrentSubtitle => subtitleTMP != null ? subtitleTMP.text : string.Empty;
 
     private static Sprite roundedPillSprite;
     private static Sprite circleSprite;
@@ -165,6 +169,9 @@ public class ARScanFloatingHUD : MonoBehaviour
         titleTMP.font = WelcomeScreenController.GetSafeFont();
         titleTMP.text = "Đang quét tìm mặt bàn...";
         titleTMP.fontSize = 18;
+        titleTMP.enableAutoSizing = true;
+        titleTMP.fontSizeMin = 15;
+        titleTMP.fontSizeMax = 18;
         titleTMP.fontStyle = FontStyles.Bold;
         titleTMP.alignment = TextAlignmentOptions.Left;
         titleTMP.color = Color.white;
@@ -183,6 +190,9 @@ public class ARScanFloatingHUD : MonoBehaviour
         subtitleTMP.font = WelcomeScreenController.GetSafeFont();
         subtitleTMP.text = "Lia nhẹ camera quanh bề mặt phẳng";
         subtitleTMP.fontSize = 13;
+        subtitleTMP.enableAutoSizing = true;
+        subtitleTMP.fontSizeMin = 10;
+        subtitleTMP.fontSizeMax = 13;
         subtitleTMP.fontStyle = FontStyles.Normal;
         subtitleTMP.alignment = TextAlignmentOptions.Left;
         subtitleTMP.color = new Color(0.58f, 0.64f, 0.72f, 1f); // Slate-400
@@ -355,6 +365,19 @@ public class ARScanFloatingHUD : MonoBehaviour
     {
         isVisible = false;
         currentState = ScanHUDState.Hidden;
+    }
+
+    public void HideImmediate()
+    {
+        Hide();
+        currentAlpha = 0f;
+        if (canvasGroup != null) canvasGroup.alpha = 0f;
+        gameObject.SetActive(false);
+    }
+
+    private void OnDestroy()
+    {
+        if (Instance == this) Instance = null;
     }
 
     private void EnsureReady()

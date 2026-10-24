@@ -34,6 +34,22 @@ namespace Mediapipe.Unity
       Rotate(_imageSource.rotation.Reverse());
       ResetUvRect(RunningMode.Async);
       texture = imageSource.GetCurrentTexture();
+      // ARCameraBackground đã render ảnh đúng projection và thời điểm pose AR.
+      // RawImage của MediaPipe chỉ cần khi chạy webcam/video độc lập.
+      bool usesARCamera = imageSource is global::CustomARFrameBridge;
+      SetImageVisible(!usesARCamera);
+      if (usesARCamera)
+      {
+        Canvas canvas = GetComponentInParent<Canvas>();
+        if (canvas != null) canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+      }
+      gameObject.SetActive(true);
+    }
+
+    public void SetImageVisible(bool visible)
+    {
+      _screen.enabled = visible;
+      _screen.raycastTarget = false;
     }
 
     public void Resize(int width, int height)
