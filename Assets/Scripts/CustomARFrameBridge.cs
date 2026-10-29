@@ -19,8 +19,9 @@ public class CustomARFrameBridge : ImageSource
     private float _nextCpuFrameAt;
     private int _frameVersion;
     private XRCpuImage.AsyncConversion _cpuConversion;
-    private XRCpuImage _pendingCpuImage;
     private bool _cpuConversionPending;
+    private bool _inferenceBusy;
+    private int _inferenceFrameVersion;
     private Vector2Int _pendingDimensions;
     private long _cpuConversionStartedAt;
     public int FrameVersion { get { CompleteCpuConversionIfReady(); return _frameVersion; } }
@@ -65,8 +66,15 @@ public class CustomARFrameBridge : ImageSource
 
     public override IEnumerator Play()
     {
+        if (cameraManager == null)
+        {
+            Debug.LogError("[ARBridge] Cannot start without an AR camera manager.");
+            yield break;
+        }
+        DisposeCpuConversion();
         ClearDisplayMatrix();
         _acceptCpuFrames = true;
+        _inferenceBusy = false;
         _nextCpuFrameAt = 0f;
         _coordinateDiagnosticLogged = false;
         _coordinateFallbackDiagnosticLogged = false;
@@ -82,7 +90,8 @@ public class CustomARFrameBridge : ImageSource
         {
             Debug.LogError("[ARBridge] cameraManager dang NULL, khong the dang ky su kien!");
         }
-        yield return new WaitUntil(() => isPrepared);
+        yield return new WaitUntil(() => !_acceptCpuFrames || isPrepared);
+        if (!_acceptCpuFrames) yield break;
         Debug.Log("[ARBridge] isPrepared = true, Play() hoan tat.");
         _isPlaying = true;
     }
@@ -90,6 +99,7 @@ public class CustomARFrameBridge : ImageSource
     public override IEnumerator Resume()
     {
         _acceptCpuFrames = true;
+        _inferenceBusy = false;
         _nextCpuFrameAt = 0f;
         ResetPerformanceWindow();
         _isPlaying = true;
@@ -99,6 +109,7 @@ public class CustomARFrameBridge : ImageSource
     public override void Pause()
     {
         _acceptCpuFrames = false;
+        _inferenceBusy = false;
         DisposeCpuConversion();
         _isPlaying = false;
         ClearDisplayMatrix();
@@ -107,8 +118,10 @@ public class CustomARFrameBridge : ImageSource
     public override void Stop()
     {
         _acceptCpuFrames = false;
+        _inferenceBusy = false;
         DisposeCpuConversion();
         _isPlaying = false;
+        _frameVersion = 0;
         Interlocked.Exchange(ref _latestFrameReadyTimestamp, 0);
         ClearDisplayMatrix();
         if (cameraManager != null)
@@ -128,13 +141,25 @@ public class CustomARFrameBridge : ImageSource
         return _texture;
     }
 
+    // Inference owns a separate pixel copy, so one successor can be prefetched
+    // safely. Further conversions would compete with AR tracking and be dropped.
+    public void SetInferenceBusy(bool busy)
+    {
+        _inferenceBusy = busy;
+        _inferenceFrameVersion = _frameVersion;
+    }
+
+    public bool TryGetLatestCpuFrame(out Texture2D texture, out int version, out long readyAt)
+    {
+        CompleteCpuConversionIfReady();
+        texture = _texture;
+        version = _frameVersion;
+        readyAt = LatestFrameReadyTimestamp;
+        return _acceptCpuFrames && texture != null && version > 0;
+    }
+
     private void DisposeCpuConversion()
     {
-        if (_pendingCpuImage.valid)
-        {
-            _pendingCpuImage.Dispose();
-            _pendingCpuImage = default;
-        }
         if (!_cpuConversionPending) return;
         _cpuConversionPending = false;
         _cpuConversion.Dispose();
@@ -301,8 +326,10 @@ public class CustomARFrameBridge : ImageSource
         LogPerformanceIfDue();
         // Native AR background continues independently. Only the small, readable
         // inference copy is produced here; it is never uploaded then read back.
-        if (_cpuConversionPending || Time.unscaledTime < _nextCpuFrameAt) return;
-        _nextCpuFrameAt = Mathf.Max(_nextCpuFrameAt + 1f / CpuFramesPerSecond, Time.unscaledTime);
+        if ((_inferenceBusy && _frameVersion > _inferenceFrameVersion) || _cpuConversionPending ||
+            Time.unscaledTime < _nextCpuFrameAt) return;
+        // Do not burst to catch up after a slow frame or an application resume.
+        _nextCpuFrameAt = Time.unscaledTime + 1f / CpuFramesPerSecond;
 
         if (!cameraManager.TryAcquireLatestCpuImage(out XRCpuImage image))
         {
@@ -343,11 +370,15 @@ public class CustomARFrameBridge : ImageSource
             _pendingDimensions = inferenceDimensions;
             _cpuConversion = image.ConvertAsync(conversionParams);
             _cpuConversionPending = true;
-            _pendingCpuImage = image;
         }
         catch (System.Exception e)
         {
             Debug.LogError("[ARBridge] Loi khi Convert CPU texture: " + e.Message);
+        }
+        finally
+        {
+            // ConvertAsync retains its own image data. Return the scarce ARCore
+            // camera image immediately, including on conversion failure.
             image.Dispose();
         }
     }

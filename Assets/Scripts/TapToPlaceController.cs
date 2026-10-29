@@ -150,6 +150,11 @@ public class TapToPlaceController : MonoBehaviour
     private readonly Dictionary<GameObject, ARAnchor> objectAnchors = new Dictionary<GameObject, ARAnchor>();
     private readonly Dictionary<GameObject, int> dragAnchorRequests = new Dictionary<GameObject, int>();
     private int nextDragAnchorRequest;
+    private readonly List<BoxCollider> footprintBoxes = new List<BoxCollider>();
+    private readonly List<Renderer> footprintRenderers = new List<Renderer>();
+    private readonly Vector2[] candidateFootprintCorners = new Vector2[4];
+    private readonly Vector2[] placedFootprintCorners = new Vector2[4];
+    private float nextOverlapDiagnosticAt;
 
     [Header("--- QUẢN LÝ CHỌN LINH KIỆN ĐỂ XÓA & XOAY ---")]
     public GameObject SelectedComponent { get; private set; }
@@ -2672,6 +2677,12 @@ public class TapToPlaceController : MonoBehaviour
 
     public bool GetFootprintOBB(GameObject obj, Vector3 worldPos, Quaternion worldRot, out FootprintOBB2D obb, float margin = 0f)
     {
+        return GetFootprintOBB(obj, worldPos, worldRot, out obb, margin, new Vector2[4]);
+    }
+
+    private bool GetFootprintOBB(GameObject obj, Vector3 worldPos, Quaternion worldRot,
+        out FootprintOBB2D obb, float margin, Vector2[] corners)
+    {
         obb = default;
         if (obj == null) return false;
 
@@ -2681,13 +2692,13 @@ public class TapToPlaceController : MonoBehaviour
         Transform rootTransform = obj.transform;
 
         // Ưu tiên 1: Tìm BoxCollider thân đế (không phải cực Terminal)
-        BoxCollider[] boxColliders = obj.GetComponentsInChildren<BoxCollider>();
+        obj.GetComponentsInChildren(false, footprintBoxes);
         BoxCollider bodyBox = null;
-        for (int i = 0; i < boxColliders.Length; i++)
+        for (int i = 0; i < footprintBoxes.Count; i++)
         {
-            if (boxColliders[i] != null && !boxColliders[i].CompareTag("Terminal"))
+            if (footprintBoxes[i] != null && !footprintBoxes[i].CompareTag("Terminal"))
             {
-                bodyBox = boxColliders[i];
+                bodyBox = footprintBoxes[i];
                 break;
             }
         }
@@ -2728,23 +2739,23 @@ public class TapToPlaceController : MonoBehaviour
         else
         {
             // Ưu tiên 2: Thu thập Renderers phần chân đế tiếp xúc mặt bàn
-            Renderer[] renderers = obj.GetComponentsInChildren<Renderer>();
-            if (renderers != null && renderers.Length > 0)
+            obj.GetComponentsInChildren(false, footprintRenderers);
+            if (footprintRenderers.Count > 0)
             {
                 float minY = float.MaxValue;
-                for (int i = 0; i < renderers.Length; i++)
+                for (int i = 0; i < footprintRenderers.Count; i++)
                 {
-                    if (renderers[i] is LineRenderer) continue;
-                    if (renderers[i].bounds.min.y < minY) minY = renderers[i].bounds.min.y;
+                    if (footprintRenderers[i] is LineRenderer) continue;
+                    if (footprintRenderers[i].bounds.min.y < minY) minY = footprintRenderers[i].bounds.min.y;
                 }
 
                 float minX = float.MaxValue, maxX = float.MinValue;
                 float minZ = float.MaxValue, maxZ = float.MinValue;
                 bool hasValid = false;
 
-                for (int i = 0; i < renderers.Length; i++)
+                for (int i = 0; i < footprintRenderers.Count; i++)
                 {
-                    Renderer r = renderers[i];
+                    Renderer r = footprintRenderers[i];
                     if (r is LineRenderer) continue;
                     // Bỏ qua chi tiết nhô cao hơn chân đế 3.5cm (như cần gạt mở khóa K)
                     if (r.bounds.min.y > minY + 0.035f) continue;
@@ -2800,7 +2811,6 @@ public class TapToPlaceController : MonoBehaviour
 
         Vector2 center2D = new Vector2(worldPos.x, worldPos.z) + right2 * localCenter.x + fwd2 * localCenter.y;
 
-        Vector2[] corners = new Vector2[4];
         corners[0] = center2D - right2 * hx - fwd2 * hz;
         corners[1] = center2D + right2 * hx - fwd2 * hz;
         corners[2] = center2D + right2 * hx + fwd2 * hz;
@@ -2818,11 +2828,9 @@ public class TapToPlaceController : MonoBehaviour
     public static bool CheckOBBOverlapSAT(FootprintOBB2D a, FootprintOBB2D b, out int separatingAxisIndex)
     {
         separatingAxisIndex = -1;
-        Vector2[] axes = new Vector2[] { a.axis1, a.axis2, b.axis1, b.axis2 };
-
         for (int i = 0; i < 4; i++)
         {
-            Vector2 axis = axes[i];
+            Vector2 axis = i == 0 ? a.axis1 : i == 1 ? a.axis2 : i == 2 ? b.axis1 : b.axis2;
             if (axis.sqrMagnitude < 0.0001f) continue;
 
             float minA = float.MaxValue, maxA = float.MinValue;
@@ -2869,50 +2877,20 @@ public class TapToPlaceController : MonoBehaviour
 
         if (candidateObj == null) return false;
 
-        if (!GetFootprintOBB(candidateObj, candidatePosition, candidateRot, out FootprintOBB2D candidateOBB, effectiveMargin))
+        if (!GetFootprintOBB(candidateObj, candidatePosition, candidateRot,
+            out FootprintOBB2D candidateOBB, effectiveMargin, candidateFootprintCorners))
         {
             return false;
         }
 
-        // 2. Thu thập danh sách các linh kiện đã đặt đang hoạt động trên bàn
-        List<GameObject> activePlaced = new List<GameObject>();
+        // Placement and undo/redo both register their roots in this list. Avoid
+        // scanning every Transform in the AR scene on each preview/drag frame.
         for (int i = 0; i < placedObjectsHistory.Count; i++)
         {
-            GameObject p = placedObjectsHistory[i];
-            if (p != null && p.activeInHierarchy && p != candidateObj && p != ignoreObject)
-            {
-                if (previewAnchor != null && p == previewAnchor) continue;
-                if (!activePlaced.Contains(p)) activePlaced.Add(p);
-            }
-        }
-
-#if UNITY_2023_1_OR_NEWER
-        Transform[] allRoots = FindObjectsByType<Transform>(FindObjectsSortMode.None);
-#else
-        Transform[] allRoots = FindObjectsOfType<Transform>();
-#endif
-        for (int i = 0; i < allRoots.Length; i++)
-        {
-            Transform t = allRoots[i];
-            if (t != null && t.name.StartsWith("Placed_") && t.gameObject.activeInHierarchy)
-            {
-                if (t.parent != null && t.parent.name.StartsWith("Placed_")) continue;
-                if (t.gameObject == candidateObj || t.gameObject == ignoreObject) continue;
-                if (previewAnchor != null && (t.gameObject == previewAnchor || t.IsChildOf(previewAnchor.transform))) continue;
-                if (ignoreObject != null && t.IsChildOf(ignoreObject.transform)) continue;
-
-                if (!activePlaced.Contains(t.gameObject))
-                {
-                    activePlaced.Add(t.gameObject);
-                }
-            }
-        }
-
-        // 3. Kiểm tra va chạm OBB 2D / SAT với từng linh kiện đã đặt
-        for (int i = 0; i < activePlaced.Count; i++)
-        {
-            GameObject placed = activePlaced[i];
-            if (placed == null) continue;
+            GameObject placed = placedObjectsHistory[i];
+            if (placed == null || !placed.activeInHierarchy || placed == candidateObj || placed == ignoreObject ||
+                (previewAnchor != null && placed.transform.IsChildOf(previewAnchor.transform)) ||
+                (ignoreObject != null && placed.transform.IsChildOf(ignoreObject.transform))) continue;
 
             // Sàn và mặt bàn có thể chồng nhau theo XZ nhưng ở cao độ khác nhau.
             // Chỉ chống đè lên nhau giữa các vật trên cùng một bề mặt thực.
@@ -2927,14 +2905,19 @@ public class TapToPlaceController : MonoBehaviour
                 continue;
             }
 
-            if (GetFootprintOBB(placed, placed.transform.position, placed.transform.rotation, out FootprintOBB2D placedOBB, collisionSkin))
+            if (GetFootprintOBB(placed, placed.transform.position, placed.transform.rotation,
+                out FootprintOBB2D placedOBB, collisionSkin, placedFootprintCorners))
             {
                 if (CheckOBBOverlapSAT(candidateOBB, placedOBB, out int separatingAxisIndex))
                 {
-                    Debug.LogWarning($"<color=red>[CheckOverlap OVERLAP]</color> " +
-                        $"Candidate: [{candidateObj.name}] at ({candidatePosition.x:F3}, {candidatePosition.z:F3}), rotY={candidateRot.eulerAngles.y:F1}°, halfExtents=({candidateOBB.halfExtents.x * 100f:F1}cm, {candidateOBB.halfExtents.y * 100f:F1}cm) | " +
-                        $"Existing: [{placed.name}] at ({placed.transform.position.x:F3}, {placed.transform.position.z:F3}), rotY={placed.transform.rotation.eulerAngles.y:F1}°, halfExtents=({placedOBB.halfExtents.x * 100f:F1}cm, {placedOBB.halfExtents.y * 100f:F1}cm) | " +
-                        $"DistXZ={diffXZ.magnitude * 100f:F1}cm | All 4 SAT axes overlapped!");
+                    if (Debug.isDebugBuild && Time.unscaledTime >= nextOverlapDiagnosticAt)
+                    {
+                        nextOverlapDiagnosticAt = Time.unscaledTime + 1f;
+                        Debug.LogWarning($"<color=red>[CheckOverlap OVERLAP]</color> " +
+                            $"Candidate: [{candidateObj.name}] at ({candidatePosition.x:F3}, {candidatePosition.z:F3}), rotY={candidateRot.eulerAngles.y:F1}°, halfExtents=({candidateOBB.halfExtents.x * 100f:F1}cm, {candidateOBB.halfExtents.y * 100f:F1}cm) | " +
+                            $"Existing: [{placed.name}] at ({placed.transform.position.x:F3}, {placed.transform.position.z:F3}), rotY={placed.transform.rotation.eulerAngles.y:F1}°, halfExtents=({placedOBB.halfExtents.x * 100f:F1}cm, {placedOBB.halfExtents.y * 100f:F1}cm) | " +
+                            $"DistXZ={diffXZ.magnitude * 100f:F1}cm | All 4 SAT axes overlapped!");
+                    }
 
                     overlappingObject = placed;
                     return true;

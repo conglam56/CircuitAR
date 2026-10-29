@@ -108,11 +108,21 @@ public sealed class MeasuredDepthSurfaceProvider
 
         // Set this FIRST, including before enabling the subsystem. Generating measurements
         // must never restore ARCORE_ENVIRONMENT_DEPTH_ENABLED and half-clip the components.
-        ApplyMeasurementOnlyConfiguration(occlusion, false);
-        if (ARSession.state != ARSessionState.SessionTracking)
+        // Record the depth request during session initialization as well. The
+        // manager retains the request while support is Unknown and applies it as
+        // soon as ARCore reports support, allowing depth and planes to warm up
+        // together rather than reconfiguring depth only after tracking starts.
+        ApplyMeasurementOnlyConfiguration(occlusion, true);
+        var sessionState = ARSession.state;
+        if (sessionState != ARSessionState.SessionInitializing && sessionState != ARSessionState.SessionTracking)
             return false;
+        // SessionInitializing means the native session has started. Starting the
+        // already-configured occlusion subsystem now also warms up depth when its
+        // manager was disabled in the scene; no measurements are accepted yet.
         if (!occlusion.enabled)
             occlusion.enabled = true;
+        if (sessionState != ARSessionState.SessionTracking)
+            return false;
 
         // ARCore cannot reliably report depth support before its session has started.
         if (occlusion.descriptor == null)
@@ -127,7 +137,6 @@ public sealed class MeasuredDepthSurfaceProvider
         if (support != Supported.Supported)
             return false;
 
-        ApplyMeasurementOnlyConfiguration(occlusion, true);
         return IsReady;
     }
 
@@ -166,7 +175,10 @@ public sealed class MeasuredDepthSurfaceProvider
             return finitePatch.TryProject(camera.ScreenPointToRay(screenPoint),
                 camera.transform.position, Time.unscaledTime, out pose);
         }
-        nextQueryAt = Mathf.Max(nextQueryAt + 0.1f, Time.unscaledTime);
+        // Base the next measurement on the actual query time. Advancing an old
+        // deadline after a long frame allowed another eight native raycasts on
+        // the very next render frame, amplifying an existing hitch.
+        nextQueryAt = Time.unscaledTime + 0.1f;
         querySequence++;
         lastQueryFrame = frame;
         // Any failed fresh measurement must invalidate the old support, not keep

@@ -81,7 +81,7 @@ namespace Mediapipe.Unity.Sample
       _stopwatch.Stop();
     }
 
-    protected long GetCurrentTimestampMillisec() => _stopwatch.IsRunning ? _stopwatch.ElapsedTicks / TimeSpan.TicksPerMillisecond : -1;
+    protected long GetCurrentTimestampMillisec() => _stopwatch.IsRunning ? _stopwatch.ElapsedMilliseconds : -1;
 
     protected Bootstrap FindBootstrap()
     {

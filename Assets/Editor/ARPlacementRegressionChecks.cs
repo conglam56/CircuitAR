@@ -893,6 +893,8 @@ internal static class ARPlacementRegressionChecks
             ARContactRegressionChecks.Run(results);
             ARSurfaceGuidanceRegressionChecks.Run(results);
             ARSupportAndStabilityRegressionChecks.Run(results);
+            ARRuntimePerformanceRegressionChecks.Run(results);
+            WirePerformanceRegressionChecks.Run(results);
 
             string report = string.Join(Environment.NewLine, results);
             WriteReport("ar-placement-checks.txt", "ARPlacementRegressionChecks.txt", report);

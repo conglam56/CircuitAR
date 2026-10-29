@@ -89,6 +89,7 @@ internal static class ARCameraCoordinateRegressionChecks
         results.Add("PASS: index and thumb share one camera-frame mapping and stale session transforms are cleared");
         CheckDepthProbeHandMask(results, croppedPortrait);
         CheckAsyncCameraConversion(results);
+        CheckHandResultDispatch(results);
     }
 
     private sealed class AsyncCameraApi : XRCpuImage.Api, IDisposable
@@ -131,6 +132,9 @@ internal static class ARCameraCoordinateRegressionChecks
             Require(bridge.FrameVersion == 1 && bridge.isPrepared && api.DisposedCount == 1 && bridge.LatestFrameReadyTimestamp > 0,
                 "Only a complete asynchronous camera image may publish a frame, exactly once.");
             var texture = (Texture2D)bridge.GetCurrentTexture();
+            Require(bridge.TryGetLatestCpuFrame(out Texture2D snapshot, out int version, out long readyAt) &&
+                    snapshot == texture && version == 1 && readyAt == bridge.LatestFrameReadyTimestamp,
+                "Inference must acquire texture, version and capture time from one completed CPU-frame snapshot.");
             Require(texture.GetRawTextureData<byte>()[0] == 42 && texture.GetRawTextureData<byte>()[15] == 42 && bridge.FrameVersion == 1,
                 "Published CPU image bytes must survive disposal of the native request and cannot be republished.");
             api.State = XRCpuImage.AsyncConversionStatus.Processing;
@@ -138,6 +142,8 @@ internal static class ARCameraCoordinateRegressionChecks
             bridge.Pause();
             Require(api.DisposedCount == 2 && bridge.FrameVersion == 1,
                 "Pausing must cancel and release native conversion work without publishing a stale image.");
+            Require(!bridge.TryGetLatestCpuFrame(out _, out _, out _),
+                "Retaining the last texture during pause must not make it eligible for another inference.");
             api.State = XRCpuImage.AsyncConversionStatus.Failed;
             Queue();
             Require(bridge.FrameVersion == 1 && api.DisposedCount == 3,
@@ -148,6 +154,89 @@ internal static class ARCameraCoordinateRegressionChecks
         {
             bridge.Pause();
             if (bridge.GetCurrentTexture() != null) UnityEngine.Object.DestroyImmediate(bridge.GetCurrentTexture());
+        }
+    }
+
+    private static void CheckHandResultDispatch(List<string> results)
+    {
+        var previousSource = Mediapipe.Unity.Sample.ImageSourceProvider.ImageSource;
+        var scene = EditorSceneManager.NewPreviewScene();
+        var root = new GameObject("ARHandResultThreadFixture");
+        SceneManager.MoveGameObjectToScene(root, scene);
+        try
+        {
+            Mediapipe.Unity.Sample.ImageSourceProvider.SetCustomSource(null);
+            var runner = root.AddComponent<Mediapipe.Unity.Sample.HandLandmarkDetection.HandLandmarkerRunner>();
+            var callback = runner.GetType().GetMethod("OnHandLandmarkDetectionOutput", BindingFlags.Instance | BindingFlags.NonPublic);
+            var update = runner.GetType().GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic);
+            var applicationPause = runner.GetType().GetMethod("OnApplicationPause", BindingFlags.Instance | BindingFlags.NonPublic);
+            Set(runner, "_acceptResults", 1);
+            Set(runner, "_usesDirectArCpuInput", true);
+            int calls = 0;
+            int subscriberThread = 0;
+            var delivered = default(Mediapipe.Tasks.Vision.HandLandmarker.HandLandmarkerResult);
+            runner.OnHandResult += result =>
+            {
+                calls++;
+                subscriberThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                delivered = result;
+            };
+            var source = Mediapipe.Tasks.Vision.HandLandmarker.HandLandmarkerResult.Alloc(1);
+            var hand = Mediapipe.Tasks.Components.Containers.NormalizedLandmarks.Alloc(1);
+            hand.landmarks.Add(default);
+            source.handLandmarks.Add(hand);
+            void Send(Mediapipe.Tasks.Vision.HandLandmarker.HandLandmarkerResult result, long timestamp = 1L) =>
+                System.Threading.Tasks.Task.Run(() => callback.Invoke(runner, new object[] { result, null, timestamp })).GetAwaiter().GetResult();
+            Send(source);
+            Require(calls == 0 && (int)Get(runner, "_arCpuResultReady") == 1,
+                "The native callback must acknowledge completion without invoking Unity/event subscribers on its worker thread.");
+            hand.landmarks.Clear(); // The native result storage is reused after each callback.
+            source.handLandmarks.Clear();
+            update.Invoke(runner, null);
+            Require(calls == 1 && subscriberThread == System.Threading.Thread.CurrentThread.ManagedThreadId &&
+                    delivered.handLandmarks.Count == 1 && delivered.handLandmarks[0].landmarks.Count == 1,
+                "Main-thread delivery must own a deep copy that survives native result-list reuse.");
+            update.Invoke(runner, null);
+            Require(calls == 1, "A result snapshot must be delivered exactly once.");
+            Send(source);
+            Send(default);
+            update.Invoke(runner, null);
+            Require(calls == 2 && delivered.handLandmarks == null,
+                "The bounded callback slot must coalesce to the newest result, including a lost hand.");
+            Set(runner, "_minimumResultTimestamp", 10L);
+            Set(runner, "_arCpuResultReady", 0);
+            Send(source, 9L);
+            update.Invoke(runner, null);
+            Require(calls == 2 && (int)Get(runner, "_arCpuResultReady") == 1,
+                "A pre-resume inference must be discarded while still acknowledging its CPU-buffer completion.");
+            Send(source, 10L);
+            update.Invoke(runner, null);
+            Require(calls == 3, "A fresh inference at the resume cutoff must still be delivered.");
+            Send(source, 11L);
+            runner.Pause();
+            Send(source, 11L);
+            update.Invoke(runner, null);
+            Require(calls == 3 && !(bool)Get(runner, "_hasPendingResult"),
+                "Pausing must discard queued and late native results instead of replaying stale hand gestures.");
+            applicationPause.Invoke(runner, new object[] { true });
+            runner.Resume();
+            Require((bool)Get(runner, "_restartAfterApplicationPause"),
+                "A resume requested while backgrounded must defer native/camera startup.");
+            runner.Pause();
+            applicationPause.Invoke(runner, new object[] { false });
+            Require(runner.IsPaused && !(bool)Get(runner, "_restartAfterApplicationPause"),
+                "A later welcome-screen pause must cancel the pending foreground restart.");
+            runner.Stop();
+            runner.Stop();
+            Send(source, 100L);
+            Require(!(bool)Get(runner, "_hasPendingResult"), "Stopped runners must ignore late callbacks idempotently.");
+            results.Add("PASS: native hand callbacks deep-copy/coalesce into one main-thread result; pause/stop discard stale gestures and background resume is deferred/cancelable");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(root);
+            EditorSceneManager.ClosePreviewScene(scene);
+            Mediapipe.Unity.Sample.ImageSourceProvider.SetCustomSource(previousSource);
         }
     }
 

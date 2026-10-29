@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
@@ -5,6 +6,7 @@ using UnityEngine.XR.ARSubsystems;
 public class SinglePlaneLockController : MonoBehaviour
 {
     public ARPlaneManager planeManager;
+    private readonly List<Renderer> planeRenderers = new List<Renderer>(4);
 
     [Header("--- HIỂN THỊ MẶT PHẲNG AR ---")]
     [Tooltip("Chỉ bật để gỡ lỗi. Khi tắt, AR vẫn dò và bám mặt phẳng nhưng không vẽ lớp màu phủ lên thế giới thật.")]
@@ -86,12 +88,15 @@ public class SinglePlaneLockController : MonoBehaviour
     }
 
     // Keep ARFoundation trackables active; hide only their renderers.
-    private static void SetPlaneVisualVisible(ARPlane plane, bool visible)
+    private void SetPlaneVisualVisible(ARPlane plane, bool visible)
     {
         if (plane == null) return;
-        foreach (var renderer in plane.GetComponentsInChildren<Renderer>(true))
-            renderer.enabled = visible;
-        foreach (var line in plane.GetComponentsInChildren<LineRenderer>(true))
-            line.enabled = visible;
+        // Plane geometry can update every camera frame. Reuse the component list
+        // instead of allocating two arrays for every added/updated plane. A
+        // LineRenderer already derives from Renderer and is included in this list.
+        plane.GetComponentsInChildren<Renderer>(true, planeRenderers);
+        foreach (var renderer in planeRenderers)
+            if (renderer.enabled != visible) renderer.enabled = visible;
+        planeRenderers.Clear();
     }
 }

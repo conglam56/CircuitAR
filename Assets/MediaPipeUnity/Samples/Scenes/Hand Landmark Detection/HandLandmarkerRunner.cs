@@ -31,19 +31,171 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
         private long _arSubmittedFrameReadyTicks;
         private long _latestResultAtTicks;
         private long _latestResultSourceReadyTicks;
+        private const double InferenceTimeoutSeconds = 5d;
+        private readonly object _resultLock = new object();
+        private HandLandmarkerResult _pendingResult;
+        private HandLandmarkerResult _dispatchResult;
+        private bool _hasPendingResult;
+        private bool _pendingResultHasHands;
+        private int _acceptResults;
+        private long _minimumResultTimestamp;
+        private System.Exception _callbackException;
+        private bool _runStarted;
+        private bool _hasEverStarted;
+        private bool _applicationPaused;
+        private bool _restartAfterApplicationPause;
+        private bool _restartAfterEnable;
 
         public readonly HandLandmarkDetectionConfig config = new HandLandmarkDetectionConfig();
 
+        public override void Play()
+        {
+            if (!isActiveAndEnabled)
+            {
+                _restartAfterEnable = true;
+                return;
+            }
+            if (_applicationPaused)
+            {
+                _restartAfterApplicationPause = true;
+                return;
+            }
+            base.Play();
+            Interlocked.Exchange(ref _minimumResultTimestamp, 0);
+            _runStarted = true;
+            _hasEverStarted = true;
+        }
+
+        public override void Pause()
+        {
+            _restartAfterApplicationPause = false;
+            Volatile.Write(ref _acceptResults, 0);
+            base.Pause();
+            ClearPendingResults();
+        }
+
+        public override void Resume()
+        {
+            if (_applicationPaused)
+            {
+                _restartAfterApplicationPause = true;
+                return;
+            }
+            // Backgrounding closes GPU/native state. A later explicit resume
+            // must recreate that state, even if the welcome screen was open.
+            if (!_runStarted && _hasEverStarted) Play();
+            else
+            {
+                Interlocked.Exchange(ref _minimumResultTimestamp, GetCurrentTimestampMillisec());
+                ClearPendingResults();
+                if (taskApi != null) Volatile.Write(ref _acceptResults, 1);
+                base.Resume();
+            }
+        }
+
         public override void Stop()
         {
+            Volatile.Write(ref _acceptResults, 0);
+            _restartAfterApplicationPause = false;
+            _restartAfterEnable = false;
+            // Unstarted preview/disabled runners do not own the global camera.
+            // In particular their destruction must not stop another runner.
+            if (!_runStarted && taskApi == null && _textureFramePool == null)
+            {
+                isPaused = true;
+                ClearPendingResults();
+                return;
+            }
+            _runStarted = false;
+            var stoppedTask = taskApi;
             base.Stop();
             // Close() above has drained native callbacks before buffers are freed.
+            // Close alone does not release TaskRunner's native handle.
+            ((System.IDisposable)stoppedTask)?.Dispose();
             _arCpuFrameInFlight = null;
             _usesDirectArCpuInput = false;
             Volatile.Write(ref _arCpuResultReady, 0);
             ResetPerformanceWindow();
             _textureFramePool?.Dispose();
             _textureFramePool = null;
+            ClearPendingResults();
+            Interlocked.Exchange(ref _callbackException, null);
+        }
+
+        private void OnApplicationPause(bool paused)
+        {
+            if (_applicationPaused == paused) return;
+            _applicationPaused = paused;
+            if (paused)
+            {
+                bool restart = _runStarted && !isPaused;
+                Stop();
+                _restartAfterApplicationPause = restart;
+            }
+            else if (_restartAfterApplicationPause && isActiveAndEnabled)
+            {
+                _restartAfterApplicationPause = false;
+                Play();
+            }
+        }
+
+        private void OnDisable()
+        {
+            bool restart = _runStarted && !isPaused;
+            Stop();
+            _restartAfterEnable = restart;
+        }
+
+        private void OnEnable()
+        {
+            if (_restartAfterEnable)
+            {
+                _restartAfterEnable = false;
+                Play();
+            }
+        }
+
+        private void OnDestroy() => Stop();
+        private void OnApplicationQuit() => Stop();
+
+        private void ClearPendingResults()
+        {
+            lock (_resultLock) _hasPendingResult = false;
+        }
+
+        private void Update()
+        {
+            var callbackError = Interlocked.Exchange(ref _callbackException, null);
+            if (callbackError != null) Debug.LogException(callbackError);
+            if (isPaused || Volatile.Read(ref _acceptResults) == 0) return;
+
+            HandLandmarkerResult result;
+            lock (_resultLock)
+            {
+                if (!_hasPendingResult) return;
+                var reusable = _dispatchResult;
+                _dispatchResult = _pendingResult;
+                _pendingResult = reusable;
+                result = _pendingResultHasHands ? _dispatchResult : default;
+                _hasPendingResult = false;
+            }
+            PublishResult(result, false);
+        }
+
+        private void PublishResult(HandLandmarkerResult result, bool drawNow)
+        {
+            // Unity objects and event subscribers are touched only on the main
+            // thread. A subscriber failure must not cross a native callback.
+            try
+            {
+                if (_handLandmarkerResultAnnotationController != null)
+                {
+                    if (drawNow) _handLandmarkerResultAnnotationController.DrawNow(result);
+                    else _handLandmarkerResultAnnotationController.DrawLater(result);
+                }
+                OnHandResult?.Invoke(result);
+            }
+            catch (System.Exception error) { Debug.LogException(error); }
         }
 
         protected override IEnumerator Run()
@@ -60,9 +212,17 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
             yield return AssetLoader.PrepareAssetAsync(config.ModelPath);
             Debug.Log("[ARBridge] PrepareAssetAsync DA XONG (khong bi treo).");
 
+            var imageSource = ImageSourceProvider.ImageSource;
+            if (imageSource == null)
+            {
+                Debug.LogError("Cannot start hand tracking without an image source.");
+                yield break;
+            }
+            yield return new WaitWhile(() => isPaused);
+
             var options = config.GetHandLandmarkerOptions(config.RunningMode == Tasks.Vision.Core.RunningMode.LIVE_STREAM ? OnHandLandmarkDetectionOutput : null);
             taskApi = HandLandmarker.CreateFromOptions(options, GpuManager.GpuResources);
-            var imageSource = ImageSourceProvider.ImageSource;
+            Volatile.Write(ref _acceptResults, 1);
             _usesDirectArCpuInput = imageSource is CustomARFrameBridge;
             ResetPerformanceWindow();
 
@@ -71,6 +231,11 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
               (imageSource != null ? imageSource.GetType().Name : "NULL"));
 
             yield return imageSource.Play();
+
+            // Pause may cancel camera preparation while this coroutine waits
+            // for its first frame. Resume owns restarting camera acquisition.
+            while (isPaused) yield return null;
+            while (imageSource is CustomARFrameBridge && !imageSource.isPrepared) yield return null;
 
             if (!imageSource.isPrepared)
             {
@@ -84,9 +249,10 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                 TextureFormat.RGBA32, _usesDirectArCpuInput ? 2 : 10);
 
             // NOTE: The screen will be resized later, keeping the aspect ratio.
-            screen.Initialize(imageSource);
+            if (screen != null) screen.Initialize(imageSource);
 
-            SetupAnnotationController(_handLandmarkerResultAnnotationController, imageSource);
+            if (_handLandmarkerResultAnnotationController != null)
+                SetupAnnotationController(_handLandmarkerResultAnnotationController, imageSource);
 
             var transformationOptions = imageSource.GetTransformationOptions();
             var flipHorizontally = transformationOptions.flipHorizontally;
@@ -99,7 +265,7 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
             var result = HandLandmarkerResult.Alloc(options.numHands);
 
             // NOTE: we can share the GL context of the render thread with MediaPipe (for now, only on Android)
-            var canUseGpuImage = SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 && GpuManager.GpuResources != null;
+            var canUseGpuImage = !_usesDirectArCpuInput && SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 && GpuManager.GpuResources != null;
             using var glContext = canUseGpuImage ? GpuManager.GetGlContext() : null;
 
             int lastProcessedARFrame = -1;
@@ -122,18 +288,41 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                 {
                     if (Volatile.Read(ref _arCpuResultReady) == 0)
                     {
+                        if (AgeMilliseconds(Stopwatch.GetTimestamp(), Interlocked.Read(ref _arSubmittedAtTicks)) > InferenceTimeoutSeconds * 1000d)
+                        {
+                            // A live-stream implementation may drop an input.
+                            // Close the graph before recycling its CPU storage.
+                            Debug.LogWarning("Hand inference timed out; restarting the native task.");
+                            Play();
+                            yield break;
+                        }
                         yield return null;
                         continue;
                     }
                     _arCpuFrameInFlight.Release();
                     _arCpuFrameInFlight = null;
+                    arSource?.SetInferenceBusy(false);
                 }
 
                 // Never run inference twice on the same CPU camera copy.
-                if (arSource != null && arSource.FrameVersion == lastProcessedARFrame)
+                Texture2D arTexture = null;
+                int arFrameVersion = 0;
+                long arFrameReadyAt = 0;
+                if (arSource != null && (!arSource.TryGetLatestCpuFrame(out arTexture, out arFrameVersion, out arFrameReadyAt) ||
+                    arFrameVersion == lastProcessedARFrame))
                 {
                     yield return null;
                     continue;
+                }
+                if (arTexture != null && (_textureFramePool.textureWidth != arTexture.width || _textureFramePool.textureHeight != arTexture.height))
+                {
+                    // Camera configuration can change after tracking recovery.
+                    // There is no native inference in flight at this point.
+                    _textureFramePool.Dispose();
+                    _textureFramePool = new Experimental.TextureFramePool(arTexture.width, arTexture.height, TextureFormat.RGBA32, 2);
+                    if (screen != null) screen.Initialize(imageSource);
+                    if (_handLandmarkerResultAnnotationController != null)
+                        SetupAnnotationController(_handLandmarkerResultAnnotationController, imageSource);
                 }
                 if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
                 {
@@ -141,29 +330,21 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                     continue;
                 }
 
-                if (arSource != null) lastProcessedARFrame = arSource.FrameVersion;
+                if (arSource != null) lastProcessedARFrame = arFrameVersion;
                 // Build the input Image
                 Image image;
                 if (arSource != null)
                 {
-                    Interlocked.Exchange(ref _arSubmittedFrameReadyTicks, arSource.LatestFrameReadyTimestamp);
+                    Interlocked.Exchange(ref _arSubmittedFrameReadyTicks, arFrameReadyAt);
                     // The bridge already provides an unflipped RGBA CPU image.
                     // Its transformation options request no texture flips; only
                     // the existing MediaPipe rotation below is needed. Avoid the
                     // old CPU upload -> Blit -> GPU readback -> CPU upload path.
-                    var sourceTexture = (Texture2D)arSource.GetCurrentTexture();
-                    textureFrame.GetRawTextureData<byte>().CopyFrom(sourceTexture.GetRawTextureData<byte>());
+                    textureFrame.GetRawTextureData<byte>().CopyFrom(arTexture.GetRawTextureData<byte>());
                     image = textureFrame.BuildCPUImage();
-                    if (taskApi.runningMode == Tasks.Vision.Core.RunningMode.LIVE_STREAM)
-                    {
-                        Volatile.Write(ref _arCpuResultReady, 0);
-                        _arCpuFrameInFlight = textureFrame;
-                    }
-                    else
-                    {
-                        // Synchronous detection consumes it before the next loop.
-                        textureFrame.Release();
-                    }
+                    Volatile.Write(ref _arCpuResultReady, 0);
+                    _arCpuFrameInFlight = textureFrame;
+                    arSource.SetInferenceBusy(true);
                 }
                 else switch (config.ImageReadMode)
                 {
@@ -205,38 +386,45 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                     Interlocked.Exchange(ref _arSubmittedAtTicks, Stopwatch.GetTimestamp());
                     Interlocked.Increment(ref _perfSubmissions);
                 }
-                switch (taskApi.runningMode)
+                bool submissionFailed = false;
+                // Native Images wrap borrowed texture storage. Dispose the
+                // wrapper every frame; the retained TextureFrame owns the pixels
+                // until detection/callback completion.
+                using (image)
                 {
-                    case Tasks.Vision.Core.RunningMode.IMAGE:
-                        if (taskApi.TryDetect(image, imageProcessingOptions, ref result))
+                    try
+                    {
+                        switch (taskApi.runningMode)
                         {
-                            _handLandmarkerResultAnnotationController.DrawNow(result);
-                            OnHandResult?.Invoke(result);
+                            case Tasks.Vision.Core.RunningMode.IMAGE:
+                                PublishResult(taskApi.TryDetect(image, imageProcessingOptions, ref result) ? result : default, true);
+                                break;
+                            case Tasks.Vision.Core.RunningMode.VIDEO:
+                                PublishResult(taskApi.TryDetectForVideo(image, GetCurrentTimestampMillisec(), imageProcessingOptions, ref result) ? result : default, true);
+                                break;
+                            case Tasks.Vision.Core.RunningMode.LIVE_STREAM:
+                                taskApi.DetectAsync(image, GetCurrentTimestampMillisec(), imageProcessingOptions);
+                                break;
                         }
-                        else
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(default);
-                            OnHandResult?.Invoke(default);
-                        }
-                        break;
-                    case Tasks.Vision.Core.RunningMode.VIDEO:
-                        if (taskApi.TryDetectForVideo(image, GetCurrentTimestampMillisec(), imageProcessingOptions, ref result))
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(result);
-                            OnHandResult?.Invoke(result);
-                        }
-                        else
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(default);
-                            OnHandResult?.Invoke(default);
-                        }
-                        break;
-                    case Tasks.Vision.Core.RunningMode.LIVE_STREAM:
-                        taskApi.DetectAsync(image, GetCurrentTimestampMillisec(), imageProcessingOptions);
-                        break;
+                    }
+                    catch (System.Exception error)
+                    {
+                        Debug.LogException(error);
+                        submissionFailed = true;
+                    }
+                }
+                if (submissionFailed)
+                {
+                    Play();
+                    yield break;
                 }
                 if (arSource != null && taskApi.runningMode != Tasks.Vision.Core.RunningMode.LIVE_STREAM)
+                {
                     RecordArCpuResult();
+                    _arCpuFrameInFlight.Release();
+                    _arCpuFrameInFlight = null;
+                    arSource.SetInferenceBusy(false);
+                }
             }
         }
 
@@ -302,9 +490,16 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
             if (_usesDirectArCpuInput) RecordArCpuResult();
             try
             {
-                _handLandmarkerResultAnnotationController.DrawLater(result);
-                OnHandResult?.Invoke(result);
+                if (Volatile.Read(ref _acceptResults) == 0 || timestamp < Interlocked.Read(ref _minimumResultTimestamp)) return;
+                lock (_resultLock)
+                {
+                    if (Volatile.Read(ref _acceptResults) == 0 || timestamp < Interlocked.Read(ref _minimumResultTimestamp)) return;
+                    _pendingResultHasHands = result.handLandmarks != null;
+                    if (_pendingResultHasHands) result.CloneTo(ref _pendingResult);
+                    _hasPendingResult = true;
+                }
             }
+            catch (System.Exception error) { Interlocked.Exchange(ref _callbackException, error); }
             finally
             {
                 if (_usesDirectArCpuInput) Volatile.Write(ref _arCpuResultReady, 1);

@@ -132,6 +132,22 @@ namespace Mediapipe.Unity.Sample
 
         private void OnApplicationQuit()
         {
+            // Unity does not order OnApplicationQuit across objects. Close all
+            // native graphs before releasing the GPU/logging services they use.
+            bool runnersStopped = true;
+            foreach (var runner in Object.FindObjectsByType<BaseRunner>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None))
+            {
+                try { runner.Stop(); }
+                catch (System.Exception exception)
+                {
+                    runnersStopped = false;
+                    Debug.LogException(exception);
+                }
+            }
+            // On process exit the OS can reclaim these global resources. Do not
+            // free them under a graph whose shutdown failed.
+            if (!runnersStopped) return;
             GpuManager.Shutdown();
 
             if (_isGlogInitialized)

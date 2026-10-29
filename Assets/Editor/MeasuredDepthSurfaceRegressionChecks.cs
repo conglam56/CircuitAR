@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
@@ -221,6 +222,39 @@ internal static class MeasuredDepthSurfaceRegressionChecks
             UnityEngine.Object.DestroyImmediate(fixture);
         }
         results.Add("PASS: depth measurements are requested with NoOcclusion, never automatic depth compositing");
+
+        var planeFixture = new GameObject("HiddenMeasuredPlaneFixture");
+        planeFixture.SetActive(false);
+        try
+        {
+            var controller = planeFixture.AddComponent<SinglePlaneLockController>();
+            controller.enabled = false;
+            var planeObject = new GameObject("TrackedPlane", typeof(ARPlane), typeof(MeshRenderer));
+            planeObject.transform.SetParent(planeFixture.transform, false);
+            var plane = planeObject.GetComponent<ARPlane>();
+            var mesh = planeObject.GetComponent<MeshRenderer>();
+            var boundaryObject = new GameObject("InactiveBoundary", typeof(LineRenderer));
+            boundaryObject.transform.SetParent(planeObject.transform, false);
+            boundaryObject.SetActive(false);
+            var boundary = boundaryObject.GetComponent<LineRenderer>();
+            planeFixture.SetActive(true);
+            var setVisibility = (Action<ARPlane, bool>)Delegate.CreateDelegate(typeof(Action<ARPlane, bool>), controller,
+                typeof(SinglePlaneLockController).GetMethod("SetPlaneVisualVisible", BindingFlags.Instance | BindingFlags.NonPublic));
+            setVisibility(plane, false);
+            Require(!mesh.enabled && !boundary.enabled && plane.enabled && plane.gameObject.activeInHierarchy &&
+                    !boundaryObject.activeSelf,
+                "Hiding a detected plane must include inactive child renderers without deactivating its measured tracking hierarchy.");
+            setVisibility(plane, false);
+            setVisibility(plane, true);
+            Require(mesh.enabled && boundary.enabled && plane.enabled && plane.gameObject.activeInHierarchy &&
+                    !boundaryObject.activeSelf,
+                "Repeated plane updates and debug visibility changes must preserve the tracked plane and child activation state.");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(planeFixture);
+        }
+        results.Add("PASS: plane visibility includes inactive boundary renderers while keeping measured trackables active");
     }
 
     private static List<Pose> Ring(Vector3 center, float radius, Quaternion rotation)

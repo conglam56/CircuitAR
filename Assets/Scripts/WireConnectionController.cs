@@ -100,6 +100,20 @@ public class WireConnectionController : MonoBehaviour
         public GameObject connectorB;
         public Color actualWireColor;
 
+        // Retain CPU buffers while dragging; rebuilding a tube must not allocate every frame.
+        [System.NonSerialized] public Vector3[] curvePoints;
+        [System.NonSerialized] public Vector3[] tangents;
+        [System.NonSerialized] public Vector3[] frameNormals;
+        [System.NonSerialized] public Vector3[] binormals;
+        [System.NonSerialized] public Vector3[] vertices;
+        [System.NonSerialized] public Vector3[] meshNormals;
+        [System.NonSerialized] public Vector2[] uvs;
+        [System.NonSerialized] public int[] triangles;
+        [System.NonSerialized] public Matrix4x4 lastTerminalAMatrix;
+        [System.NonSerialized] public Matrix4x4 lastTerminalBMatrix;
+        [System.NonSerialized] public Matrix4x4 lastWireMatrix;
+        [System.NonSerialized] public bool hasGeometry;
+
         public WireRecord(Transform a, Transform b, GameObject obj, MeshFilter mf, MeshRenderer mr, Mesh mesh, GameObject pA, GameObject pB, GameObject cA, GameObject cB, Color col)
         {
             terminalA = a;
@@ -180,9 +194,13 @@ public class WireConnectionController : MonoBehaviour
     private Camera mainCamera;
     private Transform firstSelectedTerminal = null;
     private Renderer firstSelectedRenderer = null;
-    private Color originalTerminalColor;
-    private bool hasOriginalColor = false;
+    private readonly MaterialPropertyBlock originalTerminalProperties = new MaterialPropertyBlock();
+    private readonly MaterialPropertyBlock highlightedTerminalProperties = new MaterialPropertyBlock();
     private Material runtimeDefaultMaterial = null;
+    private readonly HashSet<Material> ownedRuntimeMaterials = new HashSet<Material>();
+    private bool forceWireRefresh = true;
+    private int lastGeometrySettingsHash;
+    private float nextReferenceResolveTime;
 
 #if UNITY_EDITOR
     void Reset()
@@ -193,6 +211,7 @@ public class WireConnectionController : MonoBehaviour
     void OnValidate()
     {
         AutoAssignAssets();
+        forceWireRefresh = true;
     }
 
     private void AutoAssignAssets()
@@ -235,7 +254,11 @@ public class WireConnectionController : MonoBehaviour
         // Kiểm tra an toàn tham chiếu
         if (buttonInteractor == null || menuHUD == null)
         {
-            AutoResolveReferences();
+            if (Time.unscaledTime >= nextReferenceResolveTime)
+            {
+                AutoResolveReferences();
+                nextReferenceResolveTime = Time.unscaledTime + 1f;
+            }
             if (buttonInteractor == null || menuHUD == null) return;
         }
 
@@ -510,18 +533,19 @@ public class WireConnectionController : MonoBehaviour
         Color effectiveColor = DetectTerminalColor(startTerminal);
 
         // Cấu hình Material với độ bóng cách điện chân thực
-        Material mat = wireMaterial != null ? new Material(wireMaterial) : GetOrCreateRuntimeMaterial();
+        Material mat = CreateOwnedMaterial(wireMaterial != null ? wireMaterial : GetOrCreateRuntimeMaterial());
         if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", effectiveColor);
         else if (mat.HasProperty("_Color")) mat.color = effectiveColor;
         if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", 0.7f);
 
-        mr.material = mat;
+        mr.sharedMaterial = mat;
         mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
         mr.receiveShadows = true;
 
         Mesh wireMesh = new Mesh();
         wireMesh.name = "Dynamic_Wire_Tube";
-        mf.mesh = wireMesh;
+        wireMesh.MarkDynamic();
+        mf.sharedMesh = wireMesh;
 
         // Sinh 2 Pivot và 2 đầu giắc cắm bắp chuối ôm khít cọc
         Color colA = DetectTerminalColor(startTerminal);
@@ -532,6 +556,7 @@ public class WireConnectionController : MonoBehaviour
         // Lưu vào danh sách quản lý
         WireRecord record = new WireRecord(startTerminal, endTerminal, wireObj, mf, mr, wireMesh, pivotA, pivotB, connA, connB, effectiveColor);
         activeWires.Add(record);
+        forceWireRefresh = true;
 
         Terminal termA = startTerminal.GetComponent<Terminal>() ?? startTerminal.GetComponentInChildren<Terminal>();
         Terminal termB = endTerminal.GetComponent<Terminal>() ?? endTerminal.GetComponentInChildren<Terminal>();
@@ -599,11 +624,11 @@ public class WireConnectionController : MonoBehaviour
         sleeve.transform.localScale = new Vector3(sleeveRadius * 2f, sleeveHeight * 0.5f, sleeveRadius * 2f);
         sleeve.transform.localPosition = new Vector3(0, sleeveHeight * 0.5f, 0);
 
-        Material sleeveMat = new Material(wireMaterial != null ? wireMaterial : GetOrCreateRuntimeMaterial());
+        Material sleeveMat = CreateOwnedMaterial(wireMaterial != null ? wireMaterial : GetOrCreateRuntimeMaterial());
         if (sleeveMat.HasProperty("_BaseColor")) sleeveMat.SetColor("_BaseColor", plugColor);
         else if (sleeveMat.HasProperty("_Color")) sleeveMat.color = plugColor;
         if (sleeveMat.HasProperty("_Smoothness")) sleeveMat.SetFloat("_Smoothness", 0.75f);
-        sleeve.GetComponent<Renderer>().material = sleeveMat;
+        sleeve.GetComponent<Renderer>().sharedMaterial = sleeveMat;
 
         // 2. Vòng khuyên kim loại mạ vàng ở chân cắm (Gold Collar Ring)
         GameObject ring = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
@@ -617,19 +642,25 @@ public class WireConnectionController : MonoBehaviour
         ring.transform.localScale = new Vector3(ringRadius * 2f, ringHeight * 0.5f, ringRadius * 2f);
         ring.transform.localPosition = new Vector3(0, ringHeight * 0.5f, 0);
 
-        Material ringMat = new Material(sleeveMat);
+        Material ringMat = CreateOwnedMaterial(sleeveMat);
         Color goldColor = new Color(0.85f, 0.72f, 0.25f, 1f);
         if (ringMat.HasProperty("_BaseColor")) ringMat.SetColor("_BaseColor", goldColor);
         else if (ringMat.HasProperty("_Color")) ringMat.color = goldColor;
         if (ringMat.HasProperty("_Metallic")) ringMat.SetFloat("_Metallic", 0.95f);
         if (ringMat.HasProperty("_Smoothness")) ringMat.SetFloat("_Smoothness", 0.85f);
-        ring.GetComponent<Renderer>().material = ringMat;
+        ring.GetComponent<Renderer>().sharedMaterial = ringMat;
 
         return plugRoot;
     }
 
     // Quản lý các Node ngã rẽ trực quan (Junction Nodes) khi một cọc có từ 2 kết nối trở lên
     private readonly Dictionary<Transform, GameObject> activeJunctionNodes = new Dictionary<Transform, GameObject>();
+    private readonly Dictionary<Transform, List<WireRecord>> terminalWires = new Dictionary<Transform, List<WireRecord>>();
+    private readonly List<List<WireRecord>> terminalWireLists = new List<List<WireRecord>>();
+    private readonly Dictionary<Transform, TerminalJunctionInfo> junctionMap = new Dictionary<Transform, TerminalJunctionInfo>();
+    private readonly HashSet<Transform> currentBranchedTerminals = new HashSet<Transform>();
+    private readonly List<Transform> otherTerminals = new List<Transform>();
+    private readonly List<Transform> nodesToRemove = new List<Transform>();
 
     private struct TerminalJunctionInfo
     {
@@ -708,8 +739,10 @@ public class WireConnectionController : MonoBehaviour
         int N = Mathf.Max(16, curveSegments);
         int K = Mathf.Max(6, radialSegments);
 
-        Vector3[] curvePoints = new Vector3[N + 1];
-        Vector3[] tangents = new Vector3[N + 1];
+        bool topologyChanged = EnsureWireBuffers(wire, N, K);
+        topologyChanged |= wire.wireMesh.vertexCount != wire.vertices.Length;
+        Vector3[] curvePoints = wire.curvePoints;
+        Vector3[] tangents = wire.tangents;
 
         // Xác định điểm thực sự bắt đầu và kết thúc của đoạn uốn lượn chính
         // Nếu là nhánh phụ (không phải Primary), điểm bắt đầu/kết thúc chính là Junction Node
@@ -776,8 +809,8 @@ public class WireConnectionController : MonoBehaviour
 
 
         // 2. HỆ TRỤC TỌA ĐỘ QUAY (Parallel Transport Frame) chống xoắn vặn
-        Vector3[] normals = new Vector3[N + 1];
-        Vector3[] binormals = new Vector3[N + 1];
+        Vector3[] normals = wire.frameNormals;
+        Vector3[] binormals = wire.binormals;
 
         Vector3 initialUp = Mathf.Abs(Vector3.Dot(tangents[0], Vector3.up)) < 0.9f ? Vector3.up : Vector3.right;
         normals[0] = Vector3.Cross(tangents[0], initialUp).normalized;
@@ -791,10 +824,9 @@ public class WireConnectionController : MonoBehaviour
         }
 
         // 3. TẠO ĐỈNH, PHÁP TUYẾN VÀ UV
-        int vertCount = (N + 1) * (K + 1);
-        Vector3[] vertices = new Vector3[vertCount];
-        Vector3[] meshNormals = new Vector3[vertCount];
-        Vector2[] uvs = new Vector2[vertCount];
+        Vector3[] vertices = wire.vertices;
+        Vector3[] meshNormals = wire.meshNormals;
+        Vector2[] uvs = wire.uvs;
 
         float cumulativeDist = 0f;
         int vIdx = 0;
@@ -817,34 +849,12 @@ public class WireConnectionController : MonoBehaviour
             }
         }
 
-        // 4. TẠO TAM GIÁC MESH
-        int triCount = N * K * 6;
-        int[] triangles = new int[triCount];
-        int tIdx = 0;
-
-        for (int i = 0; i < N; i++)
-        {
-            for (int j = 0; j < K; j++)
-            {
-                int cur = i * (K + 1) + j;
-                int next = cur + (K + 1);
-
-                triangles[tIdx++] = cur;
-                triangles[tIdx++] = next;
-                triangles[tIdx++] = cur + 1;
-
-                triangles[tIdx++] = next;
-                triangles[tIdx++] = next + 1;
-                triangles[tIdx++] = cur + 1;
-            }
-        }
-
         // 5. CẬP NHẬT DỮ LIỆU MESH
-        wire.wireMesh.Clear();
+        if (topologyChanged) wire.wireMesh.Clear();
         wire.wireMesh.vertices = vertices;
         wire.wireMesh.normals = meshNormals;
         wire.wireMesh.uv = uvs;
-        wire.wireMesh.triangles = triangles;
+        if (topologyChanged) wire.wireMesh.triangles = wire.triangles;
         wire.wireMesh.RecalculateBounds();
 
         // 6. CẬP NHẬT VỊ TRÍ 2 GIẮC CẮM
@@ -891,12 +901,75 @@ public class WireConnectionController : MonoBehaviour
         }
     }
 
+    private static bool EnsureWireBuffers(WireRecord wire, int curveCount, int radialCount)
+    {
+        int vertexCount = (curveCount + 1) * (radialCount + 1);
+        int triangleCount = curveCount * radialCount * 6;
+        if (wire.curvePoints != null && wire.curvePoints.Length == curveCount + 1
+            && wire.vertices != null && wire.vertices.Length == vertexCount
+            && wire.triangles != null && wire.triangles.Length == triangleCount)
+            return false;
+
+        wire.curvePoints = new Vector3[curveCount + 1];
+        wire.tangents = new Vector3[curveCount + 1];
+        wire.frameNormals = new Vector3[curveCount + 1];
+        wire.binormals = new Vector3[curveCount + 1];
+        wire.vertices = new Vector3[vertexCount];
+        wire.meshNormals = new Vector3[vertexCount];
+        wire.uvs = new Vector2[vertexCount];
+        wire.triangles = new int[triangleCount];
+
+        int index = 0;
+        for (int i = 0; i < curveCount; i++)
+        {
+            for (int j = 0; j < radialCount; j++)
+            {
+                int current = i * (radialCount + 1) + j;
+                int next = current + radialCount + 1;
+                wire.triangles[index++] = current;
+                wire.triangles[index++] = next;
+                wire.triangles[index++] = current + 1;
+                wire.triangles[index++] = next;
+                wire.triangles[index++] = next + 1;
+                wire.triangles[index++] = current + 1;
+            }
+        }
+        return true;
+    }
+
+    private int GetGeometrySettingsHash()
+    {
+        unchecked
+        {
+            int hash = curveSegments;
+            hash = hash * 31 + radialSegments;
+            hash = hash * 31 + wireRadius.GetHashCode();
+            hash = hash * 31 + archHeight.GetHashCode();
+            hash = hash * 31 + archFactor.GetHashCode();
+            hash = hash * 31 + textureTilingPerMeter.GetHashCode();
+            hash = hash * 31 + useLabPlugStyle.GetHashCode();
+            hash = hash * 31 + connectorRotationOffsetA.GetHashCode();
+            return hash * 31 + connectorRotationOffsetB.GetHashCode();
+        }
+    }
+
+    private List<WireRecord> GetTerminalWireList(int index)
+    {
+        if (index == terminalWireLists.Count) terminalWireLists.Add(new List<WireRecord>());
+        List<WireRecord> list = terminalWireLists[index];
+        list.Clear();
+        return list;
+    }
+
     /// <summary>
     /// Cập nhật vị trí và hình dáng của toàn bộ các dây đang kết nối theo thời gian thực.
     /// Quản lý phân nhánh ngã rẽ (Junction) một cách deterministic ở tầng hiển thị, không chồng lấn mesh.
     /// </summary>
     private void UpdateActiveWirePositions()
     {
+        int settingsHash = GetGeometrySettingsHash();
+        bool needsRefresh = forceWireRefresh || settingsHash != lastGeometrySettingsHash;
+
         // 1. Dọn dẹp các dây không hợp lệ
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
@@ -904,9 +977,9 @@ public class WireConnectionController : MonoBehaviour
 
             if (wire.terminalA == null || wire.terminalB == null || wire.wireObject == null)
             {
-                if (wire.wireMesh != null) Destroy(wire.wireMesh);
-                if (wire.wireObject != null) Destroy(wire.wireObject);
+                DestroyWireResources(wire);
                 activeWires.RemoveAt(i);
+                needsRefresh = true;
                 continue;
             }
 
@@ -914,11 +987,34 @@ public class WireConnectionController : MonoBehaviour
             // during tracking recovery, without deleting connections or undo history.
             bool endpointsVisible = wire.terminalA.gameObject.activeInHierarchy
                 && wire.terminalB.gameObject.activeInHierarchy;
-            wire.wireObject.SetActive(endpointsVisible);
+            if (wire.wireObject.activeSelf != endpointsVisible)
+            {
+                wire.wireObject.SetActive(endpointsVisible);
+                needsRefresh = true;
+            }
+            if (!endpointsVisible) continue;
+
+            Matrix4x4 matrixA = wire.terminalA.localToWorldMatrix;
+            Matrix4x4 matrixB = wire.terminalB.localToWorldMatrix;
+            Matrix4x4 wireMatrix = wire.wireObject.transform.localToWorldMatrix;
+            if (!wire.hasGeometry || matrixA != wire.lastTerminalAMatrix
+                || matrixB != wire.lastTerminalBMatrix || wireMatrix != wire.lastWireMatrix)
+                needsRefresh = true;
+            wire.lastTerminalAMatrix = matrixA;
+            wire.lastTerminalBMatrix = matrixB;
+            wire.lastWireMatrix = wireMatrix;
+            wire.hasGeometry = true;
         }
 
+        // Static circuits need no mesh upload, junction rebuild, or temporary collections.
+        if (!needsRefresh) return;
+        forceWireRefresh = false;
+        lastGeometrySettingsHash = settingsHash;
+
         // 2. Gom nhóm các dây theo từng terminal
-        Dictionary<Transform, List<WireRecord>> terminalWires = new Dictionary<Transform, List<WireRecord>>();
+        terminalWires.Clear();
+        foreach (List<WireRecord> list in terminalWireLists) list.Clear();
+        int terminalListIndex = 0;
         for (int i = 0; i < activeWires.Count; i++)
         {
             var wire = activeWires[i];
@@ -926,22 +1022,22 @@ public class WireConnectionController : MonoBehaviour
 
             if (!terminalWires.TryGetValue(wire.terminalA, out var listA))
             {
-                listA = new List<WireRecord>();
+                listA = GetTerminalWireList(terminalListIndex++);
                 terminalWires[wire.terminalA] = listA;
             }
             listA.Add(wire);
 
             if (!terminalWires.TryGetValue(wire.terminalB, out var listB))
             {
-                listB = new List<WireRecord>();
+                listB = GetTerminalWireList(terminalListIndex++);
                 terminalWires[wire.terminalB] = listB;
             }
             listB.Add(wire);
         }
 
         // 3. Tính toán Junction Data cho các terminal có >= 2 dây kết nối
-        Dictionary<Transform, TerminalJunctionInfo> junctionMap = new Dictionary<Transform, TerminalJunctionInfo>();
-        HashSet<Transform> currentBranchedTerminals = new HashSet<Transform>();
+        junctionMap.Clear();
+        currentBranchedTerminals.Clear();
         float plugTopOffset = useLabPlugStyle ? LAB_PLUG_HEIGHT : 0.005f;
 
         foreach (var kvp in terminalWires)
@@ -955,7 +1051,8 @@ public class WireConnectionController : MonoBehaviour
             Vector3 termPlugPos = GetTerminalBaseAnchor(term) + Vector3.up * plugTopOffset;
 
             // Thu thập các terminal đối diện kết nối với cọc term (loại trừ trùng lặp và sắp xếp deterministic)
-            List<Transform> otherTerms = new List<Transform>();
+            List<Transform> otherTerms = otherTerminals;
+            otherTerms.Clear();
             for (int i = 0; i < wiresOnTerm.Count; i++)
             {
                 Transform other = (wiresOnTerm[i].terminalA == term) ? wiresOnTerm[i].terminalB : wiresOnTerm[i].terminalA;
@@ -1008,8 +1105,8 @@ public class WireConnectionController : MonoBehaviour
                 if (col != null) Destroy(col);
                 if (wiresContainer != null) nodeObj.transform.SetParent(wiresContainer, true);
 
-                Material nodeMat = wireMaterial != null ? new Material(wireMaterial) : GetOrCreateRuntimeMaterial();
-                nodeObj.GetComponent<Renderer>().material = nodeMat;
+                Material nodeMat = CreateOwnedMaterial(wireMaterial != null ? wireMaterial : GetOrCreateRuntimeMaterial());
+                nodeObj.GetComponent<Renderer>().sharedMaterial = nodeMat;
                 activeJunctionNodes[term] = nodeObj;
             }
 
@@ -1018,19 +1115,20 @@ public class WireConnectionController : MonoBehaviour
             nodeObj.SetActive(term.gameObject.activeInHierarchy);
 
             Color termColor = DetectTerminalColor(term);
-            Material rendMat = nodeObj.GetComponent<Renderer>().material;
+            Material rendMat = nodeObj.GetComponent<Renderer>().sharedMaterial;
             if (rendMat.HasProperty("_BaseColor")) rendMat.SetColor("_BaseColor", termColor);
             else if (rendMat.HasProperty("_Color")) rendMat.color = termColor;
             if (rendMat.HasProperty("_Smoothness")) rendMat.SetFloat("_Smoothness", 0.75f);
         }
 
         // Dọn dẹp các Junction Node không còn phân nhánh (< 2 dây)
-        List<Transform> toRemoveNodes = new List<Transform>();
+        List<Transform> toRemoveNodes = nodesToRemove;
+        toRemoveNodes.Clear();
         foreach (var kvp in activeJunctionNodes)
         {
             if (!currentBranchedTerminals.Contains(kvp.Key))
             {
-                if (kvp.Value != null) Destroy(kvp.Value);
+                DestroyOwnedObject(kvp.Value);
                 toRemoveNodes.Add(kvp.Key);
             }
         }
@@ -1083,15 +1181,9 @@ public class WireConnectionController : MonoBehaviour
 
             if (matchA || matchB || wire.terminalA == null || wire.terminalB == null)
             {
-                if (wire.wireMesh != null)
-                {
-                    Destroy(wire.wireMesh);
-                }
-                if (wire.wireObject != null)
-                {
-                    Destroy(wire.wireObject);
-                }
+                DestroyWireResources(wire);
                 activeWires.RemoveAt(i);
+                forceWireRefresh = true;
             }
         }
 
@@ -1118,22 +1210,18 @@ public class WireConnectionController : MonoBehaviour
 
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
-            Terminal termA = terminalA.GetComponent<Terminal>() ?? terminalA.GetComponentInChildren<Terminal>();
-            Terminal termB = terminalB.GetComponent<Terminal>() ?? terminalB.GetComponentInChildren<Terminal>();
-            if (termA != null && termB != null)
-            {
-                termA.DisconnectFrom(termB);
-            }
-
             var wire = activeWires[i];
             bool match = (wire.terminalA == terminalA && wire.terminalB == terminalB) ||
                          (wire.terminalA == terminalB && wire.terminalB == terminalA);
 
             if (match)
             {
-                if (wire.wireMesh != null) Destroy(wire.wireMesh);
-                if (wire.wireObject != null) Destroy(wire.wireObject);
+                Terminal termA = terminalA.GetComponent<Terminal>() ?? terminalA.GetComponentInChildren<Terminal>();
+                Terminal termB = terminalB.GetComponent<Terminal>() ?? terminalB.GetComponentInChildren<Terminal>();
+                if (termA != null && termB != null) termA.DisconnectFrom(termB);
+                DestroyWireResources(wire);
                 activeWires.RemoveAt(i);
+                forceWireRefresh = true;
                 UpdateActiveWirePositions();
                 return true;
             }
@@ -1167,6 +1255,7 @@ public class WireConnectionController : MonoBehaviour
     /// </summary>
     public void UpdateActiveWirePositionsExternal()
     {
+        forceWireRefresh = true;
         UpdateActiveWirePositions();
     }
 
@@ -1178,39 +1267,27 @@ public class WireConnectionController : MonoBehaviour
         if (highlight)
         {
             firstSelectedRenderer = terminal.GetComponent<Renderer>();
-            if (firstSelectedRenderer != null && firstSelectedRenderer.material != null)
+            if (firstSelectedRenderer != null && firstSelectedRenderer.sharedMaterial != null)
             {
-                Material mat = firstSelectedRenderer.material;
+                Material mat = firstSelectedRenderer.sharedMaterial;
+                firstSelectedRenderer.GetPropertyBlock(originalTerminalProperties);
+                firstSelectedRenderer.GetPropertyBlock(highlightedTerminalProperties);
                 if (mat.HasProperty("_BaseColor"))
                 {
-                    originalTerminalColor = mat.GetColor("_BaseColor");
-                    hasOriginalColor = true;
-                    mat.SetColor("_BaseColor", highlightColor);
+                    highlightedTerminalProperties.SetColor("_BaseColor", highlightColor);
                 }
                 else if (mat.HasProperty("_Color"))
                 {
-                    originalTerminalColor = mat.color;
-                    hasOriginalColor = true;
-                    mat.color = highlightColor;
+                    highlightedTerminalProperties.SetColor("_Color", highlightColor);
                 }
+                firstSelectedRenderer.SetPropertyBlock(highlightedTerminalProperties);
             }
         }
         else
         {
-            if (firstSelectedRenderer != null && hasOriginalColor && firstSelectedRenderer.material != null)
-            {
-                Material mat = firstSelectedRenderer.material;
-                if (mat.HasProperty("_BaseColor"))
-                {
-                    mat.SetColor("_BaseColor", originalTerminalColor);
-                }
-                else if (mat.HasProperty("_Color"))
-                {
-                    mat.color = originalTerminalColor;
-                }
-            }
+            if (firstSelectedRenderer != null)
+                firstSelectedRenderer.SetPropertyBlock(originalTerminalProperties);
             firstSelectedRenderer = null;
-            hasOriginalColor = false;
         }
     }
 
@@ -1265,14 +1342,7 @@ public class WireConnectionController : MonoBehaviour
     {
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
-            if (activeWires[i].wireMesh != null)
-            {
-                Destroy(activeWires[i].wireMesh);
-            }
-            if (activeWires[i].wireObject != null)
-            {
-                Destroy(activeWires[i].wireObject);
-            }
+            DestroyWireResources(activeWires[i]);
         }
         foreach (var w in activeWires)
         {
@@ -1284,6 +1354,8 @@ public class WireConnectionController : MonoBehaviour
             }
         }
         activeWires.Clear();
+        forceWireRefresh = true;
+        UpdateActiveWirePositions();
         ClearJunctionNodes();
         CancelSelection();
         Debug.Log("[WireConnection] Đã xoá toàn bộ dây nối.");
@@ -1291,16 +1363,50 @@ public class WireConnectionController : MonoBehaviour
 
     void OnDestroy()
     {
+        CancelSelection();
         ClearJunctionNodes();
+        foreach (var wire in activeWires) DestroyWireResources(wire);
+        activeWires.Clear();
+        foreach (Material material in ownedRuntimeMaterials)
+        {
+            if (material != null) Destroy(material);
+        }
+        ownedRuntimeMaterials.Clear();
     }
 
     private void ClearJunctionNodes()
     {
         foreach (var kvp in activeJunctionNodes)
         {
-            if (kvp.Value != null) Destroy(kvp.Value);
+            DestroyOwnedObject(kvp.Value);
         }
         activeJunctionNodes.Clear();
+    }
+
+    private Material CreateOwnedMaterial(Material source)
+    {
+        Material material = new Material(source);
+        ownedRuntimeMaterials.Add(material);
+        return material;
+    }
+
+    private void DestroyWireResources(WireRecord wire)
+    {
+        if (wire.wireMesh != null) Destroy(wire.wireMesh);
+        DestroyOwnedObject(wire.wireObject);
+    }
+
+    private void DestroyOwnedObject(GameObject obj)
+    {
+        if (obj == null) return;
+        foreach (Renderer renderer in obj.GetComponentsInChildren<Renderer>(true))
+        {
+            foreach (Material material in renderer.sharedMaterials)
+            {
+                if (material != null && ownedRuntimeMaterials.Remove(material)) Destroy(material);
+            }
+        }
+        Destroy(obj);
     }
 
     /// <summary>
@@ -1422,6 +1528,7 @@ public class WireConnectionController : MonoBehaviour
         if (shader == null) shader = Shader.Find("Mobile/Diffuse");
 
         runtimeDefaultMaterial = new Material(shader);
+        ownedRuntimeMaterials.Add(runtimeDefaultMaterial);
         return runtimeDefaultMaterial;
     }
 }
