@@ -65,6 +65,28 @@ internal static class ARSurfaceGuidanceRegressionChecks
                 "SessionTracking alone must not turn the readiness pill green without measured support and native-anchor readiness.");
             results.Add("PASS: readiness guidance cannot claim ready from SessionTracking alone");
 
+            var wireController = Child(root, "Wire Mode").AddComponent<WireConnectionController>();
+            wireController.enabled = false;
+            controller.wireConnectionController = wireController;
+            controller.enableInstantPlacement = true;
+            Refresh();
+            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Detected,
+                "Instant placement should show the readiness pill before entering wire mode.");
+            Set(controller, "nextSurfaceGuidanceAt", Time.unscaledTime + 5f);
+            wireController.IsWireMode = true;
+            Call(controller, "RefreshSurfaceGuidance");
+            Require(!hud.IsVisible && !hud.gameObject.activeSelf,
+                "Entering wire mode must hide the readiness pill even during the refresh cooldown.");
+            wireController.CurrentSubMode = WireConnectionController.WireSubMode.Delete;
+            Call(controller, "RefreshSurfaceGuidance");
+            Require(!hud.gameObject.activeSelf, "Switching to wire deletion must keep the placement pill hidden.");
+            wireController.IsWireMode = false;
+            Call(controller, "RefreshSurfaceGuidance");
+            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Detected,
+                "Exiting wire mode must restore instant placement guidance on the next refresh.");
+            controller.enableInstantPlacement = false;
+            results.Add("PASS: wire mode hides placement guidance immediately and restores it on exit");
+
             var template = GameObject.CreatePrimitive(PrimitiveType.Cube);
             template.name = "GuidanceComponent";
             template.transform.SetParent(root.transform, false);

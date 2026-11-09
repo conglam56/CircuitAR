@@ -2378,7 +2378,16 @@ public class TapToPlaceController : MonoBehaviour
 
     private void RefreshSurfaceGuidance()
     {
-        if (!surfaceGuidanceEnabled || Time.unscaledTime < nextSurfaceGuidanceAt) return;
+        if (!surfaceGuidanceEnabled) return;
+        // The wire mode badge owns the top of the screen until the user exits.
+        if (wireConnectionController != null && wireConnectionController.IsWireMode)
+        {
+            if (surfaceGuidanceHUD != null && surfaceGuidanceHUD.gameObject.activeSelf)
+                surfaceGuidanceHUD.HideImmediate();
+            nextSurfaceGuidanceAt = 0f;
+            return;
+        }
+        if (Time.unscaledTime < nextSurfaceGuidanceAt) return;
         nextSurfaceGuidanceAt = Time.unscaledTime + 0.2f;
         if (surfaceGuidanceHUD == null) surfaceGuidanceHUD = ARScanFloatingHUD.EnsureInstance();
         LogAnchorStateIfDue();
