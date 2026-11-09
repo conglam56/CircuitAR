@@ -28,6 +28,7 @@ internal static class ARSurfaceGuidanceRegressionChecks
             var input = Child(root, "Input").AddComponent<ButtonInteractor>();
             input.enabled = false;
             controller = Child(root, "Placement").AddComponent<TapToPlaceController>();
+            controller.enableInstantPlacement = false; // Legacy measured-surface guidance remains supported.
             controller.enabled = false;
             controller.buttonInteractor = input;
             var camera = Child(root, "Camera").AddComponent<Camera>();

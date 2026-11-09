@@ -32,6 +32,11 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
         private long _latestResultAtTicks;
         private long _latestResultSourceReadyTicks;
 
+        // Stopwatch-domain source time for the result currently being delivered.
+        // A callback's arrival must not make an old inference fresh again.
+        // Zero identifies sources without an AR CPU capture timestamp.
+        public long LatestResultSourceReadyTimestamp => Interlocked.Read(ref _latestResultSourceReadyTicks);
+
         public readonly HandLandmarkDetectionConfig config = new HandLandmarkDetectionConfig();
 
         public override void Stop()
@@ -86,7 +91,21 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
             // NOTE: The screen will be resized later, keeping the aspect ratio.
             screen.Initialize(imageSource);
 
-            SetupAnnotationController(_handLandmarkerResultAnnotationController, imageSource);
+            if (_handLandmarkerResultAnnotationController != null)
+            {
+                if (_usesDirectArCpuInput)
+                {
+                    // AR presents one white cursor. Avoid cloning and rebuilding
+                    // the sample's 21-point skeleton for every result as well.
+                    _handLandmarkerResultAnnotationController.DrawNow(default);
+                    _handLandmarkerResultAnnotationController.enabled = false;
+                }
+                else
+                {
+                    _handLandmarkerResultAnnotationController.enabled = true;
+                    SetupAnnotationController(_handLandmarkerResultAnnotationController, imageSource);
+                }
+            }
 
             var transformationOptions = imageSource.GetTransformationOptions();
             var flipHorizontally = transformationOptions.flipHorizontally;
@@ -205,39 +224,42 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                     Interlocked.Exchange(ref _arSubmittedAtTicks, Stopwatch.GetTimestamp());
                     Interlocked.Increment(ref _perfSubmissions);
                 }
-                switch (taskApi.runningMode)
+                try
                 {
-                    case Tasks.Vision.Core.RunningMode.IMAGE:
-                        if (taskApi.TryDetect(image, imageProcessingOptions, ref result))
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(result);
-                            OnHandResult?.Invoke(result);
-                        }
-                        else
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(default);
-                            OnHandResult?.Invoke(default);
-                        }
-                        break;
-                    case Tasks.Vision.Core.RunningMode.VIDEO:
-                        if (taskApi.TryDetectForVideo(image, GetCurrentTimestampMillisec(), imageProcessingOptions, ref result))
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(result);
-                            OnHandResult?.Invoke(result);
-                        }
-                        else
-                        {
-                            _handLandmarkerResultAnnotationController.DrawNow(default);
-                            OnHandResult?.Invoke(default);
-                        }
-                        break;
-                    case Tasks.Vision.Core.RunningMode.LIVE_STREAM:
-                        taskApi.DetectAsync(image, GetCurrentTimestampMillisec(), imageProcessingOptions);
-                        break;
+                    switch (taskApi.runningMode)
+                    {
+                        case Tasks.Vision.Core.RunningMode.IMAGE:
+                            PublishResultNow(taskApi.TryDetect(image, imageProcessingOptions, ref result) ? result : default);
+                            break;
+                        case Tasks.Vision.Core.RunningMode.VIDEO:
+                            PublishResultNow(taskApi.TryDetectForVideo(image, GetCurrentTimestampMillisec(), imageProcessingOptions, ref result)
+                                ? result : default);
+                            break;
+                        case Tasks.Vision.Core.RunningMode.LIVE_STREAM:
+                            taskApi.DetectAsync(image, GetCurrentTimestampMillisec(), imageProcessingOptions);
+                            break;
+                    }
                 }
-                if (arSource != null && taskApi.runningMode != Tasks.Vision.Core.RunningMode.LIVE_STREAM)
-                    RecordArCpuResult();
+                finally
+                {
+                    // Packet.CreateImage[At] moves/disposes this wrapper on
+                    // success. Dispose also covers failures before that handoff;
+                    // the CPU texture frame remains owned until its callback.
+                    image.Dispose();
+                }
             }
+        }
+
+        private void PublishResultNow(HandLandmarkerResult result)
+        {
+            if (_usesDirectArCpuInput) RecordArCpuResult();
+            OnHandResult?.Invoke(result);
+            DrawResultNow(result);
+        }
+
+        private void DrawResultNow(HandLandmarkerResult result)
+        {
+            if (!_usesDirectArCpuInput) _handLandmarkerResultAnnotationController?.DrawNow(result);
         }
 
         private void ResetPerformanceWindow()
@@ -302,8 +324,8 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
             if (_usesDirectArCpuInput) RecordArCpuResult();
             try
             {
-                _handLandmarkerResultAnnotationController.DrawLater(result);
                 OnHandResult?.Invoke(result);
+                if (!_usesDirectArCpuInput) _handLandmarkerResultAnnotationController?.DrawLater(result);
             }
             finally
             {

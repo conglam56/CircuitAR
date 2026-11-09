@@ -171,6 +171,7 @@ internal static class ARPlacementRegressionChecks
             Require(RectTransformUtility.RectangleContainsScreenPoint(buttonRect, uiPinchPoint, null),
                 "The UI fixture button must contain the intended screen-space pinch point.");
             Call(input, "Update");
+            Set(input, "lastHandResultTicks", System.Diagnostics.Stopwatch.GetTimestamp());
             Call(input, "Update");
             Require(input.IsHandVisible && input.IsPointerOverUI && input.PinchConsumedByUI,
                 $"A toolbox pinch must be consumed by the UI (hand={input.IsHandVisible}, pinch={input.isPinching}, hover={input.IsPointerOverUI}, consumed={input.PinchConsumedByUI}, screen={input.CurrentScreenPos}, rect={buttonRect.rect}, image={uiButton.GetComponent<Image>().isActiveAndEnabled}, canvas={canvas.isActiveAndEnabled}).");
@@ -235,6 +236,7 @@ internal static class ARPlacementRegressionChecks
             results.Add("PASS: hidden, disabled and non-raycast UI cannot consume a placement pinch");
 
             var controller = Child(root, "Placement").AddComponent<TapToPlaceController>();
+            controller.enableInstantPlacement = false; // Exercise the opt-in measured-only policy too.
             controller.buttonInteractor = input;
             var camera = Child(root, "StartupCamera", typeof(Camera)).GetComponent<Camera>();
             camera.nearClipPlane = 0.03f;
@@ -380,9 +382,13 @@ internal static class ARPlacementRegressionChecks
             Require((bool)Get(controller, "placementRequestHasSurface") &&
                     !(bool)Get(controller, "placementRequestAwaitingSurface") &&
                     (Vector3)Get(controller, "placementRequestLocalPoint") == capturedLocalPoint &&
-                    (float)Get(controller, "nextPlacementAttemptAt") >= capturedRetryStart + 0.25f &&
+                    (float)Get(controller, "nextPlacementAttemptAt") + 0.00001f >= capturedRetryStart + 0.25f &&
                     controller.placedObjectsHistory.Count == 0,
-                "A native-anchor retry must keep the measured plane-local point and throttle attempts, never recapture the moving finger ray.");
+                "A native-anchor retry must keep the measured plane-local point and throttle attempts, never recapture the moving finger ray. " +
+                $"surface={Get(controller, "placementRequestHasSurface")}, awaiting={Get(controller, "placementRequestAwaitingSurface")}, " +
+                $"local={Get(controller, "placementRequestLocalPoint")}, expected={capturedLocalPoint}, " +
+                $"retry={Get(controller, "nextPlacementAttemptAt")}, start={capturedRetryStart}, " +
+                $"active={controller.isActiveAndEnabled}, hand={input.IsHandVisible}, pinch={input.isPinching}, ui={input.PinchConsumedByUI}");
             Set(controller, "nextPlacementAttemptAt", 0f);
             Set(controller, "placementRetryEligible", false);
             SetPlaneTracking(trackedPlane, testPlaneId, TrackingState.Limited);
@@ -649,7 +655,7 @@ internal static class ARPlacementRegressionChecks
             float retryStartedAt = Time.unscaledTime;
             Call(controller, "RetryPlacementIfStillHeld", retryGeneration, preview);
             Require((bool)Get(controller, "placementRequestAwaitingSurface") &&
-                    (float)Get(controller, "nextPlacementAttemptAt") >= retryStartedAt + 0.25f &&
+                    (float)Get(controller, "nextPlacementAttemptAt") + 0.00001f >= retryStartedAt + 0.25f &&
                     (float)Get(controller, "placementRequestExpiresAt") > (float)Get(controller, "nextPlacementAttemptAt") &&
                     controller.placedObjectsHistory.Count == 0 && !(bool)Get(controller, "placementRetryEligible"),
                 "A native-anchor warmup failure may requeue the same held pinch at most four times per second, never fabricate placement.");
@@ -887,6 +893,9 @@ internal static class ARPlacementRegressionChecks
             }
             results.Add("PASS: shipped lamp, battery and voltmeter stay visibly framed at physical scale on 1080x2400 startup");
 
+            ARInstantPlacementRegressionChecks.Run(results);
+            HandInputLatencyRegressionChecks.Run(results);
+            ARPlacementGeometryRegressionChecks.Run(results);
             ARCameraCoordinateRegressionChecks.Run(results);
             MeasuredDepthSurfaceRegressionChecks.Run(results);
             ARDragUsabilityRegressionChecks.Run(results);

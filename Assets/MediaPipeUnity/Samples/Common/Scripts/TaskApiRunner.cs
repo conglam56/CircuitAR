@@ -27,6 +27,7 @@ namespace Mediapipe.Unity.Sample
     protected bool isPaused;
 
     private readonly Stopwatch _stopwatch = new();
+    private long _lastTimestampMillisec = -1;
 
     protected virtual IEnumerator Start()
     {
@@ -53,6 +54,7 @@ namespace Mediapipe.Unity.Sample
     {
       isPaused = false;
       _stopwatch.Restart();
+      _lastTimestampMillisec = -1;
     }
 
     /// <summary>
@@ -81,7 +83,14 @@ namespace Mediapipe.Unity.Sample
       _stopwatch.Stop();
     }
 
-    protected long GetCurrentTimestampMillisec() => _stopwatch.IsRunning ? _stopwatch.ElapsedTicks / TimeSpan.TicksPerMillisecond : -1;
+    protected long GetCurrentTimestampMillisec()
+    {
+      if (!_stopwatch.IsRunning) return -1;
+      // Stopwatch ticks use the platform's performance-counter frequency, not
+      // TimeSpan's 100 ns units (Android commonly uses nanoseconds).
+      _lastTimestampMillisec = Math.Max(_lastTimestampMillisec + 1, _stopwatch.ElapsedMilliseconds);
+      return _lastTimestampMillisec;
+    }
 
     protected Bootstrap FindBootstrap()
     {

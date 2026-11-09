@@ -15,6 +15,12 @@ public class TapToPlaceController : MonoBehaviour
     public ARPlaneManager arPlaneManager;
     public ARAnchorManager arAnchorManager;
 
+    [Header("Đặt nhanh")]
+    [Tooltip("Cho phép đặt ngay ở khoảng cách ước lượng khi chưa có mặt phẳng. Neo AR được tạo trong nền.")]
+    public bool enableInstantPlacement = true;
+    [Tooltip("Chạm vào vùng camera để đặt, ngoài cử chỉ pinch.")]
+    public bool enableTapToPlace = true;
+
     [Header("Prefab linh kiện (Khớp tên với Menu HUD)")]
     public GameObject[] componentPrefabs;
     public string[] componentNames;
@@ -93,6 +99,15 @@ public class TapToPlaceController : MonoBehaviour
     private bool placementRequestAwaitingSurface;
     private bool placementRequestHasSurface;
     private bool placementRequestIsDepth;
+    private bool placementRequestFromTap;
+    private bool placementRequestHasEstimate;
+    private Pose placementRequestEstimate;
+    private bool placementTapThisFrame;
+    private readonly ARPlacementTapInput placementTapInput = new ARPlacementTapInput();
+    private readonly HashSet<GameObject> instantPlacedObjects = new HashSet<GameObject>();
+    private readonly ARPlacementGeometryCache geometryCache = new ARPlacementGeometryCache();
+    private readonly ARPlacementRenderPolicy renderPolicy = new ARPlacementRenderPolicy();
+    private float nextReferenceLookupAt;
     private Pose placementRequestDepthPose;
     private TrackableId placementRequestPlaneId = TrackableId.invalidId;
     private Vector3 placementRequestLocalPoint;
@@ -120,6 +135,7 @@ public class TapToPlaceController : MonoBehaviour
     private float nextContactDiagnosticAt;
     private int contactProbeIndex;
     private bool dragHasMeasuredSupport;
+    private bool dragSurfaceIsEstimated;
     private bool previewSurfaceIsDepth;
     private bool hasDepthSupportEvidence;
     private Pose lastDepthSupportEvidence;
@@ -207,6 +223,7 @@ public class TapToPlaceController : MonoBehaviour
     public void RotateSelectedComponent()
     {
         if (SelectedComponent == null) return;
+        SelectedComponent.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
 
         Quaternion oldRot = SelectedComponent.transform.rotation;
         SelectedComponent.transform.Rotate(Vector3.up, 90f, Space.Self);
@@ -231,6 +248,7 @@ public class TapToPlaceController : MonoBehaviour
     public void NotifyComponentRotated(GameObject obj)
     {
         if (obj == null) return;
+        obj.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
         if (SelectedComponent == obj)
         {
             UpdateSelectedComponentVisual();
@@ -357,12 +375,34 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    // Called after Reset destroys all active and undone content/support roots.
+    public void ClearPlacedObjectState()
+    {
+        foreach (GameObject placed in placedObjectsHistory)
+        {
+            if (placed == null) continue;
+            var pendingSupport = placed.GetComponent<ARInstantPlacementAnchor>();
+            if (pendingSupport != null) pendingSupport.enabled = false;
+        }
+        placedObjectsHistory.Clear();
+        instantPlacedObjects.Clear();
+        objectAnchors.Clear();
+        placedContacts.Clear();
+        dragAnchorRequests.Clear();
+        anchorDiagnostics.Clear();
+        geometryCache.Clear();
+        isDragging = false;
+        draggedObject = null;
+    }
+
     // =========================================================================
     // ĐĂNG KÝ SỰ KIỆN CHUYỂN CHẾ ĐỘ MÔ PHỎNG (CIRCUIT SIMULATION MANAGER)
     // =========================================================================
 
     void OnEnable()
     {
+        if (Application.platform == RuntimePlatform.Android && !Application.isEditor)
+            renderPolicy.Apply(FindFirstObjectByType<ARSession>());
         if (CircuitSimulationManager.Instance != null)
         {
             CircuitSimulationManager.Instance.OnSimulationModeChanged += HandleSimulationModeChanged;
@@ -371,6 +411,8 @@ public class TapToPlaceController : MonoBehaviour
 
     void OnDisable()
     {
+        renderPolicy.Restore();
+        placementTapInput.Reset();
         CancelContactCorrections();
         EndSurfaceGuidance();
         placementGeneration++;
@@ -442,20 +484,21 @@ public class TapToPlaceController : MonoBehaviour
             return; // Dừng toàn bộ xử lý cử chỉ chọn/kéo phía dưới
         }
 
+        // Missing optional managers must not trigger a whole-scene search every frame.
+        if (Time.unscaledTime >= nextReferenceLookupAt)
+        {
+            nextReferenceLookupAt = Time.unscaledTime + 1f;
 #if UNITY_2023_1_OR_NEWER
-        if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
-        if (arRaycastManager == null) arRaycastManager = FindFirstObjectByType<ARRaycastManager>();
+            if (buttonInteractor == null) buttonInteractor = FindFirstObjectByType<ButtonInteractor>();
+            if (arRaycastManager == null) arRaycastManager = FindFirstObjectByType<ARRaycastManager>();
+            if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
 #else
-        if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
-        if (arRaycastManager == null) arRaycastManager = FindObjectOfType<ARRaycastManager>();
+            if (buttonInteractor == null) buttonInteractor = FindObjectOfType<ButtonInteractor>();
+            if (arRaycastManager == null) arRaycastManager = FindObjectOfType<ARRaycastManager>();
+            if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
 #endif
-        if (buttonInteractor == null || arRaycastManager == null) return;
-
-#if UNITY_2023_1_OR_NEWER
-        if (wireConnectionController == null) wireConnectionController = FindFirstObjectByType<WireConnectionController>();
-#else
-        if (wireConnectionController == null) wireConnectionController = FindObjectOfType<WireConnectionController>();
-#endif
+        }
+        if (buttonInteractor == null) return;
 
         if (mainCamera == null)
         {
@@ -517,12 +560,17 @@ public class TapToPlaceController : MonoBehaviour
             if (buttonInteractor.JustPinched) SetPlacementStatus("Pinch: đang chờ neo AR của lần đặt trước.");
             return;
         }
-        bool hasWorldPointer = HasWorldPlacementPointer();
-        Vector2 placementScreenPosition = hasWorldPointer
+        placementTapThisFrame = false;
+        bool hasTapPointer = enableTapToPlace && placementTapInput.Read(out _, out _);
+        Vector2 tapPosition = placementTapInput.Position;
+        placementTapThisFrame = hasTapPointer && placementTapInput.Confirmed;
+        bool hasWorldPointer = HasWorldPlacementPointer() || hasTapPointer;
+        Vector2 placementScreenPosition = hasTapPointer ? tapPosition : hasWorldPointer
             ? GetStablePlacementScreenPosition()
+            : placementRequestHasEstimate || placementRequestFromTap ? placementRequestScreenPosition
             : new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
         UpdatePlacementRequest(hasWorldPointer, placementScreenPosition);
-        if (!hasWorldPointer && !placementRequestHasSurface &&
+        if (!hasWorldPointer && !placementRequestHasSurface && !placementRequestHasEstimate && !placementRequestFromTap &&
             buttonInteractor.IsGestureTemporarilyOccluded)
         {
             // Preserve intent through a short missing-hand sample, but never
@@ -535,7 +583,7 @@ public class TapToPlaceController : MonoBehaviour
         {
             hasDepthSupportEvidence = false;
             canPlace = false;
-            if (!placementRequestAwaitingSurface) ClearPlacementRequest();
+            if (enableInstantPlacement || !placementRequestAwaitingSurface) ClearPlacementRequest();
             surfaceTransitionActive = false;
             SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
             if (buttonInteractor.JustPinched)
@@ -546,12 +594,15 @@ public class TapToPlaceController : MonoBehaviour
 
         // Chụp điểm thật ngay khi tia pinch có hit, không đợi anchor subsystem.
         // Từ đây tay/camera dịch chuyển không được đổi điểm đang xác nhận.
-        if (!placementRequestHasSurface && Time.unscaledTime <= placementRequestExpiresAt)
+        if (!placementRequestHasSurface && !placementRequestHasEstimate && Time.unscaledTime <= placementRequestExpiresAt)
         {
             if (TryGetMeasuredPlacementSurface(placementRequestScreenPosition, lastPreviewTrackableId,
                 out Pose requestPose, out TrackableId requestPlaneId, out bool requestIsDepth))
                 TryCaptureMeasuredPlacementRequest(requestPose, requestPlaneId, requestIsDepth);
-            else if (IsWorldPinchHeld()) placementRequestAwaitingSurface = true;
+            else if (IsWorldPinchHeld() && !enableInstantPlacement) placementRequestAwaitingSurface = true;
+            if (enableInstantPlacement && !placementRequestHasSurface && !placementRequestHasEstimate &&
+                TryGetInstantPlacementPose(placementRequestScreenPosition, out placementRequestEstimate))
+                placementRequestHasEstimate = true;
         }
 
         Pose surfacePose = default;
@@ -564,7 +615,7 @@ public class TapToPlaceController : MonoBehaviour
             ClearPlacementRequest();
             surfaceTransitionActive = false;
         }
-        if (!hasSurface && hasWorldPointer)
+        if (!hasSurface && hasWorldPointer && !placementRequestHasEstimate)
             hasSurface = TryGetMeasuredPlacementSurface(placementScreenPosition, lastPreviewTrackableId,
                 out surfacePose, out hitTrackableId, out surfaceIsDepth);
 
@@ -586,11 +637,32 @@ public class TapToPlaceController : MonoBehaviour
             // Đỏ chỉ có nghĩa va chạm linh kiện, không phải raycast hụt mép bàn.
             bool overlapping = CheckOverlap(contactPosition, null, out _);
             UpdatePreviewVisual(overlapping);
-            canPlace = !overlapping && !surfaceTransitionActive && cooldownTimer <= 0f &&
-                CanCreateMeasuredSurfaceAnchor(hitTrackableId, surfaceIsDepth);
+            canPlace = !overlapping && (enableInstantPlacement || !surfaceTransitionActive) && cooldownTimer <= 0f &&
+                (enableInstantPlacement || CanCreateMeasuredSurfaceAnchor(hitTrackableId, surfaceIsDepth));
             SetPlacementFeedback(overlapping ? ButtonInteractor.PlacementFeedback.Blocked :
                 (canPlace ? ButtonInteractor.PlacementFeedback.Ready : ButtonInteractor.PlacementFeedback.Anchoring));
             if (!overlapping) TryCommitPlacementRequest();
+            return;
+        }
+
+        Pose estimatedPose = placementRequestEstimate;
+        bool hasEstimatedPose = placementRequestHasEstimate ||
+            (enableInstantPlacement && TryGetInstantPlacementPose(placementScreenPosition, out estimatedPose));
+        if (enableInstantPlacement && (hasWorldPointer || placementRequestHasEstimate || placementRequestFromTap) && hasEstimatedPose)
+        {
+            surfaceTransitionActive = false;
+            hasPreviewSurfacePose = false;
+            previewSurfaceIsDepth = false;
+            lastPreviewTrackableId = TrackableId.invalidId;
+            previewAnchor.transform.SetPositionAndRotation(estimatedPose.position, estimatedPose.rotation);
+            previewAnchor.SetActive(true);
+            bool overlapping = CheckOverlap(estimatedPose.position, null, out _);
+            UpdatePreviewVisual(overlapping);
+            canPlace = !overlapping && cooldownTimer <= 0f;
+            SetPlacementFeedback(overlapping ? ButtonInteractor.PlacementFeedback.Blocked :
+                ButtonInteractor.PlacementFeedback.Ready);
+            if (canPlace && Time.unscaledTime <= placementRequestExpiresAt && placementRequestHasEstimate)
+                PlaceInstantObject(placementRequestEstimate, placementRequestScreenPosition, TrackableId.invalidId, false);
             return;
         }
 
@@ -612,6 +684,8 @@ public class TapToPlaceController : MonoBehaviour
         placementRequestAwaitingSurface = false;
         placementRequestHasSurface = false;
         placementRequestIsDepth = false;
+        placementRequestFromTap = false;
+        placementRequestHasEstimate = false;
         placementRequestDepthPose = Pose.identity;
         placementRequestPlaneId = TrackableId.invalidId;
         placementRequestLocalPoint = Vector3.zero;
@@ -619,7 +693,20 @@ public class TapToPlaceController : MonoBehaviour
 
     private void UpdatePlacementRequest(bool hasWorldPointer, Vector2 screenPosition)
     {
-        if (placementRequestHasSurface)
+        if (placementTapThisFrame)
+        {
+            ClearPlacementRequest();
+            placementRequestFromTap = true;
+            placementRequestScreenPosition = screenPosition;
+            placementRequestExpiresAt = Time.unscaledTime + Mathf.Max(0f, cooldownTimer) + 0.35f;
+            return;
+        }
+        if (placementRequestFromTap)
+        {
+            if (Time.unscaledTime > placementRequestExpiresAt) ClearPlacementRequest();
+            return;
+        }
+        if (placementRequestHasSurface || (enableInstantPlacement && placementRequestHasEstimate))
         {
             // Pinch đã trúng điểm thật là một lệnh đã nhận: nhả/mất tay ngắn
             // không được nuốt lệnh trong chuyển tiếp. Một cử chỉ UI mới vẫn hủy.
@@ -641,7 +728,7 @@ public class TapToPlaceController : MonoBehaviour
             return;
         }
 
-        if (buttonInteractor.JustPinched)
+        if (buttonInteractor.JustPinched && HasWorldPlacementPointer())
         {
             // JustPinched đã là cạnh một lần; không bắt thêm khóa worldPinchArmed.
             ClearPlacementRequest();
@@ -724,13 +811,14 @@ public class TapToPlaceController : MonoBehaviour
 
     private bool TryCommitPlacementRequest()
     {
-        if (Time.unscaledTime > placementRequestExpiresAt || cooldownTimer > 0f || surfaceTransitionActive ||
+        if (Time.unscaledTime > placementRequestExpiresAt || cooldownTimer > 0f ||
+            (!enableInstantPlacement && surfaceTransitionActive) ||
             Time.unscaledTime < nextPlacementAttemptAt) return false;
         if (!TryResolvePlacementRequestSurface(out Pose surfacePose, out TrackableId planeId)) return false;
 
         // SessionTracking/plane có thể sẵn sàng trước anchor subsystem trong vài
         // frame đầu. Đừng nuốt lệnh pinch trong khoảng khởi động ngắn đó.
-        if (!CanCreateMeasuredSurfaceAnchor(planeId, placementRequestIsDepth))
+        if (!enableInstantPlacement && !CanCreateMeasuredSurfaceAnchor(planeId, placementRequestIsDepth))
             return false;
 
         Vector3 contactPosition = GetContactPosition(surfacePose);
@@ -751,7 +839,10 @@ public class TapToPlaceController : MonoBehaviour
         hasPreviewSurfacePose = true;
         lastPreviewTrackableId = planeId;
         UpdatePreviewVisual(false);
-        TryPlaceObject(new Pose(contactPosition, rotation), planeId);
+        if (enableInstantPlacement)
+            PlaceInstantObject(new Pose(contactPosition, rotation), placementRequestScreenPosition, planeId, true);
+        else
+            TryPlaceObject(new Pose(contactPosition, rotation), planeId);
         canPlace = false;
         return placementPending || currentPrefabToPlace == null;
     }
@@ -821,10 +912,16 @@ public class TapToPlaceController : MonoBehaviour
 
     private void PlaceObject(Vector3 position, Quaternion rotation, ARAnchor nativeAnchor)
     {
-        if (!previewAnchor.activeSelf) return;
-        if (nativeAnchor == null || (mainCamera != null &&
-            nativeAnchor.transform.IsChildOf(mainCamera.transform)))
+        if (nativeAnchor == null)
             throw new System.InvalidOperationException("Placed content requires a native anchor outside the camera hierarchy.");
+        CompletePlacement(position, rotation, nativeAnchor.transform, nativeAnchor);
+    }
+
+    private void CompletePlacement(Vector3 position, Quaternion rotation, Transform support, ARAnchor nativeAnchor)
+    {
+        if (previewAnchor == null || !previewAnchor.activeSelf) return;
+        if (support == null || (mainCamera != null && support.IsChildOf(mainCamera.transform)))
+            throw new System.InvalidOperationException("Placed content requires a world binding outside the camera hierarchy.");
 
         // Bật lại toàn bộ collider cho vật thể khi đặt xuống
         Collider[] colliders = previewVisual.GetComponentsInChildren<Collider>();
@@ -840,7 +937,7 @@ public class TapToPlaceController : MonoBehaviour
 
         // Chỉ chuyển sang vật đã đặt sau khi native anchor được tạo thành công.
         // Subsequent contact verification may correct Y, never camera/finger XZ.
-        previewAnchor.transform.SetParent(nativeAnchor.transform, true);
+        previewAnchor.transform.SetParent(support, true);
         previewAnchor.transform.SetPositionAndRotation(position, rotation);
         previewAnchor.transform.localScale = Vector3.one;
         if (previewVisual != null)
@@ -881,14 +978,18 @@ public class TapToPlaceController : MonoBehaviour
 
         // Lưu vào danh sách linh kiện và ghi nhận vào Lịch Sử Thao Tác (Requirement 1 & 2)
         GameObject placedObject = previewAnchor;
-        if (!nativeAnchor.gameObject.name.StartsWith("SurfaceAnchor_"))
-            nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
-        objectAnchors[placedObject] = nativeAnchor;
-        var stabilizer = placedObject.AddComponent<ARPlacedObjectStabilizer>();
-        stabilizer.Bind(this, nativeAnchor);
+        if (nativeAnchor != null)
+        {
+            if (!nativeAnchor.gameObject.name.StartsWith("SurfaceAnchor_"))
+                nativeAnchor.gameObject.name = "SurfaceAnchor_" + placedObject.name;
+            objectAnchors[placedObject] = nativeAnchor;
+            var stabilizer = placedObject.AddComponent<ARPlacedObjectStabilizer>();
+            stabilizer.Bind(this, nativeAnchor);
+        }
+        geometryCache.Invalidate(placedObject);
         placedObjectsHistory.Add(placedObject);
         RememberPlacedContact(placedObject, placementRequestPlaneId);
-        Debug.Log($"[ARBinding] {placedObject.name}#{placedObject.GetInstanceID()}; anchor={nativeAnchor.trackableId}; " +
+        Debug.Log($"[ARBinding] {placedObject.name}#{placedObject.GetInstanceID()}; nativeAnchor={nativeAnchor != null}; " +
             $"world={placedObject.transform.position:F3}; local={placedObject.transform.localPosition:F3}");
         placementConfirmedUntil = Time.unscaledTime + 2.5f;
         // A closed placement gesture, including a hand re-detected still
@@ -951,6 +1052,7 @@ public class TapToPlaceController : MonoBehaviour
             if (TryFindDragTarget(screenPos, out GameObject target))
             {
                 draggedObject = target;
+                draggedObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
                 isDragging = true;
                 dragStartPos = draggedObject.transform.position;
                 dragStartRot = draggedObject.transform.rotation;
@@ -1041,7 +1143,7 @@ public class TapToPlaceController : MonoBehaviour
                         lastValidDragPos = currentSmoothedDragPos;
                         lastValidDragRot = dragTargetRot;
                         dragSurfaceTrackableId = dragPlaneId;
-                        dragHasMeasuredSupport = true;
+                        dragHasMeasuredSupport = !dragSurfaceIsEstimated;
 
                         if (SelectedComponent == draggedObject)
                         {
@@ -1105,7 +1207,10 @@ public class TapToPlaceController : MonoBehaviour
             // replacement; a pending request is not a reason to bounce the
             // component back up onto its original tabletop.
             if (dragHasMeasuredSupport)
+            {
+                instantPlacedObjects.Remove(draggedObject);
                 RememberPlacedContact(draggedObject, dragSurfaceTrackableId);
+            }
             if (Vector3.Distance(dragStartPos, draggedObject.transform.position) > 0.006f &&
                 (!HasReusableDragAnchor(draggedObject) ||
                  !IsSameDragSupportLevel(dragStartPos.y, draggedObject.transform.position.y)))
@@ -1516,6 +1621,7 @@ public class TapToPlaceController : MonoBehaviour
 
     private bool TryGetDragSurface(Vector2 screenPoint, out Pose pose, out TrackableId planeId)
     {
+        dragSurfaceIsEstimated = false;
         pose = default;
         planeId = TrackableId.invalidId;
         if (mainCamera == null ||
@@ -1524,6 +1630,13 @@ public class TapToPlaceController : MonoBehaviour
         if (!TryChooseMeasuredSupport(screenPoint, planeHit, planePose, id, out pose, out planeId, out _))
         {
             dragLevelTransition.CancelPending();
+            // An estimated placement remains movable even before surface detection.
+            // Keep its authored height; measured objects retain bounded surface rules.
+            if (enableInstantPlacement && draggedObject != null && instantPlacedObjects.Contains(draggedObject))
+            {
+                dragSurfaceIsEstimated = true;
+                return TryProjectEstimatedLevel(screenPoint, dragStartPos, out pose);
+            }
             return false;
         }
         // Crossing a measured table/floor height is intentional only after a
@@ -1547,6 +1660,13 @@ public class TapToPlaceController : MonoBehaviour
     private Vector2 GetStablePlacementScreenPosition()
     {
         Vector2 rawPosition = GetCursorScreenPosition();
+        if (enableInstantPlacement)
+        {
+            // ButtonInteractor already filters the cursor; use the displayed point.
+            smoothedPlacementScreenPosition = rawPosition;
+            hasSmoothedPlacementScreenPosition = true;
+            return rawPosition;
+        }
         if (!hasSmoothedPlacementScreenPosition)
         {
             smoothedPlacementScreenPosition = rawPosition;
@@ -1942,6 +2062,95 @@ public class TapToPlaceController : MonoBehaviour
         return Quaternion.LookRotation(forward.normalized, Vector3.up);
     }
 
+    private bool TryGetInstantPlacementPose(Vector2 screenPoint, out Pose pose)
+    {
+        pose = default;
+        if (mainCamera == null || ARSession.state != ARSessionState.SessionTracking) return false;
+
+        // Keep neighbouring estimated components on the same authored level.
+        // This is an interaction aid, never evidence of a measured table/floor.
+        for (int i = placedObjectsHistory.Count - 1; i >= 0; i--)
+        {
+            GameObject placed = placedObjectsHistory[i];
+            if (placed != null && placed.activeInHierarchy && instantPlacedObjects.Contains(placed) &&
+                TryProjectEstimatedLevel(screenPoint, placed.transform.position, out pose))
+                return true;
+        }
+        float distance = GetUngroundedPreviewDistance();
+        Vector3 point = mainCamera.ScreenToWorldPoint(new Vector3(screenPoint.x, screenPoint.y, distance));
+        pose = new Pose(point, previewAnchor != null && previewAnchor.activeSelf
+            ? previewAnchor.transform.rotation : GetPlacementRotation());
+        return true;
+    }
+
+    private bool TryProjectEstimatedLevel(Vector2 screenPoint, Vector3 origin, out Pose pose)
+    {
+        pose = default;
+        if (mainCamera == null) return false;
+        Ray ray = mainCamera.ScreenPointToRay(screenPoint);
+        if (!new Plane(Vector3.up, origin).Raycast(ray, out float distance) || distance <= 0f || distance > 5f)
+            return false;
+        Vector3 point = ray.GetPoint(distance);
+        // Avoid a near-parallel pointer sending an estimated component far away.
+        if ((point - origin).sqrMagnitude > 1f) return false;
+        pose = new Pose(point, GetPlacementRotation());
+        return true;
+    }
+
+    private bool PlaceInstantObject(Pose pose, Vector2 screenPoint, TrackableId planeId, bool measuredSurface)
+    {
+        if (!enableInstantPlacement || placementPending || previewAnchor == null || mainCamera == null ||
+            ARSession.state != ARSessionState.SessionTracking || cooldownTimer > 0f) return false;
+        if (CheckOverlap(pose.position, null, out _))
+        {
+            UpdatePreviewVisual(true);
+            canPlace = false;
+            ClearPlacementRequest();
+            SetPlacementFeedback(ButtonInteractor.PlacementFeedback.Blocked);
+            return false;
+        }
+        GameObject placed = previewAnchor;
+        Transform support = new GameObject("InstantSupport_" + currentPrefabToPlace.name).transform;
+        if (arRaycastManager != null && !arRaycastManager.transform.IsChildOf(mainCamera.transform))
+            support.SetParent(arRaycastManager.transform, true);
+        support.SetPositionAndRotation(pose.position, pose.rotation);
+        previewAnchor.transform.SetPositionAndRotation(pose.position, pose.rotation);
+        previewAnchor.SetActive(true);
+        placementRequestPlaneId = planeId;
+        if (!measuredSurface) instantPlacedObjects.Add(placed);
+        float estimatedDistance = Vector3.Distance(mainCamera.transform.position, pose.position);
+        CompletePlacement(pose.position, pose.rotation, support, null);
+        if (placed != null)
+            placed.AddComponent<ARInstantPlacementAnchor>().Initialize(this, arRaycastManager,
+                arAnchorManager, mainCamera, screenPoint, estimatedDistance, support, measuredSurface);
+        return true;
+    }
+
+    internal void AdoptInstantPlacementAnchor(GameObject obj, ARAnchor anchor, bool measuredSurface)
+    {
+        if (obj == null || anchor == null) return;
+        objectAnchors[obj] = anchor;
+        anchor.gameObject.name = "SurfaceAnchor_" + obj.name;
+        var stabilizer = obj.GetComponent<ARPlacedObjectStabilizer>();
+        if (stabilizer == null) stabilizer = obj.AddComponent<ARPlacedObjectStabilizer>();
+        stabilizer.Bind(this, anchor);
+        if (measuredSurface) instantPlacedObjects.Remove(obj);
+        RememberPlacedContact(obj, TrackableId.invalidId);
+        wireConnectionController?.UpdateActiveWirePositionsExternal();
+    }
+
+    internal bool TryRefineInstantPlacement(GameObject obj, Transform support, Vector3 refinedSupportPosition)
+    {
+        if (obj == null || support == null || !obj.activeInHierarchy ||
+            (isDragging && draggedObject == obj) ||
+            (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)) return false;
+        Vector3 candidate = obj.transform.position + refinedSupportPosition - support.position;
+        if (CheckOverlapForObject(obj, candidate, obj.transform.rotation, obj, out _, 0f)) return false;
+        support.position = refinedSupportPosition;
+        wireConnectionController?.UpdateActiveWirePositionsExternal();
+        return true;
+    }
+
     private async void TryPlaceObject(Pose pose, TrackableId planeId)
     {
         if (placementPending || previewAnchor == null || !previewAnchor.activeSelf) return;
@@ -2185,6 +2394,8 @@ public class TapToPlaceController : MonoBehaviour
                 surfaceGuidanceHUD.ShowWarning("Đang tìm lại vị trí AR", "Hướng camera về vùng đã đặt, lia chậm và giữ máy ổn định");
             else if (ARSession.notTrackingReason == NotTrackingReason.InsufficientLight)
                 surfaceGuidanceHUD.ShowWarning("Chưa đủ ánh sáng", "Hướng camera vào mặt bàn / sàn sáng và có chi tiết");
+            else if (enableInstantPlacement)
+                surfaceGuidanceHUD.ShowScanning("Camera AR đang khởi động", "Giữ máy ổn định; có thể chọn linh kiện ngay");
             else
                 surfaceGuidanceHUD.ShowScanning("Đang nhận diện không gian", "Lia chậm trái–phải quanh bàn / sàn, chờ thanh chuyển xanh");
             return;
@@ -2211,8 +2422,14 @@ public class TapToPlaceController : MonoBehaviour
         {
             if (lastPlacementFeedback == ButtonInteractor.PlacementFeedback.Blocked)
                 surfaceGuidanceHUD.ShowWarning("Vị trí đang chồng linh kiện", "Di chuyển con trỏ sang chỗ trống trên mặt bàn / sàn");
+            else if (canPlace && enableInstantPlacement)
+                surfaceGuidanceHUD.ShowDetected("Chạm hoặc pinch để đặt", hasPreviewSurfacePose
+                    ? "Vật sẽ đặt tại mặt bàn / sàn dưới con trỏ"
+                    : "Vị trí ước lượng; có thể kéo để chỉnh sau khi đặt");
             else if (canPlace)
                 surfaceGuidanceHUD.ShowDetected("Có thể đặt tại đây", "Pinch để đặt; chờ báo đã neo rồi mở tay");
+            else if (enableInstantPlacement)
+                surfaceGuidanceHUD.ShowDetected("Chạm vào vị trí muốn đặt", "Hoặc đưa tay vào khung hình và pinch để đặt");
             else if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
                 surfaceGuidanceHUD.ShowScanning("Linh kiện chưa được đặt", "Đưa tay vào khung hình, trỏ vào mặt đỡ rồi pinch");
             else
@@ -2221,7 +2438,14 @@ public class TapToPlaceController : MonoBehaviour
         }
         if (Time.unscaledTime < placementConfirmedUntil)
         {
-            surfaceGuidanceHUD.ShowDetected("Đã neo linh kiện", "Vật ở lại mặt thật; pinch giữ vào vật nếu muốn kéo");
+            surfaceGuidanceHUD.ShowDetected(enableInstantPlacement ? "Đã đặt linh kiện" : "Đã neo linh kiện",
+                "Pinch giữ vào vật để kéo; mở tay để thả");
+            return;
+        }
+
+        if (enableInstantPlacement)
+        {
+            surfaceGuidanceHUD.ShowDetected("Sẵn sàng đặt linh kiện", "Mở kho dụng cụ, chọn vật rồi chạm hoặc pinch để đặt");
             return;
         }
 
@@ -2281,6 +2505,9 @@ public class TapToPlaceController : MonoBehaviour
 
     private void OnDestroy()
     {
+        renderPolicy.Restore();
+        geometryCache.Clear();
+        instantPlacedObjects.Clear();
         placementGeneration++;
         if (placementStatusRoot != null)
         {
@@ -2386,6 +2613,7 @@ public class TapToPlaceController : MonoBehaviour
         placementGeneration++;
         placementPending = false;
         ClearPlacementRequest();
+        placementTapInput.Reset();
         placementRetryEligible = false;
         nextPlacementAttemptAt = 0f;
         surfaceTransitionActive = false;
@@ -2394,6 +2622,7 @@ public class TapToPlaceController : MonoBehaviour
         if (placementStatusRoot != null) placementStatusRoot.SetActive(false);
         if (previewAnchor != null)
         {
+            geometryCache.Remove(previewAnchor);
             if (Application.isPlaying) Destroy(previewAnchor);
             else DestroyImmediate(previewAnchor);
             previewAnchor = null;
@@ -2459,6 +2688,7 @@ public class TapToPlaceController : MonoBehaviour
         }
         if (float.IsInfinity(bottomY) || float.IsNaN(bottomY)) return;
         visual.transform.position += Vector3.up * (anchor.transform.position.y - bottomY);
+        geometryCache.Invalidate(anchor);
     }
 
     private static bool IsTerminalVisual(Transform transform, Transform visualRoot)
@@ -2672,183 +2902,12 @@ public class TapToPlaceController : MonoBehaviour
 
     public bool GetFootprintOBB(GameObject obj, Vector3 worldPos, Quaternion worldRot, out FootprintOBB2D obb, float margin = 0f)
     {
-        obb = default;
-        if (obj == null) return false;
-
-        Vector2 localCenter = Vector2.zero;
-        Vector2 localHalfExtents = new Vector2(0.045f, 0.045f);
-
-        Transform rootTransform = obj.transform;
-
-        // Ưu tiên 1: Tìm BoxCollider thân đế (không phải cực Terminal)
-        BoxCollider[] boxColliders = obj.GetComponentsInChildren<BoxCollider>();
-        BoxCollider bodyBox = null;
-        for (int i = 0; i < boxColliders.Length; i++)
-        {
-            if (boxColliders[i] != null && !boxColliders[i].CompareTag("Terminal"))
-            {
-                bodyBox = boxColliders[i];
-                break;
-            }
-        }
-
-        if (bodyBox != null)
-        {
-            Vector3 bc = bodyBox.center;
-            Vector3 bh = bodyBox.size * 0.5f;
-
-            float minX = float.MaxValue, maxX = float.MinValue;
-            float minZ = float.MaxValue, maxZ = float.MinValue;
-
-            // Biến đổi 8 góc của BoxCollider sang toạ độ thế giới rồi đưa về toạ độ của rootTransform (tỉ lệ 1:1 mét)
-            for (int sx = -1; sx <= 1; sx += 2)
-            {
-                for (int sy = -1; sy <= 1; sy += 2)
-                {
-                    for (int sz = -1; sz <= 1; sz += 2)
-                    {
-                        Vector3 ptLocalToBox = bc + new Vector3(sx * bh.x, sy * bh.y, sz * bh.z);
-                        Vector3 ptWorld = bodyBox.transform.TransformPoint(ptLocalToBox);
-                        Vector3 ptInRoot = rootTransform.InverseTransformPoint(ptWorld);
-
-                        if (ptInRoot.x < minX) minX = ptInRoot.x;
-                        if (ptInRoot.x > maxX) maxX = ptInRoot.x;
-                        if (ptInRoot.z < minZ) minZ = ptInRoot.z;
-                        if (ptInRoot.z > maxZ) maxZ = ptInRoot.z;
-                    }
-                }
-            }
-
-            if (maxX > minX && maxZ > minZ)
-            {
-                localCenter = new Vector2((minX + maxX) * 0.5f, (minZ + maxZ) * 0.5f);
-                localHalfExtents = new Vector2((maxX - minX) * 0.5f, (maxZ - minZ) * 0.5f);
-            }
-        }
-        else
-        {
-            // Ưu tiên 2: Thu thập Renderers phần chân đế tiếp xúc mặt bàn
-            Renderer[] renderers = obj.GetComponentsInChildren<Renderer>();
-            if (renderers != null && renderers.Length > 0)
-            {
-                float minY = float.MaxValue;
-                for (int i = 0; i < renderers.Length; i++)
-                {
-                    if (renderers[i] is LineRenderer) continue;
-                    if (renderers[i].bounds.min.y < minY) minY = renderers[i].bounds.min.y;
-                }
-
-                float minX = float.MaxValue, maxX = float.MinValue;
-                float minZ = float.MaxValue, maxZ = float.MinValue;
-                bool hasValid = false;
-
-                for (int i = 0; i < renderers.Length; i++)
-                {
-                    Renderer r = renderers[i];
-                    if (r is LineRenderer) continue;
-                    // Bỏ qua chi tiết nhô cao hơn chân đế 3.5cm (như cần gạt mở khóa K)
-                    if (r.bounds.min.y > minY + 0.035f) continue;
-
-                    Bounds b = r.bounds;
-                    Vector3 bc = b.center;
-                    Vector3 bh = b.extents;
-
-                    for (int sx = -1; sx <= 1; sx += 2)
-                    {
-                        for (int sy = -1; sy <= 1; sy += 2)
-                        {
-                            for (int sz = -1; sz <= 1; sz += 2)
-                            {
-                                Vector3 ptWorld = bc + new Vector3(sx * bh.x, sy * bh.y, sz * bh.z);
-                                Vector3 ptInRoot = rootTransform.InverseTransformPoint(ptWorld);
-
-                                if (ptInRoot.x < minX) minX = ptInRoot.x;
-                                if (ptInRoot.x > maxX) maxX = ptInRoot.x;
-                                if (ptInRoot.z < minZ) minZ = ptInRoot.z;
-                                if (ptInRoot.z > maxZ) maxZ = ptInRoot.z;
-                            }
-                        }
-                    }
-                    hasValid = true;
-                }
-
-                if (hasValid && maxX > minX && maxZ > minZ)
-                {
-                    localCenter = new Vector2((minX + maxX) * 0.5f, (minZ + maxZ) * 0.5f);
-                    localHalfExtents = new Vector2((maxX - minX) * 0.5f, (maxZ - minZ) * 0.5f);
-                }
-            }
-        }
-
-        // Giới hạn an toàn (Clamp): Bán kính nửa footprint linh kiện từ 2cm đến 18cm (tính bằng mét)
-        localHalfExtents.x = Mathf.Clamp(localHalfExtents.x, 0.02f, 0.18f);
-        localHalfExtents.y = Mathf.Clamp(localHalfExtents.y, 0.02f, 0.18f);
-
-        float hx = localHalfExtents.x + margin;
-        float hz = localHalfExtents.y + margin;
-
-        Vector3 right3 = worldRot * Vector3.right;
-        Vector3 fwd3 = worldRot * Vector3.forward;
-
-        Vector2 right2 = new Vector2(right3.x, right3.z);
-        if (right2.sqrMagnitude < 0.0001f) right2 = Vector2.right;
-        else right2.Normalize();
-
-        Vector2 fwd2 = new Vector2(fwd3.x, fwd3.z);
-        if (fwd2.sqrMagnitude < 0.0001f) fwd2 = Vector2.up;
-        else fwd2.Normalize();
-
-        Vector2 center2D = new Vector2(worldPos.x, worldPos.z) + right2 * localCenter.x + fwd2 * localCenter.y;
-
-        Vector2[] corners = new Vector2[4];
-        corners[0] = center2D - right2 * hx - fwd2 * hz;
-        corners[1] = center2D + right2 * hx - fwd2 * hz;
-        corners[2] = center2D + right2 * hx + fwd2 * hz;
-        corners[3] = center2D - right2 * hx + fwd2 * hz;
-
-        obb.center = center2D;
-        obb.halfExtents = new Vector2(hx, hz);
-        obb.corners = corners;
-        obb.axis1 = right2;
-        obb.axis2 = fwd2;
-
-        return true;
+        return geometryCache.TryGetFootprint(obj, worldPos, worldRot, out obb, margin);
     }
 
     public static bool CheckOBBOverlapSAT(FootprintOBB2D a, FootprintOBB2D b, out int separatingAxisIndex)
     {
-        separatingAxisIndex = -1;
-        Vector2[] axes = new Vector2[] { a.axis1, a.axis2, b.axis1, b.axis2 };
-
-        for (int i = 0; i < 4; i++)
-        {
-            Vector2 axis = axes[i];
-            if (axis.sqrMagnitude < 0.0001f) continue;
-
-            float minA = float.MaxValue, maxA = float.MinValue;
-            for (int j = 0; j < 4; j++)
-            {
-                float proj = Vector2.Dot(a.corners[j], axis);
-                if (proj < minA) minA = proj;
-                if (proj > maxA) maxA = proj;
-            }
-
-            float minB = float.MaxValue, maxB = float.MinValue;
-            for (int j = 0; j < 4; j++)
-            {
-                float proj = Vector2.Dot(b.corners[j], axis);
-                if (proj < minB) minB = proj;
-                if (proj > maxB) maxB = proj;
-            }
-
-            if (maxA < minB || maxB < minA)
-            {
-                separatingAxisIndex = i;
-                return false;
-            }
-        }
-
-        return true;
+        return ARPlacementGeometryCache.Overlaps(a, b, out separatingAxisIndex);
     }
 
     public bool CheckOverlap(Vector3 candidatePosition, GameObject ignoreObject, out GameObject overlappingObject, float marginOffset = 0f)
@@ -2869,50 +2928,29 @@ public class TapToPlaceController : MonoBehaviour
 
         if (candidateObj == null) return false;
 
+        return CheckOverlapForObject(candidateObj, candidatePosition, candidateRot, ignoreObject,
+            out overlappingObject, effectiveMargin);
+    }
+
+    private bool CheckOverlapForObject(GameObject candidateObj, Vector3 candidatePosition, Quaternion candidateRot,
+        GameObject ignoreObject, out GameObject overlappingObject, float marginOffset)
+    {
+        overlappingObject = null;
+        const float collisionSkin = 0.003f;
+        float effectiveMargin = Mathf.Max(marginOffset, collisionSkin);
+
         if (!GetFootprintOBB(candidateObj, candidatePosition, candidateRot, out FootprintOBB2D candidateOBB, effectiveMargin))
         {
             return false;
         }
 
-        // 2. Thu thập danh sách các linh kiện đã đặt đang hoạt động trên bàn
-        List<GameObject> activePlaced = new List<GameObject>();
+        // History is the authoritative registry (including undo/redo). Never scan
+        // the scene or allocate a temporary list in this per-frame path.
         for (int i = 0; i < placedObjectsHistory.Count; i++)
         {
-            GameObject p = placedObjectsHistory[i];
-            if (p != null && p.activeInHierarchy && p != candidateObj && p != ignoreObject)
-            {
-                if (previewAnchor != null && p == previewAnchor) continue;
-                if (!activePlaced.Contains(p)) activePlaced.Add(p);
-            }
-        }
-
-#if UNITY_2023_1_OR_NEWER
-        Transform[] allRoots = FindObjectsByType<Transform>(FindObjectsSortMode.None);
-#else
-        Transform[] allRoots = FindObjectsOfType<Transform>();
-#endif
-        for (int i = 0; i < allRoots.Length; i++)
-        {
-            Transform t = allRoots[i];
-            if (t != null && t.name.StartsWith("Placed_") && t.gameObject.activeInHierarchy)
-            {
-                if (t.parent != null && t.parent.name.StartsWith("Placed_")) continue;
-                if (t.gameObject == candidateObj || t.gameObject == ignoreObject) continue;
-                if (previewAnchor != null && (t.gameObject == previewAnchor || t.IsChildOf(previewAnchor.transform))) continue;
-                if (ignoreObject != null && t.IsChildOf(ignoreObject.transform)) continue;
-
-                if (!activePlaced.Contains(t.gameObject))
-                {
-                    activePlaced.Add(t.gameObject);
-                }
-            }
-        }
-
-        // 3. Kiểm tra va chạm OBB 2D / SAT với từng linh kiện đã đặt
-        for (int i = 0; i < activePlaced.Count; i++)
-        {
-            GameObject placed = activePlaced[i];
-            if (placed == null) continue;
+            GameObject placed = placedObjectsHistory[i];
+            if (placed == null || !placed.activeInHierarchy || placed == candidateObj || placed == ignoreObject)
+                continue;
 
             // Sàn và mặt bàn có thể chồng nhau theo XZ nhưng ở cao độ khác nhau.
             // Chỉ chống đè lên nhau giữa các vật trên cùng một bề mặt thực.
@@ -2921,21 +2959,10 @@ public class TapToPlaceController : MonoBehaviour
                 continue;
             }
 
-            Vector2 diffXZ = new Vector2(candidatePosition.x - placed.transform.position.x, candidatePosition.z - placed.transform.position.z);
-            if (diffXZ.sqrMagnitude > 0.2025f)
-            {
-                continue;
-            }
-
             if (GetFootprintOBB(placed, placed.transform.position, placed.transform.rotation, out FootprintOBB2D placedOBB, collisionSkin))
             {
                 if (CheckOBBOverlapSAT(candidateOBB, placedOBB, out int separatingAxisIndex))
                 {
-                    Debug.LogWarning($"<color=red>[CheckOverlap OVERLAP]</color> " +
-                        $"Candidate: [{candidateObj.name}] at ({candidatePosition.x:F3}, {candidatePosition.z:F3}), rotY={candidateRot.eulerAngles.y:F1}°, halfExtents=({candidateOBB.halfExtents.x * 100f:F1}cm, {candidateOBB.halfExtents.y * 100f:F1}cm) | " +
-                        $"Existing: [{placed.name}] at ({placed.transform.position.x:F3}, {placed.transform.position.z:F3}), rotY={placed.transform.rotation.eulerAngles.y:F1}°, halfExtents=({placedOBB.halfExtents.x * 100f:F1}cm, {placedOBB.halfExtents.y * 100f:F1}cm) | " +
-                        $"DistXZ={diffXZ.magnitude * 100f:F1}cm | All 4 SAT axes overlapped!");
-
                     overlappingObject = placed;
                     return true;
                 }
@@ -3124,6 +3151,7 @@ public class MoveComponentAction : IUndoableAction
     {
         if (targetObject != null)
         {
+            targetObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
             targetObject.transform.position = oldPosition;
             targetObject.transform.rotation = oldRotation;
             wireController?.UpdateActiveWirePositionsExternal();
@@ -3135,6 +3163,7 @@ public class MoveComponentAction : IUndoableAction
     {
         if (targetObject != null)
         {
+            targetObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
             targetObject.transform.position = newPosition;
             targetObject.transform.rotation = newRotation;
             wireController?.UpdateActiveWirePositionsExternal();

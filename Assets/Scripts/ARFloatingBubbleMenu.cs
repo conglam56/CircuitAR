@@ -1172,9 +1172,9 @@ public class ARFloatingBubbleMenu : MonoBehaviour
     private void DestroyAllPlacedComponents()
     {
 #if UNITY_2023_1_OR_NEWER
-        GameObject[] allObjects = FindObjectsByType<GameObject>(FindObjectsSortMode.None);
+        GameObject[] allObjects = FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 #else
-        GameObject[] allObjects = FindObjectsOfType<GameObject>();
+        GameObject[] allObjects = FindObjectsOfType<GameObject>(true);
 #endif
         int count = 0;
         foreach (var obj in allObjects)
@@ -1190,11 +1190,12 @@ public class ARFloatingBubbleMenu : MonoBehaviour
         // để phiên AR không tích lũy trackable không còn sử dụng.
         foreach (var obj in allObjects)
         {
-            if (obj != null && obj.name.StartsWith("SurfaceAnchor_"))
+            if (obj != null && (obj.name.StartsWith("SurfaceAnchor_") || obj.name.StartsWith("InstantSupport_")))
             {
                 Destroy(obj);
             }
         }
+        tapToPlaceController?.ClearPlacedObjectState();
 
         GameObject boardAnchor = GameObject.Find("Board_Anchor");
         if (boardAnchor != null)

@@ -112,6 +112,7 @@ public class ButtonInteractor : MonoBehaviour
     private float lastClickTime = float.NegativeInfinity;
     private object _lock = new object();
     private long lastHandResultTicks;
+    private long lastGestureSampleTicks;
     private float lastVisibleHandAt = float.NegativeInfinity;
     private const float GestureOcclusionGrace = 0.18f;
     private const int HandMaskLandmarkCount = 21;
@@ -286,6 +287,9 @@ public class ButtonInteractor : MonoBehaviour
         JustPinched = false;
         PinchConsumedByUI = false;
         wasPinching = wasPinchingGlobal = false;
+        consecutivePinchFrames = consecutiveReleaseFrames = 0;
+        lastGestureSampleTicks = 0;
+        cursorPositionInitialized = false;
         lock (_lock) { hasRawHandMaskLandmarks = false; }
         handMaskHullCount = 0;
         SetPlacementFeedback(PlacementFeedback.None);
@@ -308,6 +312,7 @@ public class ButtonInteractor : MonoBehaviour
         bool visible;
         bool hasHandMask;
         bool freshMissingHand;
+        long sampleTicks;
 
         lock (_lock)
         {
@@ -316,7 +321,8 @@ public class ButtonInteractor : MonoBehaviour
             tx = targetThumbX;
             ty = targetThumbY;
             dist = rawDistance;
-            double resultAge = (System.Diagnostics.Stopwatch.GetTimestamp() - lastHandResultTicks) /
+            sampleTicks = lastHandResultTicks;
+            double resultAge = (System.Diagnostics.Stopwatch.GetTimestamp() - sampleTicks) /
                                (double)System.Diagnostics.Stopwatch.Frequency;
             visible = isHandVisible && resultAge <= 0.3;
             freshMissingHand = !isHandVisible && resultAge <= 0.3;
@@ -401,22 +407,31 @@ public class ButtonInteractor : MonoBehaviour
         }
 
         // --- 1. HYSTERESIS VÀ TEMPORAL STABILITY CHO PINCH DETECTION ---
-        if (dist < pinchThreshold)
+        // Rendering can be much faster than inference. Counting the same result
+        // twice confirms noise as a gesture and makes behavior depend on FPS.
+        bool hasNewGestureSample = sampleTicks != lastGestureSampleTicks;
+        if (hasNewGestureSample && dist < pinchThreshold)
         {
             consecutivePinchFrames++;
             consecutiveReleaseFrames = 0;
         }
-        else if (dist > pinchExitThreshold)
+        else if (hasNewGestureSample && dist > pinchExitThreshold)
         {
             consecutiveReleaseFrames++;
             consecutivePinchFrames = 0;
         }
+        else if (hasNewGestureSample)
+        {
+            consecutivePinchFrames = consecutiveReleaseFrames = 0;
+        }
+        lastGestureSampleTicks = sampleTicks;
 
-        if (!isPinching && consecutivePinchFrames >= minStablePinchFrames)
+        int requiredSamples = Mathf.Max(1, minStablePinchFrames);
+        if (!isPinching && consecutivePinchFrames >= requiredSamples)
         {
             isPinching = true;
         }
-        else if (isPinching && consecutiveReleaseFrames >= minStablePinchFrames)
+        else if (isPinching && consecutiveReleaseFrames >= requiredSamples)
         {
             isPinching = false;
         }
@@ -461,8 +476,8 @@ public class ButtonInteractor : MonoBehaviour
             }
             else
             {
-                float follow = 1f - Mathf.Exp(-cursorFollowSpeed * Time.unscaledDeltaTime);
-                displayedCursorAnchor = Vector2.Lerp(displayedCursorAnchor, desiredCursorAnchor, follow);
+                displayedCursorAnchor = FilterCursorAnchor(displayedCursorAnchor, desiredCursorAnchor,
+                    new Vector2(Screen.width, Screen.height), Time.unscaledDeltaTime, cursorFollowSpeed);
             }
 
             debugPoint.anchorMin = displayedCursorAnchor;
@@ -698,10 +713,19 @@ public class ButtonInteractor : MonoBehaviour
 
     private void ProcessHandResult(HandLandmarkerResult result)
     {
-        lock (_lock) { lastHandResultTicks = System.Diagnostics.Stopwatch.GetTimestamp(); }
-        if (result.handLandmarks == null || result.handLandmarks.Count == 0)
+        // This runs on MediaPipe's result thread. Read managed/Interlocked data
+        // only; source lookup and Unity object checks belong to Update.
+        long sourceTicks = ReferenceEquals(handRunner, null) ? 0L : handRunner.LatestResultSourceReadyTimestamp;
+        long resultTicks = sourceTicks > 0L ? sourceTicks : System.Diagnostics.Stopwatch.GetTimestamp();
+        if (result.handLandmarks == null || result.handLandmarks.Count == 0 ||
+            result.handLandmarks[0].landmarks == null || result.handLandmarks[0].landmarks.Count < HandMaskLandmarkCount)
         {
-            lock (_lock) { isHandVisible = false; hasRawHandMaskLandmarks = false; }
+            lock (_lock)
+            {
+                isHandVisible = false;
+                hasRawHandMaskLandmarks = false;
+                lastHandResultTicks = resultTicks;
+            }
             return;
         }
 
@@ -735,6 +759,9 @@ public class ButtonInteractor : MonoBehaviour
             targetThumbY = rawThumbY;
             rawDistance = distance;
             isHandVisible = true;
+            // Publish coordinates, gesture and freshness as one snapshot. The
+            // render thread must not see a new timestamp with the previous hand.
+            lastHandResultTicks = resultTicks;
             hasRawHandMaskLandmarks = hand.landmarks.Count >= HandMaskLandmarkCount;
             if (hasRawHandMaskLandmarks)
                 for (int i = 0; i < HandMaskLandmarkCount; i++)
@@ -743,6 +770,20 @@ public class ButtonInteractor : MonoBehaviour
                     rawHandMaskLandmarks[i] = new Vector2(landmark.x, landmark.y);
                 }
         }
+    }
+
+    private static Vector2 FilterCursorAnchor(Vector2 current, Vector2 target, Vector2 screenSize,
+        float deltaTime, float followSpeed)
+    {
+        float distancePixels = Vector2.Scale(target - current, screenSize).magnitude;
+        float snapDistance = Mathf.Max(24f, Mathf.Min(screenSize.x, screenSize.y) * 0.04f);
+        // Catch purposeful movement immediately; filter only the small landmark
+        // jitter. There is no prediction that could click beyond the fingertip.
+        if (distancePixels >= snapDistance) return target;
+        float speed = Mathf.Lerp(Mathf.Max(5f, followSpeed), Mathf.Max(120f, followSpeed),
+            Mathf.InverseLerp(2f, snapDistance, distancePixels));
+        float follow = 1f - Mathf.Exp(-speed * Mathf.Max(0f, deltaTime));
+        return Vector2.Lerp(current, target, follow);
     }
 
     /// <summary>
