@@ -149,10 +149,18 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                 }
 
                 // Never run inference twice on the same CPU camera copy.
-                if (arSource != null && arSource.FrameVersion == lastProcessedARFrame)
+                int arFrameVersion = arSource != null ? arSource.FrameVersion : -1;
+                if (arSource != null && arFrameVersion == lastProcessedARFrame)
                 {
                     yield return null;
                     continue;
+                }
+                if (arSource != null && (arSource.textureWidth != _textureFramePool.textureWidth ||
+                                         arSource.textureHeight != _textureFramePool.textureHeight))
+                {
+                    _textureFramePool.Dispose();
+                    _textureFramePool = new Experimental.TextureFramePool(
+                        arSource.textureWidth, arSource.textureHeight, TextureFormat.RGBA32, 2);
                 }
                 if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
                 {
@@ -160,7 +168,7 @@ namespace Mediapipe.Unity.Sample.HandLandmarkDetection
                     continue;
                 }
 
-                if (arSource != null) lastProcessedARFrame = arSource.FrameVersion;
+                if (arSource != null) lastProcessedARFrame = arFrameVersion;
                 // Build the input Image
                 Image image;
                 if (arSource != null)

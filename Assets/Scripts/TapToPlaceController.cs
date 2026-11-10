@@ -1106,43 +1106,67 @@ public class TapToPlaceController : MonoBehaviour
             {
                 unpinchGraceTimer = 0f;
 
+                Vector3 targetPoint = Vector3.zero;
+                bool hasTarget = false;
+                TrackableId currentPlaneId = dragSurfaceTrackableId;
+
+                // 1. Thử raycast với offset
                 if (TryGetDragSurface(screenPos + dragPointerOffset, out Pose surfacePose, out TrackableId dragPlaneId))
                 {
                     lastDragSurfaceHitTime = Time.time;
-                    Vector3 targetPoint = GetContactPosition(surfacePose);
-                    if (Vector3.Distance(targetPoint, currentSmoothedDragPos) > 0.0015f)
+                    targetPoint = GetContactPosition(surfacePose);
+                    currentPlaneId = dragPlaneId;
+                    hasTarget = true;
+                }
+                // 2. Thử raycast trực tiếp tại vị trí con trỏ nếu offset bị trượt ngoài mép
+                else if (TryGetDragSurface(screenPos, out Pose directPose, out TrackableId directId))
+                {
+                    lastDragSurfaceHitTime = Time.time;
+                    targetPoint = GetContactPosition(directPose);
+                    currentPlaneId = directId;
+                    hasTarget = true;
+                }
+                // 3. Thử raycast polygon mặt phẳng ngang
+                else if (TryGetRealHorizontalSurface(screenPos, TrackableId.invalidId, out Pose realPose, out TrackableId realId))
+                {
+                    lastDragSurfaceHitTime = Time.time;
+                    targetPoint = GetContactPosition(realPose);
+                    currentPlaneId = realId;
+                    hasTarget = true;
+                }
+                // 4. Fallback mượt mà: Chiếu tia camera lên mặt phẳng cùng cao độ với vật thể
+                // Giúp vật thể luôn bám theo tay 100% thời gian thực, triệt tiêu hoàn toàn hiện tượng khựng/delay
+                else if (lastValidDragPos != Vector3.zero && mainCamera != null)
+                {
+                    Ray ray = mainCamera.ScreenPointToRay(screenPos);
+                    Plane tablePlane = new Plane(Vector3.up, new Vector3(0f, lastValidDragPos.y, 0f));
+                    if (tablePlane.Raycast(ray, out float enter) && enter > 0.05f && enter < 10.0f)
                     {
-                        if (Mathf.Abs(targetPoint.y - currentSmoothedDragPos.y) > 0.04f)
-                        {
-                            // Chuyển giữa hai mặt có cao độ khác nhau (ví dụ bàn -> sàn)
-                            // phải snap cả điểm, nếu không quỹ đạo làm mượt sẽ đi xuyên
-                            // mép bàn hoặc bay giữa hai mặt.
-                            currentSmoothedDragPos = targetPoint;
-                        }
-                        else
-                        {
-                            float followSpeed = 70f;
-                            currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.deltaTime));
-                            // Trên cùng một mặt, chỉ cần làm mượt XZ; Y luôn áp sát mặt thật.
-                            currentSmoothedDragPos.y = targetPoint.y;
-                        }
+                        targetPoint = ray.GetPoint(enter);
+                        targetPoint.y = lastValidDragPos.y;
+                        hasTarget = true;
                     }
+                }
 
-                    float margin = isDragBlocked ? 0.008f : 0f;
-                    bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, margin);
+                if (hasTarget)
+                {
+                    // Tăng followSpeed từ 70f lên 120f và dùng unscaledDeltaTime để phản hồi tức thì với cử chỉ tay
+                    float followSpeed = 120f;
+                    currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.unscaledDeltaTime));
+                    currentSmoothedDragPos.y = targetPoint.y;
 
-                    // Kéo trên mặt thật chỉ thay đổi vị trí; hướng xoay do người dùng
-                    // đã chọn được giữ nguyên, tránh vật xoay theo trục ngẫu nhiên của plane.
+                    bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, 0f);
                     Quaternion dragTargetRot = dragStartRot;
+
+                    draggedObject.transform.position = currentSmoothedDragPos;
+                    draggedObject.transform.rotation = dragTargetRot;
 
                     if (!isOverlapping)
                     {
                         isDragBlocked = false;
-                        draggedObject.transform.position = currentSmoothedDragPos;
-                        draggedObject.transform.rotation = dragTargetRot;
                         lastValidDragPos = currentSmoothedDragPos;
                         lastValidDragRot = dragTargetRot;
-                        dragSurfaceTrackableId = dragPlaneId;
+                        dragSurfaceTrackableId = currentPlaneId;
                         dragHasMeasuredSupport = !dragSurfaceIsEstimated;
 
                         if (SelectedComponent == draggedObject)
@@ -1153,10 +1177,7 @@ public class TapToPlaceController : MonoBehaviour
                     else
                     {
                         isDragBlocked = true;
-                        // Giữ nguyên ở điểm hợp lệ gần nhất, ngăn không cho đâm xuyên và không snap giật
-                        draggedObject.transform.position = lastValidDragPos;
-                        draggedObject.transform.rotation = lastValidDragRot;
-
+                        // Vị trí không hợp lệ -> Hiển thị màu đỏ cảnh báo nhưng vẫn bám sát tay để dễ dàng kéo ra vùng trống
                         if (SelectedComponent == draggedObject)
                         {
                             ApplySelectionInvalid(draggedObject);
@@ -1171,11 +1192,8 @@ public class TapToPlaceController : MonoBehaviour
                 }
                 else
                 {
-                    // No measured support: hold the last valid position. Never
-                    // extend a table into empty space or choose a distant floor.
+                    // Giữ vị trí hợp lệ gần nhất nếu hoàn toàn không có thông tin
                     draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
-                    // A missed support ray is not a collision. Keep the measured
-                    // world position and normal selected appearance, without flashing red.
                     if (SelectedComponent == draggedObject)
                         UpdateSelectedComponentVisual();
                 }

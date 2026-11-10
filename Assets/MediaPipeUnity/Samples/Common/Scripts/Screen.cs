@@ -41,7 +41,23 @@ namespace Mediapipe.Unity
       if (usesARCamera)
       {
         Canvas canvas = GetComponentInParent<Canvas>();
-        if (canvas != null) canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        if (canvas != null)
+        {
+          canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+          // Ẩn các dải nền trắng/xám của Header, Footer và Container Panel trong sample MediaPipe khi bật ScreenSpaceOverlay
+          foreach (Transform child in canvas.GetComponentsInChildren<Transform>(true))
+          {
+            if (child.name == "Header" || child.name == "Footer")
+            {
+              child.gameObject.SetActive(false);
+            }
+            else if (child.name == "Container Panel" || child.name == "Body")
+            {
+              UnityEngine.UI.Image bgImg = child.GetComponent<UnityEngine.UI.Image>();
+              if (bgImg != null) bgImg.enabled = false;
+            }
+          }
+        }
       }
       gameObject.SetActive(true);
     }

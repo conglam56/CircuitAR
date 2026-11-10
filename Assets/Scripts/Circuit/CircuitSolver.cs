@@ -32,14 +32,21 @@ public class CircuitSolver : MonoBehaviour
 
     void OnEnable()
     {
-        // 1. Đăng ký sự kiện thay đổi trạng thái mô phỏng (Nút góc trên bên phải)
-        if (CircuitSimulationManager.Instance != null)
-        {
-            CircuitSimulationManager.Instance.OnSimulationModeChanged += OnSimulationStateChanged;
-        }
+        BindSimulationMode();
 
         // 2. Đăng ký sự kiện cấu trúc mạch thay đổi (Nối dây, tháo dây, gạt khóa K, xoay/xóa linh kiện)
         CircuitComponent.OnCircuitGraphDirty += RequestSolve;
+    }
+
+    // The manager's Awake may run after the solver's OnEnable.
+    void Start() => BindSimulationMode();
+
+    private void BindSimulationMode()
+    {
+        var manager = CircuitSimulationManager.Instance;
+        if (manager == null) return;
+        manager.OnSimulationModeChanged -= OnSimulationStateChanged;
+        manager.OnSimulationModeChanged += OnSimulationStateChanged;
     }
 
     void OnDisable()

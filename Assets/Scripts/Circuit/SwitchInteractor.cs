@@ -38,11 +38,12 @@ public class SwitchInteractor : MonoBehaviour
         // 2. ƯU TIÊN SỐ 1: Bắt cử chỉ Pinch từ MediaPipe (ButtonInteractor)
         if (buttonInteractor != null && buttonInteractor.JustPinched)
         {
+            if (buttonInteractor.PinchConsumedByUI) return;
             interactionScreenPos = buttonInteractor.CurrentScreenPos;
             shouldInteract = true;
         }
         // 3. FALLBACK: Chạm màn hình hoặc Click chuột trên Unity Editor
-        else if (Input.GetMouseButtonDown(0))
+        else if ((buttonInteractor == null || !buttonInteractor.IsHeadsetMode) && Input.GetMouseButtonDown(0))
         {
             // Bỏ qua nếu chạm vào phần tử UI Canvas
             if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())

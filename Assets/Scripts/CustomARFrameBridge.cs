@@ -1,6 +1,9 @@
 using System.Collections;
 using System.Threading;
 using Stopwatch = System.Diagnostics.Stopwatch;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
@@ -122,23 +125,21 @@ public class CustomARFrameBridge : ImageSource
         }
     }
 
-    public override Texture GetCurrentTexture()
-    {
-        CompleteCpuConversionIfReady();
-        return _texture;
-    }
+    public override Texture GetCurrentTexture() => _texture;
 
     private void DisposeCpuConversion()
     {
+        if (_cpuConversionPending)
+        {
+            _cpuConversionPending = false;
+            _cpuConversion.Dispose();
+            _cpuConversion = default;
+        }
         if (_pendingCpuImage.valid)
         {
             _pendingCpuImage.Dispose();
             _pendingCpuImage = default;
         }
-        if (!_cpuConversionPending) return;
-        _cpuConversionPending = false;
-        _cpuConversion.Dispose();
-        _cpuConversion = default;
     }
 
     private void CompleteCpuConversionIfReady()
@@ -149,22 +150,10 @@ public class CustomARFrameBridge : ImageSource
             if (!_acceptCpuFrames || _cpuConversion.status != XRCpuImage.AsyncConversionStatus.Ready) return;
             var convertedData = _cpuConversion.GetData<byte>();
             if (convertedData.Length != _pendingDimensions.x * _pendingDimensions.y * 4) return;
-            if (_texture == null || _texture.width != _pendingDimensions.x || _texture.height != _pendingDimensions.y)
-            {
-                if (_texture != null) UnityEngine.Object.Destroy(_texture);
-                _texture = new Texture2D(_pendingDimensions.x, _pendingDimensions.y, TextureFormat.RGBA32, false);
-                resolution = new ResolutionStruct { width = _pendingDimensions.x, height = _pendingDimensions.y };
-            }
             // Copy before disposing the native request. Inference owns a separate
             // texture-frame copy, so the next completed camera image is safe.
-            convertedData.CopyTo(_texture.GetRawTextureData<byte>());
-            long completedAt = Stopwatch.GetTimestamp();
-            long conversionTicks = completedAt - _cpuConversionStartedAt;
-            _perfConversionTicks += conversionTicks;
-            _perfMaxConversionTicks = System.Math.Max(_perfMaxConversionTicks, conversionTicks);
-            _perfConvertedFrames++;
-            Interlocked.Exchange(ref _latestFrameReadyTimestamp, completedAt);
-            _frameVersion++;
+            convertedData.CopyTo(GetFrameBuffer(_pendingDimensions));
+            PublishFrame(_cpuConversionStartedAt);
         }
         catch (System.Exception error)
         {
@@ -172,6 +161,102 @@ public class CustomARFrameBridge : ImageSource
             Debug.LogWarning("[ARBridge] Async CPU frame was discarded: " + error.Message);
         }
         finally { DisposeCpuConversion(); }
+    }
+
+    private NativeArray<byte> GetFrameBuffer(Vector2Int dimensions)
+    {
+        if (_texture == null || _texture.width != dimensions.x || _texture.height != dimensions.y)
+        {
+            if (_texture != null) UnityEngine.Object.Destroy(_texture);
+            _texture = new Texture2D(dimensions.x, dimensions.y, TextureFormat.RGBA32, false);
+            resolution = new ResolutionStruct { width = dimensions.x, height = dimensions.y };
+        }
+        return _texture.GetRawTextureData<byte>();
+    }
+
+    private void PublishFrame(long startedAt)
+    {
+        long completedAt = Stopwatch.GetTimestamp();
+        long conversionTicks = completedAt - startedAt;
+        _perfConversionTicks += conversionTicks;
+        _perfMaxConversionTicks = System.Math.Max(_perfMaxConversionTicks, conversionTicks);
+        _perfConvertedFrames++;
+        Interlocked.Exchange(ref _latestFrameReadyTimestamp, completedAt);
+        _frameVersion++;
+    }
+
+    public static bool CanReadPlane(int length, int rowStride, int pixelStride, int width, int height)
+    {
+        if (width <= 0 || height <= 0 || rowStride <= 0 || pixelStride <= 0) return false;
+        long lastColumn = (long)(width - 1) * pixelStride;
+        return lastColumn < rowStride && (long)(height - 1) * rowStride + lastColumn < length;
+    }
+
+    private static bool CanReadPlane(XRCpuImage.Plane plane, int width, int height) =>
+        CanReadPlane(plane.data.Length, plane.rowStride, plane.pixelStride, width, height);
+
+    private bool CopyAndroidCameraImage(XRCpuImage image, Vector2Int dimensions)
+    {
+        if (image.format != XRCpuImage.Format.AndroidYuv420_888 || image.planeCount < 3 ||
+            dimensions.x <= 0 || dimensions.y <= 0) return false;
+        var y = image.GetPlane(0);
+        var u = image.GetPlane(1);
+        var v = image.GetPlane(2);
+        int chromaWidth = (image.width + 1) / 2;
+        int chromaHeight = (image.height + 1) / 2;
+        if (!CanReadPlane(y, image.width, image.height) ||
+            !CanReadPlane(u, chromaWidth, chromaHeight) ||
+            !CanReadPlane(v, chromaWidth, chromaHeight)) return false;
+
+        // Run before releasing the image. ARCore's conversion worker is never
+        // started for Android camera frames, including during session teardown.
+        new YuvToRgba
+        {
+            Y = y.data, U = u.data, V = v.data,
+            YStride = new Vector2Int(y.pixelStride, y.rowStride),
+            UStride = new Vector2Int(u.pixelStride, u.rowStride),
+            VStride = new Vector2Int(v.pixelStride, v.rowStride),
+            Source = image.dimensions,
+            Destination = dimensions,
+            Output = GetFrameBuffer(dimensions)
+        }.Run();
+        return true;
+    }
+
+    [BurstCompile]
+    public struct YuvToRgba : IJob
+    {
+        [ReadOnly] public NativeArray<byte> Y, U, V;
+        public Vector2Int YStride, UStride, VStride;
+        public Vector2Int Source, Destination;
+        [WriteOnly] public NativeArray<byte> Output;
+
+        public void Execute()
+        {
+            int offset = 0;
+            for (int row = 0; row < Destination.y; row++)
+            {
+                int y = row * Source.y / Destination.y;
+                int lumaRow = y * YStride.y;
+                int uRow = (y / 2) * UStride.y;
+                int vRow = (y / 2) * VStride.y;
+                for (int col = 0; col < Destination.x; col++)
+                {
+                    int x = col * Source.x / Destination.x;
+                    int luma = System.Math.Max(0, Y[lumaRow + x * YStride.x] - 16);
+                    int u = U[uRow + (x / 2) * UStride.x] - 128;
+                    int v = V[vRow + (x / 2) * VStride.x] - 128;
+                    int scaledLuma = 298 * luma;
+                    Output[offset++] = ClipChannel(scaledLuma + 409 * v);
+                    Output[offset++] = ClipChannel(scaledLuma - 100 * u - 208 * v);
+                    Output[offset++] = ClipChannel(scaledLuma + 516 * u);
+                    Output[offset++] = 255;
+                }
+            }
+        }
+
+        private static byte ClipChannel(int value) =>
+            (byte)System.Math.Clamp((value + 128) >> 8, 0, 255);
     }
 
     /// <summary>
@@ -274,7 +359,7 @@ public class CustomARFrameBridge : ImageSource
         long latestFrameAt = LatestFrameReadyTimestamp;
         double frameReadyAgeMs = latestFrameAt == 0 ? -1d : (now - latestFrameAt) * 1000d / Stopwatch.Frequency;
         Debug.Log($"[ARHandPerf] bridge cameraFps={_perfCameraFrames / elapsed:F1}; copyFps={_perfConvertedFrames / elapsed:F1}; " +
-            $"convertAsyncMeanMs={meanMs:F2}; convertAsyncMaxMs={_perfMaxConversionTicks * 1000d / Stopwatch.Frequency:F2}; " +
+            $"convertMeanMs={meanMs:F2}; convertMaxMs={_perfMaxConversionTicks * 1000d / Stopwatch.Frequency:F2}; " +
             $"acquireMisses={_perfAcquireMisses}; latestReadyAgeMs={frameReadyAgeMs:F1}; image={textureWidth}x{textureHeight}");
         _perfWindowStartedAt = now;
         _perfCameraFrames = 0;
@@ -314,7 +399,6 @@ public class CustomARFrameBridge : ImageSource
             return;
         }
 
-        var format = TextureFormat.RGBA32;
         Vector2Int inferenceDimensions = GetInferenceDimensions(image.width, image.height);
 
         if (!_coordinateDiagnosticLogged && eventArgs.displayMatrix.HasValue)
@@ -334,7 +418,25 @@ public class CustomARFrameBridge : ImageSource
             _coordinateFallbackDiagnosticLogged = true;
         }
 
-        var conversionParams = new XRCpuImage.ConversionParams(image, format, XRCpuImage.Transformation.None);
+        if (Application.platform == RuntimePlatform.Android || image.format == XRCpuImage.Format.AndroidYuv420_888)
+        {
+            try
+            {
+                long startedAt = Stopwatch.GetTimestamp();
+                if (CopyAndroidCameraImage(image, inferenceDimensions)) PublishFrame(startedAt);
+                else _perfAcquireMisses++;
+            }
+            catch (System.Exception error)
+            {
+                _perfAcquireMisses++;
+                if (_frameReceivedCount <= 5 || _frameReceivedCount % 60 == 0)
+                    Debug.LogWarning("[ARBridge] Android camera image was discarded: " + error.Message);
+            }
+            finally { image.Dispose(); }
+            return;
+        }
+
+        var conversionParams = new XRCpuImage.ConversionParams(image, TextureFormat.RGBA32, XRCpuImage.Transformation.None);
         conversionParams.outputDimensions = inferenceDimensions;
 
         try

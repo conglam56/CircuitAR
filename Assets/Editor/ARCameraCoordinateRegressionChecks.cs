@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Unity.Collections;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using Unity.Jobs;
 using UnityEngine.SceneManagement;
 using UnityEngine.XR.ARSubsystems;
 
@@ -19,6 +21,7 @@ internal static class ARCameraCoordinateRegressionChecks
                 CustomARFrameBridge.GetInferenceDimensions(0, 480) == Vector2Int.zero,
             "AR inference resizing must bound CPU work, preserve aspect, avoid upscaling and reject invalid dimensions.");
         results.Add("PASS: AR CPU inference size is bounded without cropping, stretching or unnecessary upscaling");
+        CheckAndroidPlaneConversion(results);
         Matrix4x4 portrait = Matrix4x4.identity;
         portrait.m00 = 0f;
         portrait.m01 = -1f;
@@ -89,6 +92,34 @@ internal static class ARCameraCoordinateRegressionChecks
         results.Add("PASS: index and thumb share one camera-frame mapping and stale session transforms are cleared");
         CheckDepthProbeHandMask(results, croppedPortrait);
         CheckAsyncCameraConversion(results);
+    }
+
+    private static void CheckAndroidPlaneConversion(List<string> results)
+    {
+        Require(CustomARFrameBridge.CanReadPlane(7, 4, 2, 2, 2) &&
+                !CustomARFrameBridge.CanReadPlane(6, 4, 2, 2, 2) &&
+                !CustomARFrameBridge.CanReadPlane(32, 2, 2, 2, 2),
+            "An Android chroma plane may omit final row padding but cannot omit a sampled byte or cross its row stride.");
+
+        using var y = new NativeArray<byte>(new byte[] { 16, 16, 235, 99, 81, 81, 145 }, Allocator.TempJob);
+        using var u = new NativeArray<byte>(new byte[] { 128, 99, 128 }, Allocator.TempJob);
+        using var v = new NativeArray<byte>(new byte[] { 128, 99, 240 }, Allocator.TempJob);
+        using var output = new NativeArray<byte>(3 * 2 * 4, Allocator.TempJob);
+        new CustomARFrameBridge.YuvToRgba
+        {
+            Y = y, U = u, V = v,
+            YStride = new Vector2Int(1, 4),
+            UStride = new Vector2Int(2, 4),
+            VStride = new Vector2Int(2, 4),
+            Source = new Vector2Int(3, 2),
+            Destination = new Vector2Int(3, 2),
+            Output = output
+        }.Run();
+        Require(output[0] == 0 && output[3] == 255 &&
+                output[8] == 255 && output[9] < 235 && output[10] == 255 &&
+                output[12] == 76 && output[13] == 76 && output[14] == 76,
+            "Padded YUV conversion must preserve row order, skip interleaved chroma bytes, and emit opaque RGBA.");
+        results.Add("PASS: Android camera conversion reads strided YUV planes without native conversion or padding overreads");
     }
 
     private sealed class AsyncCameraApi : XRCpuImage.Api, IDisposable

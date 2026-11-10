@@ -7,6 +7,9 @@ using Mediapipe.Tasks.Vision.HandLandmarker;
 [DefaultExecutionOrder(-100)]
 public class ButtonInteractor : MonoBehaviour
 {
+    private static readonly Color32 HeadsetHover = new(27, 101, 116, 255);
+    private static readonly Color32 HeadsetPress = new(29, 122, 131, 255);
+
     public enum PlacementFeedback
     {
         None,
@@ -75,7 +78,7 @@ public class ButtonInteractor : MonoBehaviour
     public bool IsHandVisible { get; private set; }
     public bool IsGestureTemporarilyOccluded { get; private set; }
     public bool IsPointerOverUI { get; private set; }
-    public bool PinchConsumedByUI { get; private set; }
+    public bool PinchConsumedByUI { get; set; }
     public PlacementFeedback CurrentPlacementFeedback { get; private set; }
 
     public void SetPlacementFeedback(PlacementFeedback state)
@@ -96,6 +99,7 @@ public class ButtonInteractor : MonoBehaviour
 
     private Dictionary<RectTransform, Image> buttonImages = new Dictionary<RectTransform, Image>();
     private Dictionary<RectTransform, Color> originalColors = new Dictionary<RectTransform, Color>();
+    private readonly HashSet<RectTransform> scaledButtons = new HashSet<RectTransform>();
 
     private float targetX = 0f;
     private float targetY = 0f;
@@ -191,6 +195,62 @@ public class ButtonInteractor : MonoBehaviour
         }
     }
 
+    private Camera headsetCamera;
+    public bool IsHeadsetMode => headsetCamera != null;
+    private bool headsetNeedsOpenHand;
+
+    public void SetHeadsetCamera(Camera camera)
+    {
+        headsetCamera = camera;
+        headsetNeedsOpenHand = camera != null;
+        cursorPositionInitialized = false;
+        if (cursorOverlayRoot != null) ConfigureCursorCanvas(cursorOverlayRoot.GetComponent<Canvas>());
+    }
+
+    private void ConfigureCursorCanvas(Canvas canvas)
+    {
+        if (canvas == null) return;
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.enabled = headsetCamera == null;
+    }
+
+    public Vector4 GetHeadsetCursor()
+    {
+        if (headsetCamera == null || !IsHandVisible || !cursorPositionInitialized) return Vector4.zero;
+        // Tăng kích thước con trỏ lên ~2.2 lần (từ 0.00028 lên 0.00062) để dễ nhìn rõ qua thấu kính VR
+        float radius = (cursorDiameter * 0.00062f) * cursorVisual.localScale.x;
+        float mode = cursorVisualGraphic.IsRing ? 1f : (isPinching ? 2f : 0f);
+        return new Vector4(displayedCursorAnchor.x, displayedCursorAnchor.y, radius, mode);
+    }
+
+    private static AudioClip _uiClickClip;
+    /// <summary>Phát âm thanh click nhẹ nhàng xác nhận thao tác chụm ngón tay thành công</summary>
+    public static void PlayUIClickSound()
+    {
+        try
+        {
+            if (_uiClickClip == null)
+            {
+                int sampleRate = 44100;
+                int length = (int)(sampleRate * 0.045f);
+                float[] samples = new float[length];
+                for (int i = 0; i < length; i++)
+                {
+                    float t = (float)i / sampleRate;
+                    float freq = Mathf.Lerp(1200f, 650f, t / 0.045f);
+                    float envelope = Mathf.Exp(-t * 90f);
+                    samples[i] = Mathf.Sin(2f * Mathf.PI * freq * t) * envelope * 0.85f;
+                }
+                _uiClickClip = AudioClip.Create("VR_Click", length, 1, sampleRate, false);
+                _uiClickClip.SetData(samples, 0);
+            }
+            Camera cam = Camera.main;
+            Vector3 soundPos = cam != null ? cam.transform.position : Vector3.zero;
+            AudioSource.PlayClipAtPoint(_uiClickClip, soundPos, 0.85f);
+        }
+        catch { }
+    }
+
     private void EnsureCursorOverlay()
     {
         if (cursorOverlayRoot != null) return;
@@ -198,7 +258,7 @@ public class ButtonInteractor : MonoBehaviour
         cursorOverlayRoot = new GameObject("HandCursorOverlay", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler));
         cursorOverlayRect = cursorOverlayRoot.GetComponent<RectTransform>();
         Canvas overlayCanvas = cursorOverlayRoot.GetComponent<Canvas>();
-        overlayCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        ConfigureCursorCanvas(overlayCanvas);
         overlayCanvas.sortingOrder = 10000;
 
         CanvasScaler scaler = cursorOverlayRoot.GetComponent<CanvasScaler>();
@@ -344,11 +404,12 @@ public class ButtonInteractor : MonoBehaviour
         var arSource = imageSource as CustomARFrameBridge;
         if (arSource != null)
         {
-            arSource.TryMapImagePointsToViewport(new Vector2(x, y), new Vector2(tx, ty),
+            bool mapped = arSource.TryMapImagePointsToViewport(new Vector2(x, y), new Vector2(tx, ty),
                 out indexViewportPoint, out thumbViewportPoint);
             // The CPU image can include a hand outside the visible AR crop. Do
             // not clamp that finger onto an unrelated floor point at the edge.
-            visible = visible && indexViewportPoint.x >= 0f && indexViewportPoint.x <= 1f &&
+            visible = visible && (headsetCamera == null || mapped) &&
+                indexViewportPoint.x >= 0f && indexViewportPoint.x <= 1f &&
                 indexViewportPoint.y >= 0f && indexViewportPoint.y <= 1f;
         }
         else
@@ -357,6 +418,12 @@ public class ButtonInteractor : MonoBehaviour
             thumbViewportPoint = MapManualImagePointToViewport(new Vector2(tx, ty));
         }
 
+        if (headsetCamera != null)
+        {
+            visible = visible && Screen.width > Screen.height &&
+                PhoneHeadsetStereo.ContainsSourcePoint(indexViewportPoint);
+            if (!visible) headsetNeedsOpenHand = true;
+        }
         IsHandVisible = visible && videoPanel != null && debugPoint != null;
         bool finiteInput = IsFiniteHandPoint(new Vector2(x, y)) &&
             IsFiniteHandPoint(new Vector2(tx, ty)) && !float.IsNaN(dist) && !float.IsInfinity(dist);
@@ -380,6 +447,9 @@ public class ButtonInteractor : MonoBehaviour
                 {
                     if (buttonImages.ContainsKey(btn))
                         buttonImages[btn].color = originalColors[btn];
+
+                    if (scaledButtons.Remove(btn))
+                        btn.localScale = Vector3.one;
 
                     HoldToActivateButton holdBtn = btn.GetComponent<HoldToActivateButton>();
                     if (holdBtn != null) holdBtn.ResetHoldState();
@@ -410,7 +480,13 @@ public class ButtonInteractor : MonoBehaviour
         // Rendering can be much faster than inference. Counting the same result
         // twice confirms noise as a gesture and makes behavior depend on FPS.
         bool hasNewGestureSample = sampleTicks != lastGestureSampleTicks;
-        if (hasNewGestureSample && dist < pinchThreshold)
+        if (headsetNeedsOpenHand)
+        {
+            if (hasNewGestureSample && dist > pinchExitThreshold) headsetNeedsOpenHand = false;
+            consecutivePinchFrames = consecutiveReleaseFrames = 0;
+            isPinching = false;
+        }
+        else if (hasNewGestureSample && dist < pinchThreshold)
         {
             consecutivePinchFrames++;
             consecutiveReleaseFrames = 0;
@@ -520,6 +596,7 @@ public class ButtonInteractor : MonoBehaviour
             if (!IsButtonAvailable(btn, img))
             {
                 if (img != null) img.color = originalColors[btn];
+                if (scaledButtons.Remove(btn)) btn.localScale = Vector3.one;
                 var hiddenHold = btn.GetComponent<HoldToActivateButton>();
                 if (hiddenHold != null) hiddenHold.ResetHoldState();
                 continue;
@@ -537,8 +614,14 @@ public class ButtonInteractor : MonoBehaviour
             // Chỉ UI ở điểm bắt đầu pinch mới được nhận cử chỉ này. Đi ngang qua
             // nút khi đang giữ pinch đặt vật không được đánh cắp lệnh đặt.
             if (isHovering && pinchStarted) PinchConsumedByUI = true;
-            Color hoverTint = hoverColor;
-            Color pressTint = pressColor;
+
+            bool isHitbox = originalColors[btn].a < 0.05f;
+            Color hoverTint = headsetCamera != null
+                ? Color.Lerp(originalColors[btn], new Color(0.25f, 0.85f, 1f, 1f), 0.5f)
+                : hoverColor;
+            Color pressTint = headsetCamera != null
+                ? Color.Lerp(originalColors[btn], new Color(1f, 0.95f, 0.4f, 1f), 0.75f)
+                : pressColor;
             hoverTint.a = originalColors[btn].a;
             pressTint.a = originalColors[btn].a;
 
@@ -549,11 +632,25 @@ public class ButtonInteractor : MonoBehaviour
                 if (isHovering)
                 {
                     anyButtonHovered = true;
-                    img.color = isPinching ? pressTint : hoverTint;
+                    if (!isHitbox) img.color = isPinching ? pressTint : hoverTint;
+                    if (btn.localScale.sqrMagnitude > 0.25f)
+                    {
+                        scaledButtons.Add(btn);
+                        btn.localScale = Vector3.Lerp(btn.localScale, isPinching ? new Vector3(0.92f, 0.92f, 1f) : new Vector3(1.05f, 1.05f, 1f), Time.unscaledDeltaTime * 18f);
+                    }
                 }
                 else
                 {
-                    img.color = originalColors[btn];
+                    if (!isHitbox) img.color = originalColors[btn];
+                    if (scaledButtons.Contains(btn))
+                    {
+                        btn.localScale = Vector3.Lerp(btn.localScale, Vector3.one, Time.unscaledDeltaTime * 18f);
+                        if ((btn.localScale - Vector3.one).sqrMagnitude < 0.0004f)
+                        {
+                            btn.localScale = Vector3.one;
+                            scaledButtons.Remove(btn);
+                        }
+                    }
                 }
                 continue;
             }
@@ -561,13 +658,27 @@ public class ButtonInteractor : MonoBehaviour
             if (isHovering)
             {
                 anyButtonHovered = true;
-                img.color = isPinching ? pressTint : hoverTint;
+                if (!isHitbox) img.color = isPinching ? pressTint : hoverTint;
+
+                if (btn.localScale.sqrMagnitude > 0.25f)
+                {
+                    scaledButtons.Add(btn);
+                    // Phản hồi co giãn (scale) rõ nét khi ngắm và khi chụm tay
+                    Vector3 targetScale = (isPinching && PinchConsumedByUI) ? new Vector3(0.92f, 0.92f, 1f) : new Vector3(1.05f, 1.05f, 1f);
+                    btn.localScale = Vector3.Lerp(btn.localScale, targetScale, Time.unscaledDeltaTime * 18f);
+                }
 
                 if (pinchStarted && Time.time - lastClickTime > clickCooldown)
                 {
                     Button uiBtn = btn.GetComponent<Button>();
                     if (uiBtn != null && uiBtn.interactable)
                     {
+                        if (btn.localScale.sqrMagnitude > 0.25f)
+                        {
+                            scaledButtons.Add(btn);
+                            btn.localScale = new Vector3(0.85f, 0.85f, 1f); // Giật phản hồi tức thì
+                        }
+                        PlayUIClickSound(); // Âm thanh click
                         uiBtn.onClick.Invoke();
                     }
                     if (menuHUD != null) menuHUD.ReceiveClick(btn);
@@ -576,7 +687,16 @@ public class ButtonInteractor : MonoBehaviour
             }
             else
             {
-                img.color = originalColors[btn];
+                if (!isHitbox) img.color = originalColors[btn];
+                if (scaledButtons.Contains(btn))
+                {
+                    btn.localScale = Vector3.Lerp(btn.localScale, Vector3.one, Time.unscaledDeltaTime * 18f);
+                    if ((btn.localScale - Vector3.one).sqrMagnitude < 0.0004f)
+                    {
+                        btn.localScale = Vector3.one;
+                        scaledButtons.Remove(btn);
+                    }
+                }
             }
         }
 
@@ -621,7 +741,11 @@ public class ButtonInteractor : MonoBehaviour
     private void UpdateCursorVisual(float deltaTime)
     {
         if (cursorVisual == null) return;
-        if (cursorVisualGraphic != null) cursorVisualGraphic.color = cursorColor;
+        if (cursorVisualGraphic != null)
+        {
+            // Khi chụm ngón tay (pinch), đổi sang màu xanh ngọc Cyan phát sáng (cả chế độ Tự Lắp Mạch và VR)
+            cursorVisualGraphic.color = isPinching ? new Color(0.18f, 0.95f, 1f, 1f) : cursorColor;
+        }
 
         if (!pinchVisualPlaying)
         {
@@ -689,8 +813,7 @@ public class ButtonInteractor : MonoBehaviour
     private void SetHaloAlpha(float alpha)
     {
         if (pinchHaloGraphic == null) return;
-        Color haloColor = Color.white;
-        haloColor.a = Mathf.Clamp01(alpha);
+        Color haloColor = new Color(0.18f, 0.95f, 1f, Mathf.Clamp01(alpha));
         pinchHaloGraphic.color = haloColor;
         pinchHaloGraphic.enabled = haloColor.a > 0.001f;
     }

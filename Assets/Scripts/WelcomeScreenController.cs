@@ -1,8 +1,8 @@
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using UnityEngine.Serialization;
 using UnityEngine.XR.ARFoundation;
 using TMPro;
 
@@ -24,9 +24,7 @@ using TMPro;
 ///    - Hỗ trợ phím cứng Back của Android (KeyCode.Escape).
 ///    - Khi bấm: Ngay lập tức DỪNG camera, tắt ARSession, tạm dừng MediaPipe, dọn dẹp các UI AR và
 ///      quay trở về Màn Hình Chính an toàn, tiết kiệm pin tối đa.
-/// 4. NÚT 2: "QUÉT MẠCH AI":
-///    - Placeholder tính năng đang phát triển: Bấm vào hiện popup Toast ngắn "Tính năng đang phát triển,
-///      vui lòng quay lại sau!" kèm nút "ĐÃ HIỂU" rồi trở về màn hình chính bình thường.
+/// 4. NÚT 2: Hiển thị cảnh AR qua kính điện thoại và dùng các nút đặt trong không gian.
 /// </summary>
 public class WelcomeScreenController : MonoBehaviour
 {
@@ -56,7 +54,7 @@ public class WelcomeScreenController : MonoBehaviour
 
     [Header("--- THAM CHIẾU NÚT BẤM CHÍNH ---")]
     public Button btnManualCircuit;     // Nút 1: Tự Lắp Mạch
-    public Button btnAIScan;            // Nút 2: Quét Mạch AI
+    [FormerlySerializedAs("btnAIScan")] public Button btnHeadset;
 
     [Header("--- NÚT QUAY LẠI (BACK BUTTON TRONG AR) ---")]
     public Canvas backButtonCanvas;     // Canvas riêng cho nút Quay Lại
@@ -71,12 +69,6 @@ public class WelcomeScreenController : MonoBehaviour
     private Outline outlineSimulate;
     private Image imgSimulateBg;
 
-    [Header("--- POPUP TOAST 'TÍNH NĂNG ĐANG PHÁT TRIỂN' ---")]
-    public GameObject modalToastRoot;   // Lớp phủ mờ toàn màn hình
-    public RectTransform modalToastCard;// Thẻ thông báo ở giữa
-    public CanvasGroup modalToastGroup; // Hiệu ứng fade in/out popup
-    public Button btnToastDismiss;      // Nút "ĐÃ HIỂU"
-
     [Header("--- CẤU HÌNH & TRẠNG THÁI ---")]
     [Tooltip("Tự động tạo giao diện nếu chưa gán trong Inspector")]
     public bool autoGenerateUI = true;
@@ -87,8 +79,7 @@ public class WelcomeScreenController : MonoBehaviour
     private static Sprite circleSprite;
     private static Sprite roundedRectSprite;
     private static TMP_FontAsset _safeFontAsset;
-    private Coroutine toastCoroutine;
-    private Coroutine fadeTransitionCoroutine;
+    private PhoneHeadsetAR headset;
 
     /// <summary>
     /// Đảm bảo tự động khởi tạo Màn Hình Chính CircuitAR ngay khi Scene được nạp
@@ -172,18 +163,6 @@ public class WelcomeScreenController : MonoBehaviour
             bubbleMenu.SetMenuVisible(false);
         }
 
-        // TRIỆT ĐỂ: Tắt hộp thoại Modal Toast nếu có
-        if (modalToastRoot != null)
-        {
-            modalToastRoot.SetActive(false);
-            if (modalToastGroup != null)
-            {
-                modalToastGroup.alpha = 0f;
-                modalToastGroup.interactable = false;
-                modalToastGroup.blocksRaycasts = false;
-            }
-        }
-
         isWelcomeScreenActive = true;
     }
 
@@ -216,16 +195,7 @@ public class WelcomeScreenController : MonoBehaviour
             {
                 bubbleMenu.SetMenuVisible(false);
             }
-            if (modalToastRoot != null)
-            {
-                modalToastRoot.SetActive(false);
-                if (modalToastGroup != null)
-                {
-                    modalToastGroup.alpha = 0f;
-                    modalToastGroup.interactable = false;
-                    modalToastGroup.blocksRaycasts = false;
-                }
-            }
+
         }
     }
 
@@ -244,13 +214,6 @@ public class WelcomeScreenController : MonoBehaviour
     {
         if (Input.GetKeyDown(KeyCode.Escape))
         {
-            // Nếu đang mở Modal Toast: Đóng Toast
-            if (modalToastRoot != null && modalToastRoot.activeSelf)
-            {
-                DismissAIModalToast();
-                return;
-            }
-
             // Nếu đang trong chức năng AR: Quay lại Màn Hình Chính
             if (!isWelcomeScreenActive)
             {
@@ -309,6 +272,11 @@ public class WelcomeScreenController : MonoBehaviour
     {
         var placement = FindFirstObjectByType<TapToPlaceController>();
         if (placement != null) placement.EndSurfaceGuidance();
+        if (handLandmarkerRunner != null)
+        {
+            handLandmarkerRunner.Pause();
+            Debug.Log("<color=yellow>[WelcomeScreenController]</color> Đã TẠM DỪNG MediaPipe HandLandmarkerRunner.");
+        }
         if (arSession != null && arSession.enabled)
         {
             arSession.enabled = false;
@@ -321,11 +289,7 @@ public class WelcomeScreenController : MonoBehaviour
             Debug.Log("<color=yellow>[WelcomeScreenController]</color> Đã TẮT ARCameraManager.");
         }
 
-        if (handLandmarkerRunner != null)
-        {
-            handLandmarkerRunner.Pause();
-            Debug.Log("<color=yellow>[WelcomeScreenController]</color> Đã TẠM DỪNG MediaPipe HandLandmarkerRunner.");
-        }
+        if (headset != null) headset.Exit();
     }
 
     /// <summary>
@@ -416,10 +380,25 @@ public class WelcomeScreenController : MonoBehaviour
     /// NÚT 1: "TỰ LẮP MẠCH"
     /// Bắt đầu truy cập Camera, ARSession, MediaPipe và chuyển sang giao diện AR TỨC THÌ (0ms delay)
     /// </summary>
-    public void OnClickStartManualCircuit()
+    public void OnClickStartManualCircuit() => StartCircuitMode(false);
+
+    public void OnClickStartHeadsetAR() => StartCircuitMode(true);
+
+    private void StartCircuitMode(bool wearingHeadset)
     {
         if (!isWelcomeScreenActive) return;
-        Debug.Log("<color=green>[WelcomeScreenController]</color> Người dùng chọn 'TỰ LẮP MẠCH'. Khởi động luồng AR & Camera!");
+        var placement = FindFirstObjectByType<TapToPlaceController>();
+        if (wearingHeadset)
+        {
+            var camera = arCameraManager != null ? arCameraManager.GetComponent<Camera>() : null;
+            if (camera == null || buttonInteractor == null || placement == null)
+            {
+                Debug.LogWarning("[CircuitAR] Chế độ đeo kính cần camera AR, bộ nhận tay và bộ đặt linh kiện.");
+                return;
+            }
+            if (!camera.TryGetComponent(out headset)) headset = camera.gameObject.AddComponent<PhoneHeadsetAR>();
+            headset.Enter(placement, buttonInteractor, ReturnToWelcomeScreen);
+        }
 
         isWelcomeScreenActive = false;
 
@@ -438,9 +417,9 @@ public class WelcomeScreenController : MonoBehaviour
         // 2. Kích hoạt Menu Bong Bóng Chat AR & Nút Quay Lại ngay lập tức
         if (bubbleMenu != null)
         {
-            bubbleMenu.SetMenuVisible(true);
+            bubbleMenu.SetMenuVisible(!wearingHeadset);
         }
-        SetBackButtonVisible(true);
+        SetBackButtonVisible(!wearingHeadset);
 
         // 3. KÍCH HOẠT CAMERA VÀ AR SESSION NGAY TẠI ĐÂY (CHỈ KHI VÀO CHỨC NĂNG)
         StartARAndCamera();
@@ -452,8 +431,7 @@ public class WelcomeScreenController : MonoBehaviour
             spatialCalibrator.RestartCalibration();
         }
 
-        var placement = FindFirstObjectByType<TapToPlaceController>();
-        if (placement != null) placement.BeginSurfaceGuidance();
+        if (!wearingHeadset && placement != null) placement.BeginSurfaceGuidance();
 
         Debug.Log("<color=cyan>[WelcomeScreenController]</color> Đã vào chế độ AR đặt trực tiếp trên sàn/bàn thật!");
     }
@@ -481,18 +459,6 @@ public class WelcomeScreenController : MonoBehaviour
         // 3. Ngưng căn chỉnh mặt phẳng & ẩn UI căn chỉnh
         SuppressARInitialState();
 
-        // 4. Đảm bảo Modal Toast tắt hoàn toàn
-        if (modalToastRoot != null)
-        {
-            modalToastRoot.SetActive(false);
-            if (modalToastGroup != null)
-            {
-                modalToastGroup.alpha = 0f;
-                modalToastGroup.interactable = false;
-                modalToastGroup.blocksRaycasts = false;
-            }
-        }
-
         // 5. Hiển thị lại Màn Hình Chính tức thì
         if (welcomeCanvas != null)
         {
@@ -514,95 +480,7 @@ public class WelcomeScreenController : MonoBehaviour
 
         // Bật lại khả năng bấm các nút
         if (btnManualCircuit != null) btnManualCircuit.interactable = true;
-        if (btnAIScan != null) btnAIScan.interactable = true;
-    }
-
-    /// <summary>
-    /// NÚT 2: "QUÉT MẠCH AI"
-    /// Placeholder: Hiển thị Toast / Popup thông báo tính năng đang phát triển
-    /// </summary>
-    public void OnClickShowAIPlaceholder()
-    {
-        Debug.Log("<color=yellow>[WelcomeScreenController]</color> Người dùng chọn 'QUÉT MẠCH AI' -> Hiển thị thông báo đang phát triển.");
-        ShowAIModalToast();
-    }
-
-    /// <summary>
-    /// Hiển thị Modal Toast thông báo với hiệu ứng nảy mượt mà và tự động ẩn sau 3 giây
-    /// </summary>
-    public void ShowAIModalToast()
-    {
-        if (modalToastRoot == null) return;
-
-        modalToastRoot.SetActive(true);
-        if (modalToastGroup != null)
-        {
-            modalToastGroup.interactable = true;
-            modalToastGroup.blocksRaycasts = true;
-        }
-
-        if (toastCoroutine != null) StopCoroutine(toastCoroutine);
-        toastCoroutine = StartCoroutine(AnimateToastPopup(true));
-    }
-
-    /// <summary>
-    /// Đóng Modal Toast khi bấm "ĐÃ HIỂU" hoặc chạm ra ngoài
-    /// </summary>
-    public void DismissAIModalToast()
-    {
-        if (modalToastRoot == null || !modalToastRoot.activeSelf) return;
-
-        if (toastCoroutine != null) StopCoroutine(toastCoroutine);
-        toastCoroutine = StartCoroutine(AnimateToastPopup(false));
-    }
-
-    private IEnumerator AnimateToastPopup(bool showing)
-    {
-        float duration = 0.22f;
-        float elapsed = 0f;
-
-        Vector3 startScale = showing ? new Vector3(0.7f, 0.7f, 1f) : Vector3.one;
-        Vector3 endScale = showing ? Vector3.one : new Vector3(0.7f, 0.7f, 1f);
-        float startAlpha = showing ? 0f : 1f;
-        float endAlpha = showing ? 1f : 0f;
-
-        if (showing && modalToastGroup != null) modalToastGroup.alpha = 0f;
-
-        while (elapsed < duration)
-        {
-            elapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(elapsed / duration);
-
-            float ease = showing
-                ? 1f + 1.2f * Mathf.Pow(t - 1f, 3) + 1.2f * Mathf.Pow(t - 1f, 2)
-                : Mathf.Sin(t * Mathf.PI * 0.5f);
-
-            if (modalToastCard != null) modalToastCard.localScale = Vector3.LerpUnclamped(startScale, endScale, ease);
-            if (modalToastGroup != null) modalToastGroup.alpha = Mathf.Lerp(startAlpha, endAlpha, t);
-            yield return null;
-        }
-
-        if (modalToastCard != null) modalToastCard.localScale = endScale;
-        if (modalToastGroup != null) modalToastGroup.alpha = endAlpha;
-
-        if (!showing)
-        {
-            modalToastRoot.SetActive(false);
-            if (modalToastGroup != null)
-            {
-                modalToastGroup.alpha = 0f;
-                modalToastGroup.interactable = false;
-                modalToastGroup.blocksRaycasts = false;
-            }
-        }
-        else
-        {
-            yield return new WaitForSeconds(3.0f);
-            if (modalToastRoot != null && modalToastRoot.activeSelf)
-            {
-                DismissAIModalToast();
-            }
-        }
+        if (btnHeadset != null) btnHeadset.interactable = true;
     }
 
     /// <summary>
@@ -848,9 +726,6 @@ public class WelcomeScreenController : MonoBehaviour
         // 5. VÙNG CHÂN TRANG (FOOTER)
         BuildFooterSection(canvasObj.transform);
 
-        // 6. POPUP TOAST 'TÍNH NĂNG ĐANG PHÁT TRIỂN' (MODAL DIALOG)
-        BuildModalToastPopup(canvasObj.transform);
-
         welcomeCanvas.gameObject.SetActive(true);
         welcomeCanvas.enabled = true;
 
@@ -983,54 +858,19 @@ public class WelcomeScreenController : MonoBehaviour
         );
         btnManualCircuit = btn1Obj.GetComponent<Button>();
 
-        // NÚT 2: "QUÉT MẠCH AI" (780px x 155px)
-        Sprite scanSprite = UIIconAssets.GetScanSprite();
-        GameObject btn2Obj = CreateBigActionButton(
+        GameObject headsetButton = CreateBigActionButton(
             parent: groupRT,
-            name: "Btn_AIScan",
+            name: "Btn_Headset",
             size: new Vector2(780, 155),
             anchoredPos: new Vector2(0, -95f),
             bgColor: new Color(0.38f, 0.16f, 0.74f, 0.98f),
             glowColor: new Color(0.75f, 0.45f, 1f, 1f),
-            iconSprite: scanSprite,
-            titleText: "QUÉT MẠCH AI",
-            subtitleText: "Nhận diện mạch thực tế qua camera AI",
-            onClick: OnClickShowAIPlaceholder
+            iconSprite: UIIconAssets.GetHeadsetSprite(),
+            titleText: "LẮP MẠCH QUA KÍNH",
+            subtitleText: "Thao tác bằng tay trong chế độ kính VR",
+            onClick: OnClickStartHeadsetAR
         );
-        btnAIScan = btn2Obj.GetComponent<Button>();
-
-        // Huy hiệu "SẮP RA MẮT"
-        GameObject badgeObj = new GameObject("Badge_ComingSoon", typeof(RectTransform), typeof(Image));
-        badgeObj.transform.SetParent(btn2Obj.transform, false);
-        RectTransform badgeRT = badgeObj.GetComponent<RectTransform>();
-        badgeRT.anchorMin = new Vector2(1f, 1f);
-        badgeRT.anchorMax = new Vector2(1f, 1f);
-        badgeRT.pivot = new Vector2(1f, 0.5f);
-        badgeRT.sizeDelta = new Vector2(170, 36);
-        badgeRT.anchoredPosition = new Vector2(-20, 0);
-
-        Image badgeImg = badgeObj.GetComponent<Image>();
-        badgeImg.sprite = roundedRectSprite;
-        badgeImg.type = Image.Type.Sliced;
-        badgeImg.color = new Color(0.96f, 0.62f, 0.05f, 0.95f);
-        badgeImg.raycastTarget = false;
-
-        GameObject badgeTextObj = new GameObject("Text", typeof(RectTransform));
-        badgeTextObj.transform.SetParent(badgeObj.transform, false);
-        RectTransform badgeTextRT = badgeTextObj.GetComponent<RectTransform>();
-        badgeTextRT.anchorMin = Vector2.zero;
-        badgeTextRT.anchorMax = Vector2.one;
-        badgeTextRT.offsetMin = Vector2.zero;
-        badgeTextRT.offsetMax = Vector2.zero;
-
-        TextMeshProUGUI badgeTMP = badgeTextObj.AddComponent<TextMeshProUGUI>();
-        badgeTMP.font = GetSafeFont();
-        badgeTMP.text = "SẮP RA MẮT";
-        badgeTMP.fontSize = 17;
-        badgeTMP.fontStyle = FontStyles.Bold;
-        badgeTMP.alignment = TextAlignmentOptions.Center;
-        badgeTMP.color = new Color(0.08f, 0.05f, 0.01f, 1f);
-        badgeTMP.raycastTarget = false;
+        btnHeadset = headsetButton.GetComponent<Button>();
     }
 
     private GameObject CreateBigActionButton(
@@ -1113,7 +953,7 @@ public class WelcomeScreenController : MonoBehaviour
         titleRT.anchorMin = new Vector2(0f, 0.5f);
         titleRT.anchorMax = new Vector2(1f, 0.5f);
         titleRT.pivot = new Vector2(0f, 0.5f);
-        titleRT.offsetMin = new Vector2(150, 6);
+        titleRT.offsetMin = new Vector2(iconSprite != null ? 150 : 32, 6);
         titleRT.offsetMax = new Vector2(-60, 50);
 
         TextMeshProUGUI titleTMP = titleObj.AddComponent<TextMeshProUGUI>();
@@ -1131,7 +971,7 @@ public class WelcomeScreenController : MonoBehaviour
         subRT.anchorMin = new Vector2(0f, 0.5f);
         subRT.anchorMax = new Vector2(1f, 0.5f);
         subRT.pivot = new Vector2(0f, 0.5f);
-        subRT.offsetMin = new Vector2(150, -42);
+        subRT.offsetMin = new Vector2(iconSprite != null ? 150 : 32, -42);
         subRT.offsetMax = new Vector2(-60, 6);
 
         TextMeshProUGUI subTMP = subObj.AddComponent<TextMeshProUGUI>();
@@ -1187,174 +1027,19 @@ public class WelcomeScreenController : MonoBehaviour
     }
 
     // =========================================================================
-    // MODAL DIALOG / TOAST "TÍNH NĂNG ĐANG PHÁT TRIỂN"
-    // =========================================================================
-
-    private void BuildModalToastPopup(Transform parent)
-    {
-        modalToastRoot = new GameObject("ModalToast_Backdrop", typeof(RectTransform), typeof(Image));
-        modalToastRoot.transform.SetParent(parent, false);
-        RectTransform bdRT = modalToastRoot.GetComponent<RectTransform>();
-        bdRT.anchorMin = Vector2.zero;
-        bdRT.anchorMax = Vector2.one;
-        bdRT.offsetMin = Vector2.zero;
-        bdRT.offsetMax = Vector2.zero;
-
-        Image bdImg = modalToastRoot.GetComponent<Image>();
-        bdImg.color = new Color(0f, 0f, 0f, 0.72f);
-        bdImg.raycastTarget = true;
-
-        Button bdBtn = modalToastRoot.AddComponent<Button>();
-        bdBtn.onClick.AddListener(DismissAIModalToast);
-
-        modalToastGroup = modalToastRoot.AddComponent<CanvasGroup>();
-
-        GameObject cardObj = new GameObject("Card_Dialog", typeof(RectTransform), typeof(Image));
-        cardObj.transform.SetParent(modalToastRoot.transform, false);
-        modalToastCard = cardObj.GetComponent<RectTransform>();
-        modalToastCard.anchorMin = new Vector2(0.5f, 0.5f);
-        modalToastCard.anchorMax = new Vector2(0.5f, 0.5f);
-        modalToastCard.pivot = new Vector2(0.5f, 0.5f);
-        modalToastCard.sizeDelta = new Vector2(760, 420);
-        modalToastCard.anchoredPosition = Vector2.zero;
-
-        Image cardImg = cardObj.GetComponent<Image>();
-        cardImg.sprite = roundedRectSprite;
-        cardImg.type = Image.Type.Sliced;
-        cardImg.color = new Color(0.07f, 0.11f, 0.19f, 0.98f);
-        cardImg.raycastTarget = true;
-
-        Outline cardOutline = cardObj.AddComponent<Outline>();
-        cardOutline.effectColor = new Color(0.96f, 0.62f, 0.05f, 0.95f);
-        cardOutline.effectDistance = new Vector2(3f, -3f);
-
-        GameObject iconObj = new GameObject("Icon_Badge", typeof(RectTransform), typeof(Image));
-        iconObj.transform.SetParent(cardObj.transform, false);
-        RectTransform iconRT = iconObj.GetComponent<RectTransform>();
-        iconRT.anchorMin = new Vector2(0.5f, 1f);
-        iconRT.anchorMax = new Vector2(0.5f, 1f);
-        iconRT.pivot = new Vector2(0.5f, 0.5f);
-        iconRT.sizeDelta = new Vector2(90, 90);
-        iconRT.anchoredPosition = new Vector2(0, -20f);
-
-        Image iconImg = iconObj.GetComponent<Image>();
-        iconImg.sprite = circleSprite;
-        iconImg.color = new Color(0.96f, 0.62f, 0.05f, 0.25f);
-        iconImg.raycastTarget = false;
-
-        Outline iconOutline = iconObj.AddComponent<Outline>();
-        iconOutline.effectColor = new Color(0.96f, 0.62f, 0.05f, 0.9f);
-        iconOutline.effectDistance = new Vector2(2f, -2f);
-
-        GameObject iconInner = new GameObject("Icon_Char", typeof(RectTransform));
-        iconInner.transform.SetParent(iconObj.transform, false);
-        RectTransform iiRT = iconInner.GetComponent<RectTransform>();
-        iiRT.anchorMin = Vector2.zero;
-        iiRT.anchorMax = Vector2.one;
-        iiRT.offsetMin = Vector2.zero;
-        iiRT.offsetMax = Vector2.zero;
-
-        TextMeshProUGUI iiTMP = iconInner.AddComponent<TextMeshProUGUI>();
-        iiTMP.font = GetSafeFont();
-        iiTMP.text = "!";
-        iiTMP.fontSize = 54;
-        iiTMP.fontStyle = FontStyles.Bold;
-        iiTMP.alignment = TextAlignmentOptions.Center;
-        iiTMP.color = new Color(0.96f, 0.62f, 0.05f, 1f);
-        iiTMP.raycastTarget = false;
-
-        GameObject titleObj = new GameObject("Title_Text", typeof(RectTransform));
-        titleObj.transform.SetParent(cardObj.transform, false);
-        RectTransform titleRT = titleObj.GetComponent<RectTransform>();
-        titleRT.anchorMin = new Vector2(0.5f, 1f);
-        titleRT.anchorMax = new Vector2(0.5f, 1f);
-        titleRT.pivot = new Vector2(0.5f, 1f);
-        titleRT.sizeDelta = new Vector2(700, 50);
-        titleRT.anchoredPosition = new Vector2(0, -85f);
-
-        TextMeshProUGUI titleTMP = titleObj.AddComponent<TextMeshProUGUI>();
-        titleTMP.font = GetSafeFont();
-        titleTMP.text = "QUÉT MẠCH AI";
-        titleTMP.fontSize = 30;
-        titleTMP.fontStyle = FontStyles.Bold;
-        titleTMP.alignment = TextAlignmentOptions.Center;
-        titleTMP.color = new Color(0.96f, 0.62f, 0.05f, 1f);
-        titleTMP.characterSpacing = 2f;
-        titleTMP.raycastTarget = false;
-
-        GameObject msgObj = new GameObject("Message_Text", typeof(RectTransform));
-        msgObj.transform.SetParent(cardObj.transform, false);
-        RectTransform msgRT = msgObj.GetComponent<RectTransform>();
-        msgRT.anchorMin = new Vector2(0.5f, 0.5f);
-        msgRT.anchorMax = new Vector2(0.5f, 0.5f);
-        msgRT.pivot = new Vector2(0.5f, 0.5f);
-        msgRT.sizeDelta = new Vector2(700, 110);
-        msgRT.anchoredPosition = new Vector2(0, -10f);
-
-        TextMeshProUGUI msgTMP = msgObj.AddComponent<TextMeshProUGUI>();
-        msgTMP.font = GetSafeFont();
-        msgTMP.text = "Tính năng đang phát triển, vui lòng quay lại sau!\n<size=18><color=#94A3B8>Hệ thống nhận diện AI và sinh mạch AR tự động đang được hoàn thiện.</color></size>";
-        msgTMP.fontSize = 24;
-        msgTMP.fontStyle = FontStyles.Bold;
-        msgTMP.alignment = TextAlignmentOptions.Center;
-        msgTMP.color = Color.white;
-        msgTMP.lineSpacing = 20f;
-        msgTMP.raycastTarget = false;
-
-        GameObject dismissBtnObj = new GameObject("Btn_Dismiss", typeof(RectTransform), typeof(Image), typeof(Button));
-        dismissBtnObj.transform.SetParent(cardObj.transform, false);
-        RectTransform disRT = dismissBtnObj.GetComponent<RectTransform>();
-        disRT.anchorMin = new Vector2(0.5f, 0f);
-        disRT.anchorMax = new Vector2(0.5f, 0f);
-        disRT.pivot = new Vector2(0.5f, 0f);
-        disRT.sizeDelta = new Vector2(320, 75);
-        disRT.anchoredPosition = new Vector2(0, 35f);
-
-        Image disImg = dismissBtnObj.GetComponent<Image>();
-        disImg.sprite = roundedRectSprite;
-        disImg.type = Image.Type.Sliced;
-        disImg.color = new Color(0.96f, 0.62f, 0.05f, 0.95f);
-        disImg.raycastTarget = true;
-
-        btnToastDismiss = dismissBtnObj.GetComponent<Button>();
-        btnToastDismiss.targetGraphic = disImg;
-        btnToastDismiss.onClick.AddListener(DismissAIModalToast);
-
-        GameObject disTextObj = new GameObject("Text", typeof(RectTransform));
-        disTextObj.transform.SetParent(dismissBtnObj.transform, false);
-        RectTransform dtRT = disTextObj.GetComponent<RectTransform>();
-        dtRT.anchorMin = Vector2.zero;
-        dtRT.anchorMax = Vector2.one;
-        dtRT.offsetMin = Vector2.zero;
-        dtRT.offsetMax = Vector2.zero;
-
-        TextMeshProUGUI dtTMP = disTextObj.AddComponent<TextMeshProUGUI>();
-        dtTMP.font = GetSafeFont();
-        dtTMP.text = "ĐÃ HIỂU";
-        dtTMP.fontSize = 24;
-        dtTMP.fontStyle = FontStyles.Bold;
-        dtTMP.alignment = TextAlignmentOptions.Center;
-        dtTMP.color = new Color(0.08f, 0.05f, 0.01f, 1f);
-        dtTMP.raycastTarget = false;
-
-        // TẮT HOÀN TOÀN MODAL TOAST NGAY KHI VỪA TẠO XONG ĐỂ KHÔNG BAO GIỜ TỰ HIỆN:
-        modalToastRoot.SetActive(false);
-        if (modalToastGroup != null)
-        {
-            modalToastGroup.alpha = 0f;
-            modalToastGroup.interactable = false;
-            modalToastGroup.blocksRaycasts = false;
-        }
-    }
-
-    // =========================================================================
     // HELPER SPRITES NGUYÊN BẢN (PROCEDURAL CIRCLE & ROUNDED RECT)
     // =========================================================================
 
     private static void EnsureSprites()
     {
         if (circleSprite == null) circleSprite = CreateProceduralCircle(128);
+        GetRoundedRectSprite();
+    }
+
+    internal static Sprite GetRoundedRectSprite()
+    {
         if (roundedRectSprite == null) roundedRectSprite = CreateProceduralRoundedRect(128, 128, 36);
+        return roundedRectSprite;
     }
 
     private static Sprite CreateProceduralCircle(int size)

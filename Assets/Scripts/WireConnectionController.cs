@@ -8,6 +8,7 @@ using System.Collections.Generic;
 /// - Tự động đồng bộ màu sắc dây và giắc cắm theo cực: Cực Đỏ -> Dây Đỏ, Cực Đen -> Dây Đen.
 /// - Đồng bộ vị trí, độ cong và góc xoay theo thời gian thực khi kéo di chuyển linh kiện trên bàn AR.
 /// </summary>
+[DefaultExecutionOrder(150)]
 public class WireConnectionController : MonoBehaviour
 {
     [Header("--- THAM CHIẾU HỆ THỐNG ---")]
@@ -179,9 +180,10 @@ public class WireConnectionController : MonoBehaviour
     // Trạng thái nội bộ
     private Camera mainCamera;
     private Transform firstSelectedTerminal = null;
+    public bool HasSelectedTerminal => firstSelectedTerminal != null;
     private Renderer firstSelectedRenderer = null;
-    private Color originalTerminalColor;
-    private bool hasOriginalColor = false;
+    private Material[] originalTerminalMaterials;
+    private Material terminalHighlightMaterial;
     private Material runtimeDefaultMaterial = null;
 
 #if UNITY_EDITOR
@@ -229,14 +231,15 @@ public class WireConnectionController : MonoBehaviour
 
     void Update()
     {
-        if (firstSelectedTerminal != null && !firstSelectedTerminal.gameObject.activeInHierarchy)
+        if ((firstSelectedTerminal == null && originalTerminalMaterials != null) ||
+            (firstSelectedTerminal != null && !firstSelectedTerminal.gameObject.activeInHierarchy))
             CancelSelection();
 
         // Kiểm tra an toàn tham chiếu
-        if (buttonInteractor == null || menuHUD == null)
+        if (buttonInteractor == null)
         {
             AutoResolveReferences();
-            if (buttonInteractor == null || menuHUD == null) return;
+            if (buttonInteractor == null) return;
         }
 
         if (mainCamera == null)
@@ -256,7 +259,7 @@ public class WireConnectionController : MonoBehaviour
         }
 
         // 2. Nếu đang mở menu đặt linh kiện mới, huỷ thao tác nối dây dở dang
-        if (menuHUD.HasSelection)
+        if (menuHUD != null && menuHUD.HasSelection)
         {
             if (firstSelectedTerminal != null)
             {
@@ -266,7 +269,7 @@ public class WireConnectionController : MonoBehaviour
         }
 
         // 3. Lắng nghe cử chỉ Pinch trong Wire Mode
-        if (buttonInteractor.JustPinched)
+        if (buttonInteractor.IsHandVisible && buttonInteractor.JustPinched && !buttonInteractor.PinchConsumedByUI)
         {
             HandlePinchRaycast();
         }
@@ -279,45 +282,75 @@ public class WireConnectionController : MonoBehaviour
     }
 
     /// <summary>
-    /// Tính toán Screen Position từ debugPoint của ngón tay
-    /// </summary>
-    private Vector2 GetCursorScreenPosition()
-    {
-        if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
-        {
-            return new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        }
-        return buttonInteractor.CurrentScreenPos;
-    }
-
-    /// <summary>
     /// Bắn raycast 3D từ con trỏ ngón tay vào không gian để tìm Collider mang Tag "Terminal"
     /// </summary>
     private void HandlePinchRaycast()
     {
-        Vector2 screenPos = GetCursorScreenPosition();
+        Vector2 screenPos = buttonInteractor.CurrentScreenPos;
         Ray ray = mainCamera.ScreenPointToRay(screenPos);
+        Physics.SyncTransforms();
 
-        RaycastHit[] hits = Physics.RaycastAll(ray, maxRaycastDistance);
+        RaycastHit[] hits = Physics.RaycastAll(ray, maxRaycastDistance, Physics.DefaultRaycastLayers,
+            QueryTriggerInteraction.Collide);
         Transform hitTerminal = null;
         float minDistance = float.MaxValue;
 
         foreach (var hit in hits)
         {
-            if (hit.collider.CompareTag("Terminal"))
-            {
-                if (hit.distance < minDistance)
-                {
-                    minDistance = hit.distance;
-                    hitTerminal = hit.collider.transform;
-                }
-            }
+            if (hit.distance >= minDistance) continue;
+            var terminal = hit.collider.GetComponentInParent<Terminal>();
+            if (terminal == null && !hit.collider.CompareTag("Terminal")) continue;
+            minDistance = hit.distance;
+            hitTerminal = terminal != null ? terminal.transform : hit.collider.transform;
         }
+
+        if (hitTerminal == null && buttonInteractor.IsHeadsetMode)
+            hitTerminal = FindHeadsetTerminalNear(screenPos);
 
         if (hitTerminal != null)
         {
             OnTerminalPinched(hitTerminal);
         }
+    }
+
+    private Transform FindHeadsetTerminalNear(Vector2 screenPoint)
+    {
+        if (tapToPlaceController == null) return null;
+        float radius = mainCamera.pixelHeight * 0.022f;
+        float closest = radius * radius;
+        Transform result = null;
+        foreach (var placed in tapToPlaceController.placedObjectsHistory)
+        {
+            if (placed == null || !placed.activeInHierarchy) continue;
+            foreach (var terminal in placed.GetComponentsInChildren<Terminal>())
+            {
+                if (!terminal.isActiveAndEnabled ||
+                    !TryGetTerminalBounds(terminal.transform, out Bounds bounds) ||
+                    (bounds.center - mainCamera.transform.position).sqrMagnitude > maxRaycastDistance * maxRaycastDistance)
+                    continue;
+
+                if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, bounds.center, false, out Vector2 left))
+                    Consider(left, terminal.transform);
+                if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, bounds.center, true, out Vector2 right))
+                    Consider(right, terminal.transform);
+            }
+        }
+        return result;
+
+        void Consider(Vector2 projected, Transform terminal)
+        {
+            float distance = (screenPoint - projected).sqrMagnitude;
+            if (distance >= closest) return;
+            closest = distance;
+            result = terminal;
+        }
+    }
+
+    private static bool TryGetTerminalBounds(Transform terminal, out Bounds bounds)
+    {
+        var collider = terminal.GetComponentInChildren<Collider>();
+        bounds = collider != null ? collider.bounds : default;
+        return collider != null && collider.enabled && collider.gameObject.activeInHierarchy;
     }
 
     /// <summary>
@@ -329,7 +362,7 @@ public class WireConnectionController : MonoBehaviour
         if (firstSelectedTerminal == null)
         {
             firstSelectedTerminal = terminal;
-            HighlightTerminal(firstSelectedTerminal, true);
+            HighlightTerminal(terminal);
             Debug.Log($"<color=yellow>[WireConnection]</color> Đã chọn cực 1: [{terminal.name}] thuộc [{GetRootPlacedName(terminal)}]");
             return;
         }
@@ -1118,25 +1151,19 @@ public class WireConnectionController : MonoBehaviour
 
         for (int i = activeWires.Count - 1; i >= 0; i--)
         {
-            Terminal termA = terminalA.GetComponent<Terminal>() ?? terminalA.GetComponentInChildren<Terminal>();
-            Terminal termB = terminalB.GetComponent<Terminal>() ?? terminalB.GetComponentInChildren<Terminal>();
-            if (termA != null && termB != null)
-            {
-                termA.DisconnectFrom(termB);
-            }
-
             var wire = activeWires[i];
             bool match = (wire.terminalA == terminalA && wire.terminalB == terminalB) ||
                          (wire.terminalA == terminalB && wire.terminalB == terminalA);
+            if (!match) continue;
 
-            if (match)
-            {
-                if (wire.wireMesh != null) Destroy(wire.wireMesh);
-                if (wire.wireObject != null) Destroy(wire.wireObject);
-                activeWires.RemoveAt(i);
-                UpdateActiveWirePositions();
-                return true;
-            }
+            activeWires.RemoveAt(i);
+            Terminal termA = terminalA.GetComponent<Terminal>() ?? terminalA.GetComponentInChildren<Terminal>();
+            Terminal termB = terminalB.GetComponent<Terminal>() ?? terminalB.GetComponentInChildren<Terminal>();
+            if (termA != null && termB != null) termA.DisconnectFrom(termB);
+            UnityEngine.Rendering.CoreUtils.Destroy(wire.wireMesh);
+            UnityEngine.Rendering.CoreUtils.Destroy(wire.wireObject);
+            UpdateActiveWirePositions();
+            return true;
         }
         return false;
     }
@@ -1173,45 +1200,23 @@ public class WireConnectionController : MonoBehaviour
     /// <summary>
     /// Đổi màu Highlight khi cực được chọn / Khôi phục màu gốc khi huỷ chọn
     /// </summary>
-    private void HighlightTerminal(Transform terminal, bool highlight)
+    private void HighlightTerminal(Transform terminal)
     {
-        if (highlight)
+        var renderer = terminal.GetComponentInChildren<Renderer>();
+        if (renderer == null) return;
+        var materials = renderer.sharedMaterials;
+        if (materials.Length == 0) return;
+        if (terminalHighlightMaterial == null)
         {
-            firstSelectedRenderer = terminal.GetComponent<Renderer>();
-            if (firstSelectedRenderer != null && firstSelectedRenderer.material != null)
-            {
-                Material mat = firstSelectedRenderer.material;
-                if (mat.HasProperty("_BaseColor"))
-                {
-                    originalTerminalColor = mat.GetColor("_BaseColor");
-                    hasOriginalColor = true;
-                    mat.SetColor("_BaseColor", highlightColor);
-                }
-                else if (mat.HasProperty("_Color"))
-                {
-                    originalTerminalColor = mat.color;
-                    hasOriginalColor = true;
-                    mat.color = highlightColor;
-                }
-            }
+            Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+            terminalHighlightMaterial = new Material(shader != null ? shader : GetOrCreateRuntimeMaterial().shader);
         }
-        else
-        {
-            if (firstSelectedRenderer != null && hasOriginalColor && firstSelectedRenderer.material != null)
-            {
-                Material mat = firstSelectedRenderer.material;
-                if (mat.HasProperty("_BaseColor"))
-                {
-                    mat.SetColor("_BaseColor", originalTerminalColor);
-                }
-                else if (mat.HasProperty("_Color"))
-                {
-                    mat.color = originalTerminalColor;
-                }
-            }
-            firstSelectedRenderer = null;
-            hasOriginalColor = false;
-        }
+        terminalHighlightMaterial.color = highlightColor;
+        firstSelectedRenderer = renderer;
+        originalTerminalMaterials = materials;
+        var highlighted = new Material[materials.Length];
+        for (int i = 0; i < highlighted.Length; i++) highlighted[i] = terminalHighlightMaterial;
+        renderer.sharedMaterials = highlighted;
     }
 
     /// <summary>
@@ -1219,12 +1224,14 @@ public class WireConnectionController : MonoBehaviour
     /// </summary>
     public void CancelSelection()
     {
-        if (firstSelectedTerminal != null)
-        {
-            HighlightTerminal(firstSelectedTerminal, false);
-            firstSelectedTerminal = null;
-        }
+        if (firstSelectedRenderer != null && originalTerminalMaterials != null)
+            firstSelectedRenderer.sharedMaterials = originalTerminalMaterials;
+        firstSelectedRenderer = null;
+        originalTerminalMaterials = null;
+        firstSelectedTerminal = null;
     }
+
+    private void OnDisable() => CancelSelection();
 
     /// <summary>
     /// Kiểm tra xem 2 cực đã có dây nối giữa chúng hay chưa
@@ -1292,6 +1299,7 @@ public class WireConnectionController : MonoBehaviour
     void OnDestroy()
     {
         ClearJunctionNodes();
+        UnityEngine.Rendering.CoreUtils.Destroy(terminalHighlightMaterial);
     }
 
     private void ClearJunctionNodes()
