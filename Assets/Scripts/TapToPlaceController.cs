@@ -18,7 +18,7 @@ public class TapToPlaceController : MonoBehaviour
     [Header("Đặt nhanh")]
     [Tooltip("Cho phép đặt ngay ở khoảng cách ước lượng khi chưa có mặt phẳng. Neo AR được tạo trong nền.")]
     public bool enableInstantPlacement = true;
-    [Tooltip("Chạm vào vùng camera để đặt, ngoài cử chỉ pinch.")]
+    [Tooltip("Chạm vào vùng camera để đặt hoặc chọn linh kiện.")]
     public bool enableTapToPlace = true;
 
     [Header("Prefab linh kiện (Khớp tên với Menu HUD)")]
@@ -67,6 +67,8 @@ public class TapToPlaceController : MonoBehaviour
     private ARFloatingBubbleMenu floatingMenu = null;
     private float unpinchGraceTimer = 0f;
     private Vector3 lastValidDragPos = Vector3.zero;
+    private Vector2 dragGrabScreenPosition;
+    private bool dragPointerMoved;
     private Quaternion lastValidDragRot = Quaternion.identity;
     private Vector3 dragStartPos = Vector3.zero;
     private Vector2 dragPointerOffset;
@@ -78,7 +80,6 @@ public class TapToPlaceController : MonoBehaviour
     private bool isDragBlocked = false;
     private Camera mainCamera;
     private static readonly List<ARRaycastHit> surfaceHits = new List<ARRaycastHit>();
-    private float lastDragSurfaceHitTime = float.NegativeInfinity;
     private TrackableId lastPreviewTrackableId = TrackableId.invalidId;
     private Vector2 smoothedPlacementScreenPosition;
     private bool hasSmoothedPlacementScreenPosition = false;
@@ -1014,20 +1015,29 @@ public class TapToPlaceController : MonoBehaviour
 
     private void HandleDragAndDrop()
     {
-        if (dragNeedsOpenHandAfterPlacement)
-        {
-            if (buttonInteractor.IsHandVisible && !buttonInteractor.isPinching &&
-                !buttonInteractor.IsGestureTemporarilyOccluded)
-                dragNeedsOpenHandAfterPlacement = false;
-            return;
-        }
         // Tracking/UI ownership ends a drag immediately. A brief hand occlusion
         // below freezes the last measured world pose instead of dropping it.
         if ((!isDragging && buttonInteractor.IsPointerOverUI) ||
             buttonInteractor.PinchConsumedByUI || ARSession.state != ARSessionState.SessionTracking ||
             (wireConnectionController != null && wireConnectionController.IsWireMode))
         {
+            placementTapInput.Reset();
             if (isDragging) ReleaseDraggedObject();
+            return;
+        }
+        if (!isDragging && !buttonInteractor.isPinching && !buttonInteractor.JustPinched &&
+            enableTapToPlace && !buttonInteractor.IsHeadsetMode &&
+            placementTapInput.Read(out Vector2 tap, out bool confirmed) && confirmed)
+        {
+            if (TryFindTapTarget(tap, out GameObject tappedObject)) SelectComponent(tappedObject);
+            else ClearSelectedComponent();
+            return;
+        }
+        if (dragNeedsOpenHandAfterPlacement)
+        {
+            if (buttonInteractor.IsHandVisible && !buttonInteractor.isPinching &&
+                !buttonInteractor.IsGestureTemporarilyOccluded)
+                dragNeedsOpenHandAfterPlacement = false;
             return;
         }
         if (!buttonInteractor.IsHandVisible)
@@ -1047,9 +1057,9 @@ public class TapToPlaceController : MonoBehaviour
         // 1. BẮT ĐẦU KÉO / CHỌN LINH KIỆN
         if (buttonInteractor.JustPinched && cooldownTimer <= 0 && !isDragging)
         {
+            placementTapInput.Reset();
             worldPinchArmed = false;
-            bool hitPlaced = false;
-            if (TryFindDragTarget(screenPos, out GameObject target))
+            if (TryFindPinchTarget(screenPos, out GameObject target))
             {
                 draggedObject = target;
                 draggedObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
@@ -1059,28 +1069,26 @@ public class TapToPlaceController : MonoBehaviour
                 dragLevelTransition.Begin(dragStartPos.y);
                 Vector3 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
                 dragPointerOffset = new Vector2(baseScreen.x, baseScreen.y) - screenPos;
+                dragGrabScreenPosition = screenPos;
+                dragPointerMoved = false;
                 lastValidDragPos = dragStartPos;
                 lastValidDragRot = dragStartRot;
                 currentSmoothedDragPos = dragStartPos;
                 isDragBlocked = false;
                 unpinchGraceTimer = 0f;
-                lastDragSurfaceHitTime = Time.time;
                 dragSurfaceTrackableId = TrackableId.invalidId;
                 dragHasMeasuredSupport = false;
                 if (placedContacts.TryGetValue(draggedObject, out PlacedContact contact))
                 {
+                    dragSurfaceTrackableId = contact.planeId;
                     contact.settling = false;
                     contact.confirmation.Reset();
                 }
 
                 SelectComponent(draggedObject);
                 Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
-                hitPlaced = true;
             }
-
-            // Nếu pinch vào vùng trống -> Bỏ chọn. AR raycast được dùng thay cho
-            // collider của tấm bảng ảo nên người dùng không cần xác định bảng trước.
-            if (!hitPlaced)
+            else if (SelectedComponent != null)
             {
 #if UNITY_2023_1_OR_NEWER
                 if (floatingMenu == null) floatingMenu = FindFirstObjectByType<ARFloatingBubbleMenu>();
@@ -1092,10 +1100,7 @@ public class TapToPlaceController : MonoBehaviour
                     return;
                 }
 
-                if (TryGetRealHorizontalSurface(screenPos, out _))
-                {
-                    ClearSelectedComponent();
-                }
+                ClearSelectedComponent();
             }
         }
 
@@ -1106,54 +1111,20 @@ public class TapToPlaceController : MonoBehaviour
             {
                 unpinchGraceTimer = 0f;
 
-                Vector3 targetPoint = Vector3.zero;
-                bool hasTarget = false;
-                TrackableId currentPlaneId = dragSurfaceTrackableId;
+                float grabSlop = Mathf.Max(8f, mainCamera.pixelHeight * 0.008f);
+                if (!dragPointerMoved && (screenPos - dragGrabScreenPosition).sqrMagnitude < grabSlop * grabSlop)
+                    return;
+                dragPointerMoved = true;
 
-                // 1. Thử raycast với offset
-                if (TryGetDragSurface(screenPos + dragPointerOffset, out Pose surfacePose, out TrackableId dragPlaneId))
+                if (TryGetDragSurface(screenPos, out Pose surfacePose, out TrackableId currentPlaneId))
                 {
-                    lastDragSurfaceHitTime = Time.time;
-                    targetPoint = GetContactPosition(surfacePose);
-                    currentPlaneId = dragPlaneId;
-                    hasTarget = true;
-                }
-                // 2. Thử raycast trực tiếp tại vị trí con trỏ nếu offset bị trượt ngoài mép
-                else if (TryGetDragSurface(screenPos, out Pose directPose, out TrackableId directId))
-                {
-                    lastDragSurfaceHitTime = Time.time;
-                    targetPoint = GetContactPosition(directPose);
-                    currentPlaneId = directId;
-                    hasTarget = true;
-                }
-                // 3. Thử raycast polygon mặt phẳng ngang
-                else if (TryGetRealHorizontalSurface(screenPos, TrackableId.invalidId, out Pose realPose, out TrackableId realId))
-                {
-                    lastDragSurfaceHitTime = Time.time;
-                    targetPoint = GetContactPosition(realPose);
-                    currentPlaneId = realId;
-                    hasTarget = true;
-                }
-                // 4. Fallback mượt mà: Chiếu tia camera lên mặt phẳng cùng cao độ với vật thể
-                // Giúp vật thể luôn bám theo tay 100% thời gian thực, triệt tiêu hoàn toàn hiện tượng khựng/delay
-                else if (lastValidDragPos != Vector3.zero && mainCamera != null)
-                {
-                    Ray ray = mainCamera.ScreenPointToRay(screenPos);
-                    Plane tablePlane = new Plane(Vector3.up, new Vector3(0f, lastValidDragPos.y, 0f));
-                    if (tablePlane.Raycast(ray, out float enter) && enter > 0.05f && enter < 10.0f)
-                    {
-                        targetPoint = ray.GetPoint(enter);
-                        targetPoint.y = lastValidDragPos.y;
-                        hasTarget = true;
-                    }
-                }
-
-                if (hasTarget)
-                {
-                    // Tăng followSpeed từ 70f lên 120f và dùng unscaledDeltaTime để phản hồi tức thì với cử chỉ tay
-                    float followSpeed = 120f;
-                    currentSmoothedDragPos = Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-followSpeed * Time.unscaledDeltaTime));
-                    currentSmoothedDragPos.y = targetPoint.y;
+                    Vector3 targetPoint = dragSurfaceIsEstimated ? surfacePose.position : GetContactPosition(surfacePose);
+                    // A cross-level interpolation can display the new height above the old surface.
+                    bool sameSupport = currentPlaneId == dragSurfaceTrackableId &&
+                        Mathf.Abs(targetPoint.y - lastValidDragPos.y) <= ARSupportPolicy.LevelTransition.SameLevelTolerance;
+                    currentSmoothedDragPos = sameSupport
+                        ? Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-120f * Time.unscaledDeltaTime))
+                        : targetPoint;
 
                     bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, 0f);
                     Quaternion dragTargetRot = dragStartRot;
@@ -1177,6 +1148,7 @@ public class TapToPlaceController : MonoBehaviour
                     else
                     {
                         isDragBlocked = true;
+                        if (!sameSupport) dragLevelTransition.Begin(lastValidDragPos.y);
                         // Vị trí không hợp lệ -> Hiển thị màu đỏ cảnh báo nhưng vẫn bám sát tay để dễ dàng kéo ra vùng trống
                         if (SelectedComponent == draggedObject)
                         {
@@ -1194,6 +1166,7 @@ public class TapToPlaceController : MonoBehaviour
                 {
                     // Giữ vị trí hợp lệ gần nhất nếu hoàn toàn không có thông tin
                     draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
+                    currentSmoothedDragPos = lastValidDragPos;
                     if (SelectedComponent == draggedObject)
                         UpdateSelectedComponentVisual();
                 }
@@ -1215,7 +1188,7 @@ public class TapToPlaceController : MonoBehaviour
         {
             // Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
             bool isOverlapping = CheckOverlap(draggedObject.transform.position, draggedObject, out _);
-            if (isOverlapping && lastValidDragPos != Vector3.zero)
+            if (isOverlapping)
             {
                 draggedObject.transform.position = lastValidDragPos;
                 draggedObject.transform.rotation = lastValidDragRot;
@@ -1390,7 +1363,7 @@ public class TapToPlaceController : MonoBehaviour
             {
                 StepContactCorrection(obj.transform, contact.targetHeight, Time.unscaledDeltaTime);
                 wiresChanged = true;
-                if (Mathf.Abs(obj.transform.position.y - contact.targetHeight) < 0.0001f)
+                if (obj.transform.position.y <= contact.targetHeight + 0.0001f)
                 {
                     contact.settling = false;
                     ReanchorDraggedObject(obj);
@@ -1461,7 +1434,8 @@ public class TapToPlaceController : MonoBehaviour
     private static void StepContactCorrection(Transform body, float height, float deltaTime)
     {
         Vector3 position = body.position;
-        position.y = Mathf.MoveTowards(position.y, height, 1.2f * Mathf.Clamp(deltaTime, 0f, 0.05f));
+        position.y = Mathf.MoveTowards(position.y, Mathf.Min(height, position.y),
+            1.2f * Mathf.Clamp(deltaTime, 0f, 0.05f));
         body.position = position;
     }
 
@@ -1499,14 +1473,15 @@ public class TapToPlaceController : MonoBehaviour
         return id != TrackableId.invalidId;
     }
 
-    private bool TryGetVerticalContactOnPlane(Vector3 contact, ARPlane plane, out Vector3 point)
+    private bool TryGetVerticalContactOnPlane(Vector3 contact, ARPlane plane, out Vector3 point,
+        bool requireHeightCorrection = true)
     {
         point = default;
         if (!IsUsableSurfacePlane(plane)) return false;
         Vector2 center = plane.center;
         Vector3 planePoint = plane.transform.TransformPoint(new Vector3(center.x, 0f, center.y));
         if (!ARSupportPolicy.TryProjectContactVertically(contact, planePoint, plane.transform.up, out point) ||
-            !ARSupportPolicy.CanCorrectContactHeight(contact.y, point.y + surfaceContactOffset) ||
+            (requireHeightCorrection && !ARSupportPolicy.CanCorrectContactHeight(contact.y, point.y + surfaceContactOffset)) ||
             mainCamera.transform.position.y <= point.y + 0.02f) return false;
         Vector3 local = plane.transform.InverseTransformPoint(point);
         return IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary);
@@ -1579,9 +1554,41 @@ public class TapToPlaceController : MonoBehaviour
         return null;
     }
 
-    private bool TryFindDragTarget(Vector2 screenPoint, out GameObject target)
+    private bool TryFindPinchTarget(Vector2 screenPoint, out GameObject target)
     {
         target = null;
+        float closestDistance = 20f;
+        if (mainCamera.TryGetComponent(out PhoneHeadsetAR headset) && headset.Stereo?.IsReady == true)
+        {
+            int mask = headset.Stereo.SceneCullingMask;
+            for (int eye = 0; eye < 2; eye++)
+            {
+                if (PhoneHeadsetStereo.TryGetEyeRay(mainCamera, screenPoint, eye == 1, out Ray ray))
+                    FindClosestPinchHit(ray, mask, ref closestDistance, ref target);
+            }
+        }
+        else
+        {
+            FindClosestPinchHit(mainCamera.ScreenPointToRay(screenPoint), mainCamera.cullingMask,
+                ref closestDistance, ref target);
+        }
+        return target != null;
+    }
+
+    private void FindClosestPinchHit(Ray ray, int cullingMask, ref float closestDistance, ref GameObject target)
+    {
+        foreach (GameObject obj in placedObjectsHistory)
+        {
+            if (obj != null && obj.activeInHierarchy &&
+                geometryCache.TryHitVisibleMesh(obj, ray, cullingMask, ref closestDistance))
+                target = obj;
+        }
+    }
+
+    private bool TryFindTapTarget(Vector2 screenPoint, out GameObject target)
+    {
+        target = null;
+        Physics.SyncTransforms();
         RaycastHit[] hits = Physics.RaycastAll(mainCamera.ScreenPointToRay(screenPoint), 20f);
         System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
         foreach (RaycastHit hit in hits)
@@ -1591,13 +1598,14 @@ public class TapToPlaceController : MonoBehaviour
             target = FindPlacedRoot(hit.collider.transform);
             if (target != null) return true;
         }
-        return TryFindNearbyDragTarget(screenPoint, out target);
+        return TryFindNearbyTapTarget(screenPoint, out target);
     }
 
-    private bool TryFindNearbyDragTarget(Vector2 screenPoint, out GameObject target)
+    private bool TryFindNearbyTapTarget(Vector2 screenPoint, out GameObject target)
     {
         target = null;
-        float margin = Mathf.Max(14f, Screen.height * 0.0125f);
+        int cullingMask = mainCamera.cullingMask;
+        float margin = Mathf.Max(22f, mainCamera.pixelHeight * 0.022f);
         float bestDistance = float.PositiveInfinity;
         float bestDepth = float.PositiveInfinity;
         foreach (GameObject obj in placedObjectsHistory)
@@ -1608,25 +1616,12 @@ public class TapToPlaceController : MonoBehaviour
             foreach (Renderer renderer in obj.GetComponentsInChildren<Renderer>())
             {
                 if (!renderer.enabled || renderer is LineRenderer ||
-                    (mainCamera.cullingMask & (1 << renderer.gameObject.layer)) == 0) continue;
+                    (cullingMask & (1 << renderer.gameObject.layer)) == 0) continue;
                 if (!hasBounds) { bounds = renderer.bounds; hasBounds = true; }
                 else bounds.Encapsulate(renderer.bounds);
             }
             if (!hasBounds) continue;
-            Vector2 min = Vector2.one * float.PositiveInfinity, max = Vector2.one * float.NegativeInfinity;
-            bool inFront = true;
-            for (int x = -1; x <= 1; x += 2)
-            for (int y = -1; y <= 1; y += 2)
-            for (int z = -1; z <= 1; z += 2)
-            {
-                Vector3 corner = mainCamera.WorldToScreenPoint(bounds.center + Vector3.Scale(bounds.extents, new Vector3(x, y, z)));
-                if (corner.z <= mainCamera.nearClipPlane) inFront = false;
-                min = Vector2.Min(min, corner);
-                max = Vector2.Max(max, corner);
-            }
-            if (!inFront) continue;
-            Vector2 nearest = new Vector2(Mathf.Clamp(screenPoint.x, min.x, max.x), Mathf.Clamp(screenPoint.y, min.y, max.y));
-            float distance = (screenPoint - nearest).sqrMagnitude;
+            float distance = ProjectedTapDistance(bounds, screenPoint);
             float depth = mainCamera.WorldToScreenPoint(bounds.center).z;
             if (distance > margin * margin || distance > bestDistance ||
                 (Mathf.Approximately(distance, bestDistance) && depth >= bestDepth)) continue;
@@ -1637,6 +1632,23 @@ public class TapToPlaceController : MonoBehaviour
         return target != null;
     }
 
+    private float ProjectedTapDistance(Bounds bounds, Vector2 pointer)
+    {
+        Vector2 min = Vector2.one * float.PositiveInfinity, max = Vector2.one * float.NegativeInfinity;
+        for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+        for (int z = -1; z <= 1; z += 2)
+        {
+            Vector3 corner = bounds.center + Vector3.Scale(bounds.extents, new Vector3(x, y, z));
+            Vector3 screen = mainCamera.WorldToScreenPoint(corner);
+            if (screen.z <= mainCamera.nearClipPlane) return float.PositiveInfinity;
+            min = Vector2.Min(min, screen);
+            max = Vector2.Max(max, screen);
+        }
+        var nearest = new Vector2(Mathf.Clamp(pointer.x, min.x, max.x), Mathf.Clamp(pointer.y, min.y, max.y));
+        return (pointer - nearest).sqrMagnitude;
+    }
+
     private bool TryGetDragSurface(Vector2 screenPoint, out Pose pose, out TrackableId planeId)
     {
         dragSurfaceIsEstimated = false;
@@ -1644,13 +1656,16 @@ public class TapToPlaceController : MonoBehaviour
         planeId = TrackableId.invalidId;
         if (mainCamera == null ||
             ARSession.state != ARSessionState.SessionTracking) return false;
-        bool planeHit = TryProjectPointerToTrackedPlane(screenPoint, dragSurfaceTrackableId, out Pose planePose, out TrackableId id);
-        if (!TryChooseMeasuredSupport(screenPoint, planeHit, planePose, id, out pose, out planeId, out _))
+        Vector2 offsetPoint = screenPoint + dragPointerOffset;
+        if (!TryGetMeasuredDragSupport(offsetPoint, out pose, out planeId) &&
+            (measuredDepth.IsConfirmingSurface || dragPointerOffset.sqrMagnitude < 1f ||
+             !TryGetMeasuredDragSupport(screenPoint, out pose, out planeId)))
         {
             dragLevelTransition.CancelPending();
             // An estimated placement remains movable even before surface detection.
             // Keep its authored height; measured objects retain bounded surface rules.
-            if (enableInstantPlacement && draggedObject != null && instantPlacedObjects.Contains(draggedObject))
+            if (enableInstantPlacement && !dragHasMeasuredSupport &&
+                draggedObject != null && instantPlacedObjects.Contains(draggedObject))
             {
                 dragSurfaceIsEstimated = true;
                 return TryProjectEstimatedLevel(screenPoint, dragStartPos, out pose);
@@ -1662,10 +1677,16 @@ public class TapToPlaceController : MonoBehaviour
         return dragLevelTransition.Accept(GetContactPosition(pose), screenPoint, Time.unscaledTime);
     }
 
+    private bool TryGetMeasuredDragSupport(Vector2 screenPoint, out Pose pose, out TrackableId planeId)
+    {
+        bool planeHit = TryGetRealHorizontalSurface(screenPoint, dragSurfaceTrackableId, out Pose planePose, out TrackableId id);
+        return TryChooseMeasuredSupport(screenPoint, planeHit, planePose, id, out pose, out planeId, out _);
+    }
+
     private static bool IsSameDragSupportLevel(float startHeight, float contactHeight)
     {
         return !float.IsNaN(contactHeight) && !float.IsInfinity(contactHeight) &&
-            Mathf.Abs(startHeight - contactHeight) <= 0.05f;
+            Mathf.Abs(startHeight - contactHeight) <= ARSupportPolicy.LevelTransition.SameLevelTolerance;
     }
 
     private Vector2 GetCursorScreenPosition()
@@ -1713,11 +1734,6 @@ public class TapToPlaceController : MonoBehaviour
     /// Không dùng estimated plane và không dùng một collider vô hạn, vì cả hai trường
     /// hợp đều có thể cho phép thả vật ra ngoài mép bàn rồi treo trong không khí.
     /// </summary>
-    private bool TryGetRealHorizontalSurface(Vector2 screenPosition, out Pose pose)
-    {
-        return TryGetRealHorizontalSurface(screenPosition, TrackableId.invalidId, out pose, out _);
-    }
-
     private bool TryGetRealHorizontalSurface(
         Vector2 screenPosition,
         TrackableId preferredTrackableId,
@@ -2157,14 +2173,22 @@ public class TapToPlaceController : MonoBehaviour
         wireConnectionController?.UpdateActiveWirePositionsExternal();
     }
 
-    internal bool TryRefineInstantPlacement(GameObject obj, Transform support, Vector3 refinedSupportPosition)
+    internal bool TryRefineInstantPlacement(GameObject obj, Transform support, ARPlane measuredPlane)
     {
         if (obj == null || support == null || !obj.activeInHierarchy ||
             (isDragging && draggedObject == obj) ||
             (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)) return false;
-        Vector3 candidate = obj.transform.position + refinedSupportPosition - support.position;
+        Vector3 position = obj.transform.position;
+        if (mainCamera == null ||
+            !TryGetVerticalContactOnPlane(position, measuredPlane, out Vector3 point, requireHeightCorrection: false))
+            return false;
+        float height = point.y + surfaceContactOffset;
+        float change = height - position.y;
+        if (change >= 0f) return change <= 0.012f;
+        if (change < -0.012f && !ARSupportPolicy.CanCorrectContactHeight(position.y, height)) return false;
+        Vector3 candidate = new Vector3(position.x, height, position.z);
         if (CheckOverlapForObject(obj, candidate, obj.transform.rotation, obj, out _, 0f)) return false;
-        support.position = refinedSupportPosition;
+        support.position += candidate - position;
         wireConnectionController?.UpdateActiveWirePositionsExternal();
         return true;
     }
@@ -2250,7 +2274,7 @@ public class TapToPlaceController : MonoBehaviour
                 return;
             }
 
-            PlaceObject(nativeAnchor.transform.position, pose.rotation, nativeAnchor);
+            PlaceObject(pose.position, pose.rotation, nativeAnchor);
         }
         catch (System.Exception ex)
         {
@@ -2700,9 +2724,8 @@ public class TapToPlaceController : MonoBehaviour
                 }
                 else
                 {
-                    // Imported FBX meshes are not CPU-readable on Android. Their
-                    // local bounds are still available; with the shipped upright
-                    // body meshes and yaw rotation this is the exact lower face.
+                    // Use local bounds for meshes imported without CPU access.
+                    // For upright body meshes and yaw rotation this is the lower face.
                     bottomY = Mathf.Min(bottomY, GetLowestTransformedMeshBound(mesh.bounds, renderer.transform));
                 }
             }

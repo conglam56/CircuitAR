@@ -23,6 +23,7 @@ public sealed class PhoneHeadsetStereo : IDisposable
     public RenderTexture LeftTexture => textures[0];
     public RenderTexture RightTexture => textures[1];
     public bool IsReady { get; private set; }
+    internal int SceneCullingMask => sourceCullingMask;
 
     public PhoneHeadsetStereo(Camera source)
     {
@@ -98,7 +99,7 @@ public sealed class PhoneHeadsetStereo : IDisposable
         if (!IsReady || !cameras.Contains(source)) return;
         for (int i = 0; i < eyes.Length; i++)
         {
-            float offset = i == 0 ? -EyeSeparation * 0.5f : EyeSeparation * 0.5f;
+            float offset = GetEyeOffset(i == 1);
             eyes[i].transform.localPosition = Vector3.right * offset;
             eyes[i].projectionMatrix = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic);
         }
@@ -116,10 +117,11 @@ public sealed class PhoneHeadsetStereo : IDisposable
         return centerProjection;
     }
 
-    public static bool TryProjectIntoEye(Camera source, Vector3 worldPoint, bool rightEye, out Vector2 screenPoint)
+    public static bool TryProjectIntoEye(Camera source, Vector3 worldPoint, bool rightEye, out Vector2 screenPoint,
+        bool clipToLens = true)
     {
         screenPoint = default;
-        float offset = (rightEye ? 0.5f : -0.5f) * EyeSeparation;
+        float offset = GetEyeOffset(rightEye);
         Vector3 view = source.worldToCameraMatrix.MultiplyPoint3x4(worldPoint);
         if (-view.z <= source.nearClipPlane) return false;
         view.x -= offset;
@@ -129,14 +131,36 @@ public sealed class PhoneHeadsetStereo : IDisposable
 
         // Undo the eye half's crop. Hand input and UI use the source camera's viewport.
         var viewport = new Vector2(0.5f + clip.x / (4f * clip.w), 0.5f + clip.y / (2f * clip.w));
-        if (!ContainsSourcePoint(viewport)) return false;
+        if (clipToLens && !ContainsSourcePoint(viewport)) return false;
         screenPoint = source.pixelRect.min + Vector2.Scale(viewport, source.pixelRect.size);
         return true;
     }
 
+    internal static bool TryGetEyeRay(Camera source, Vector2 screenPoint, bool rightEye, out Ray ray)
+    {
+        ray = default;
+        Vector2 viewport = source.ScreenToViewportPoint(screenPoint);
+        if (!ContainsSourcePoint(viewport)) return false;
+
+        float offset = GetEyeOffset(rightEye);
+        Matrix4x4 clipToView = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic).inverse;
+        Matrix4x4 viewToWorld = source.cameraToWorldMatrix;
+        Vector2 ndc = SourceToEyeNdc(viewport);
+        Vector3 near = clipToView.MultiplyPoint(new Vector3(ndc.x, ndc.y, -1f));
+        Vector3 middle = clipToView.MultiplyPoint(new Vector3(ndc.x, ndc.y, 0f));
+        ray = new Ray(viewToWorld.MultiplyPoint3x4(near + Vector3.right * offset),
+            viewToWorld.MultiplyVector(middle - near));
+        return true;
+    }
+
+    private static float GetEyeOffset(bool rightEye) => (rightEye ? 0.5f : -0.5f) * EyeSeparation;
+
+    private static Vector2 SourceToEyeNdc(Vector2 viewport) =>
+        new Vector2(4f * (viewport.x - 0.5f), 2f * (viewport.y - 0.5f));
+
     public static bool ContainsSourcePoint(Vector2 viewportPoint)
     {
-        var warped = new Vector2(4f * (viewportPoint.x - 0.5f), 2f * (viewportPoint.y - 0.5f));
+        Vector2 warped = SourceToEyeNdc(viewportPoint);
         if (Mathf.Abs(warped.x) > 1f || Mathf.Abs(warped.y) > 1f) return false;
         // Invert the compositor's mild radial warp to reject points in its black border.
         Vector2 lens = warped;

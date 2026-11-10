@@ -28,8 +28,7 @@ public static class ARSupportPolicy
     // automatically lift a floor object onto a newly merged tabletop.
     public static bool CanCorrectContactHeight(float current, float measured) =>
         IsFinite(new Vector3(current, measured, 0f)) &&
-        Mathf.Abs(measured - current) > 0.012f &&
-        measured - current >= -0.6f && measured - current <= 0.03f;
+            measured - current < -0.012f && measured - current >= -0.6f;
 
     public static bool TryProjectContactVertically(Vector3 contact, Vector3 planePoint,
         Vector3 normal, out Vector3 projected)
@@ -80,6 +79,7 @@ public static class ARSupportPolicy
     public sealed class LevelTransition
     {
         public const float HoldDuration = 0.35f;
+        public const float SameLevelTolerance = 0.02f;
         public bool IsPending { get; private set; }
         public float PendingHeight => pendingPoint.y;
         private bool initialized;
@@ -104,7 +104,7 @@ public static class ARSupportPolicy
                 return false;
             }
             if (!initialized) Begin(measuredContact.y);
-            if (Mathf.Abs(measuredContact.y - acceptedHeight) <= 0.05f)
+            if (Mathf.Abs(measuredContact.y - acceptedHeight) <= SameLevelTolerance)
             {
                 CancelPending();
                 return true;

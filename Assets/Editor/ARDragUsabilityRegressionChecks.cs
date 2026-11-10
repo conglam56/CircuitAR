@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -15,6 +16,16 @@ internal static class ARDragUsabilityRegressionChecks
 
     public static void Run(List<string> results)
     {
+        foreach (string guid in AssetDatabase.FindAssets("t:Prefab", new[] { "Assets/Prefabs/Components" }))
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            foreach (MeshFilter filter in prefab.GetComponentsInChildren<MeshFilter>())
+                Require(filter.sharedMesh == null || filter.sharedMesh.isReadable,
+                    $"Pinch picking needs CPU access to {filter.sharedMesh?.name} in {path}.");
+        }
+        results.Add("PASS: placed component models expose the mesh data needed for pinch picking");
+
         var scene = EditorSceneManager.NewPreviewScene();
         var root = new GameObject("ARDragUsabilityRegressionFixture");
         SceneManager.MoveGameObjectToScene(root, scene);
@@ -70,13 +81,13 @@ internal static class ARDragUsabilityRegressionChecks
 
             controller.placedObjectsHistory.Add(near);
             Rect rectangle = ProjectedRect(camera, near.GetComponent<Renderer>().bounds);
-            float margin = Mathf.Max(14f, Screen.height * 0.0125f);
+            float margin = Mathf.Max(22f, camera.pixelHeight * 0.022f);
             Vector2 nearEdge = new Vector2(rectangle.xMax + margin * 0.6f, rectangle.center.y);
             Require(Nearby(controller, nearEdge) == near,
-                "A pointer just outside the rendered component must be accepted within the screen-space grab margin.");
+                "A tap just outside the rendered component must be accepted within the tap margin.");
             Require(Nearby(controller, new Vector2(rectangle.xMax + margin + 3f, rectangle.center.y)) == null,
-                "A pointer beyond the grab margin must not select the component.");
-            results.Add("PASS: screen-space grab margin accepts near misses and rejects points beyond its boundary");
+                "A tap beyond the tap margin must not select the component.");
+            results.Add("PASS: handheld taps retain their screen-space selection margin");
 
             controller.placedObjectsHistory.Insert(0, far);
             Vector2 center = camera.WorldToScreenPoint(near.transform.position);
@@ -93,16 +104,19 @@ internal static class ARDragUsabilityRegressionChecks
             near.transform.localPosition = Vector3.forward * 2f;
             results.Add("PASS: nearby picking prefers visible nearest-depth components and ignores hidden/behind-camera targets");
 
+            CheckHeadsetPinch(controller, camera, near);
+            results.Add("PASS: headset pinches can grab a mesh in either eye and a near miss clears selection");
+
             SetInput(input, visible: true, pinching: true, justPinched: true);
             Set(input, "<CurrentScreenPos>k__BackingField", center);
             Set(controller, "worldPinchArmed", false);
             Set(controller, "cooldownTimer", 0f);
             Call(controller, "HandleDragAndDrop");
             Require(controller.IsDragging && controller.DraggedObject == near,
-                "A fresh world pinch must begin a drag even if the obsolete arming latch is false; disabled colliders exercise history fallback.");
+                "A fresh world pinch on the mesh must begin a drag even with disabled colliders and the obsolete arming latch false.");
             Require(Vector2.Distance((Vector2)Get(controller, "dragPointerOffset"), Vector2.zero) < 0.1f,
                 "Beginning a centered grab must preserve its original projected base point.");
-            results.Add("PASS: a fresh world pinch grabs through visible-history fallback without an additional arming gesture");
+            results.Add("PASS: a fresh pinch on the visible mesh starts a drag without an additional arming gesture");
 
             Vector3 stablePosition = near.transform.position;
             SetInput(input, visible: false, pinching: false, justPinched: false);
@@ -150,8 +164,21 @@ internal static class ARDragUsabilityRegressionChecks
             wire.isWireMode = false;
             Set(input, "<PinchConsumedByUI>k__BackingField", true);
             Call(controller, "HandleDragAndDrop");
-            Require(!controller.IsDragging, "A pinch started on UI must not become a component grab.");
+            Require(!controller.IsDragging && controller.SelectedComponent == near,
+                "A pinch started on UI must preserve the current selection without becoming a component grab.");
             results.Add("PASS: Wire mode and UI-owned pinch gestures still cannot begin component dragging");
+
+            CheckEmptyPinchDeselect(controller, near, nearEdge);
+            results.Add("PASS: a handheld pinch in the tap margin clears selection without a detected plane");
+
+            near.transform.localRotation = Quaternion.Euler(0f, 0f, 45f);
+            Rect rotatedBounds = ProjectedRect(camera, near.GetComponent<Renderer>().bounds);
+            Vector2 emptyCorner = rotatedBounds.max - new Vector2(3f, 3f);
+            Require(Nearby(controller, emptyCorner) == near,
+                "The test point must be inside the rotated component's projected bounds.");
+            controller.SelectComponent(near);
+            CheckEmptyPinchDeselect(controller, near, emptyCorner);
+            results.Add("PASS: a pinch inside projected bounds but outside the actual mesh does not grab the component");
         }
         finally
         {
@@ -169,6 +196,70 @@ internal static class ARDragUsabilityRegressionChecks
         }
     }
 
+    private static void CheckHeadsetPinch(TapToPlaceController controller, Camera camera, GameObject near)
+    {
+        var headset = camera.gameObject.AddComponent<PhoneHeadsetAR>();
+        var landscape = new RenderTexture(960, 432, 24);
+        Rect pixelRect = camera.pixelRect;
+        float aspect = camera.aspect;
+        Vector3 position = near.transform.localPosition;
+        Vector3 scale = near.transform.localScale;
+        camera.targetTexture = landscape;
+        camera.aspect = (float)landscape.width / landscape.height;
+        near.transform.localPosition = Vector3.forward * 0.38f;
+        near.transform.localScale = Vector3.one * 0.025f;
+        var stereo = new PhoneHeadsetStereo(camera);
+        try
+        {
+            Set(headset, "stereo", stereo);
+            Require(stereo.IsReady && camera.cullingMask == 0,
+                "The fixture must exercise headset rendering with the source camera's object layers masked out.");
+            var input = controller.buttonInteractor;
+            input.SetHeadsetCamera(camera);
+            for (int eye = 0; eye < 2; eye++)
+            {
+                Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, near.transform.position, eye == 1, out Vector2 eyeCenter),
+                    "The target must be visible in both eyes.");
+                Require(!near.GetComponent<Renderer>().bounds.IntersectRay(camera.ScreenPointToRay(eyeCenter)),
+                    "The headset fixture must require the correct eye ray instead of a center-camera ray.");
+                SetInput(input, visible: true, pinching: true, justPinched: true);
+                Set(input, "<CurrentScreenPos>k__BackingField", eyeCenter);
+                Call(controller, "HandleDragAndDrop");
+                Require(controller.IsDragging && controller.SelectedComponent == near &&
+                    near.transform.localPosition == Vector3.forward * 0.38f &&
+                    near.GetComponent<Renderer>().sharedMaterial == Get(controller, "selectionHighlightMat") as Material,
+                    "A direct headset pinch must grab and highlight the component without jumping.");
+                Call(controller, "ReleaseDraggedObject");
+                CheckEmptyPinchDeselect(controller, near, eyeCenter + Vector2.up * 23f);
+            }
+            input.SetHeadsetCamera(null);
+        }
+        finally
+        {
+            stereo.Dispose();
+            camera.targetTexture = null;
+            camera.pixelRect = pixelRect;
+            camera.aspect = aspect;
+            near.transform.localPosition = position;
+            near.transform.localScale = scale;
+            UnityEngine.Object.DestroyImmediate(landscape);
+            UnityEngine.Object.DestroyImmediate(headset);
+        }
+    }
+
+    private static void CheckEmptyPinchDeselect(TapToPlaceController controller, GameObject selected, Vector2 point)
+    {
+        Require(controller.SelectedComponent == selected && controller.arPlaneManager == null,
+            "The fixture must start with a selected object and no detected surface.");
+        var input = controller.buttonInteractor;
+        SetInput(input, visible: true, pinching: true, justPinched: true);
+        Set(input, "<CurrentScreenPos>k__BackingField", point);
+        Call(controller, "HandleDragAndDrop");
+        Require(controller.SelectedComponent == null && !controller.IsDragging &&
+            selected.GetComponent<Renderer>().sharedMaterial != Get(controller, "selectionHighlightMat") as Material,
+            "An empty pinch must deselect and restore the renderer without requiring an AR raycast hit.");
+    }
+
     private static GameObject Cube(GameObject root, string name, Vector3 position)
     {
         var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -176,7 +267,7 @@ internal static class ARDragUsabilityRegressionChecks
         cube.transform.SetParent(root.transform, false);
         cube.transform.localPosition = position;
         cube.transform.localScale = Vector3.one * 0.2f;
-        // Deliberately force the visible-history fallback instead of world physics.
+        // Pinch picking must work against the visible mesh without a physics collider.
         cube.GetComponent<Collider>().enabled = false;
         return cube;
     }
@@ -200,7 +291,7 @@ internal static class ARDragUsabilityRegressionChecks
     private static GameObject Nearby(TapToPlaceController controller, Vector2 point)
     {
         var arguments = new object[] { point, null };
-        bool found = (bool)controller.GetType().GetMethod("TryFindNearbyDragTarget", PrivateInstance)
+        bool found = (bool)controller.GetType().GetMethod("TryFindNearbyTapTarget", PrivateInstance)
             .Invoke(controller, arguments);
         Require(found == (arguments[1] != null), "Nearby target return value must match its out parameter.");
         return arguments[1] as GameObject;

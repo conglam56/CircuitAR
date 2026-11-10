@@ -817,6 +817,33 @@ internal static class ARPlacementRegressionChecks
                 levelTransition.Begin(controller.surfaceContactOffset);
                 SetPlaneTracking(table, tableId, TrackingState.Limited, PlaneAlignment.HorizontalUp);
                 Require(!DragHit(Vector3.zero), "Losing tabletop tracking must freeze the drag, not jump to the tracked floor.");
+
+                SetPlaneTracking(table, tableId, TrackingState.Tracking, PlaneAlignment.HorizontalUp);
+                var upper = CreateTrackedPlane(dragFixture, dragManager, new TrackableId(780, 3), new[]
+                {
+                    new Vector2(-0.16f, -0.16f), new Vector2(0.16f, -0.16f),
+                    new Vector2(0.16f, 0.16f), new Vector2(-0.16f, 0.16f)
+                });
+                upper.transform.position = new Vector3(0.60f, 0.25f, 0f);
+                var held = Child(dragFixture, "Held component");
+                held.transform.position = Vector3.up * controller.surfaceContactOffset;
+                Vector3 previousContact = held.transform.position;
+                levelTransition.Begin(previousContact.y);
+                Set(controller, "draggedObject", held);
+                Set(controller, "isDragging", true);
+                Set(controller, "dragNeedsOpenHandAfterPlacement", false);
+                Set(controller, "dragGrabScreenPosition", (Vector2)camera.WorldToScreenPoint(previousContact));
+                Set(controller, "lastValidDragPos", previousContact);
+                Set(input, "<CurrentScreenPos>k__BackingField", (Vector2)camera.WorldToScreenPoint(upper.transform.position));
+                Set(input, "<IsHandVisible>k__BackingField", true);
+                input.PinchConsumedByUI = false;
+                input.isPinching = true;
+                Call(controller, "HandleDragAndDrop");
+                Require(controller.IsDragging && levelTransition.IsPending && held.transform.position == previousContact,
+                    "The live drag must hold its old contact while a higher surface is still being confirmed.");
+                Set(controller, "isDragging", false);
+                Set(controller, "draggedObject", null);
+                input.isPinching = false;
             }
             finally
             {
@@ -824,6 +851,7 @@ internal static class ARPlacementRegressionChecks
                 camera.transform.SetPositionAndRotation(oldCameraPosition, oldCameraRotation);
             }
             results.Add("PASS: drag rays reject accidental floor jumps but allow a stable deliberate hold over the lower measured floor");
+            results.Add("PASS: the live drag cannot bypass the support hold and lift a component onto a higher plane");
 
             controller.StartPreview("Test");
             Set(controller, "placementRequestHasSurface", true);

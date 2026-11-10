@@ -102,7 +102,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         if (trackedRaycast != null)
         {
             if (HasMeasuredHorizontalContact(trackedRaycast) &&
-                owner.TryRefineInstantPlacement(gameObject, supportRoot, trackedRaycast.transform.position))
+                owner.TryRefineInstantPlacement(gameObject, supportRoot, trackedRaycast.plane))
             {
                 hasMeasuredSurface = true;
                 RemoveTrackedRaycast();

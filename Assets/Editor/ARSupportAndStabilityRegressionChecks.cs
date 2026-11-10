@@ -60,6 +60,7 @@ internal static class ARSupportAndStabilityRegressionChecks
         Require(ARSupportPolicy.CanCorrectContactHeight(0.45f, 0f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0.75f, 0f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0f, 0.23f) &&
+            !ARSupportPolicy.CanCorrectContactHeight(0f, 0.02f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0f, 0.008f) &&
             !ARSupportPolicy.CanCorrectContactHeight(float.NaN, 0f),
             "Contact reconciliation may lower an obsolete floor contact, but cannot cross a tabletop height, amplify jitter or accept invalid data.");
@@ -160,6 +161,8 @@ internal static class ARSupportAndStabilityRegressionChecks
             Vector3 fixedXZ = body.transform.position;
             Quaternion fixedRotation = body.transform.rotation;
             var stepContact = typeof(TapToPlaceController).GetMethod("StepContactCorrection", BindingFlags.Static | BindingFlags.NonPublic);
+            stepContact.Invoke(null, new object[] { body.transform, 0.47f, 0.05f });
+            Require(body.transform.position == fixedXZ, "A contact correction cannot lift the component.");
             for (int i = 0; i < 10; i++)
             {
                 stepContact.Invoke(null, new object[] { body.transform, 0f, 0.05f });

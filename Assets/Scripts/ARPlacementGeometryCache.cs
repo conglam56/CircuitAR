@@ -2,9 +2,8 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Keeps authored component footprints out of the placement frame loop. Geometry is
-/// stored in root-local space; root motion, rotation and scale are applied at query
-/// time. Call Invalidate after changing child transforms, meshes or collider shapes.
+/// Caches component footprints and local mesh data used for pinch picking.
+/// Call Invalidate after changing child transforms, meshes or collider shapes.
 /// </summary>
 public sealed class ARPlacementGeometryCache
 {
@@ -16,6 +15,8 @@ public sealed class ARPlacementGeometryCache
 
     private readonly Dictionary<GameObject, LocalFootprint> footprints =
         new Dictionary<GameObject, LocalFootprint>();
+    private readonly Dictionary<Mesh, (Vector3[] vertices, int[] triangles)> pickMeshes =
+        new Dictionary<Mesh, (Vector3[] vertices, int[] triangles)>();
     private readonly List<BoxCollider> boxes = new List<BoxCollider>();
     private readonly List<Renderer> renderers = new List<Renderer>();
 
@@ -29,8 +30,68 @@ public sealed class ARPlacementGeometryCache
     public void Clear()
     {
         footprints.Clear();
+        pickMeshes.Clear();
         boxes.Clear();
         renderers.Clear();
+    }
+
+    internal bool TryHitVisibleMesh(GameObject obj, Ray ray, int cullingMask, ref float closestDistance)
+    {
+        bool hit = false;
+        renderers.Clear();
+        obj.GetComponentsInChildren(false, renderers);
+        foreach (Renderer renderer in renderers)
+        {
+            if (!renderer.enabled || renderer.forceRenderingOff ||
+                (cullingMask & (1 << renderer.gameObject.layer)) == 0 ||
+                !renderer.bounds.IntersectRay(ray, out float boundsDistance) || boundsDistance > closestDistance ||
+                !renderer.TryGetComponent(out MeshFilter filter)) continue;
+
+            Mesh mesh = filter.sharedMesh;
+            if (mesh == null || !mesh.isReadable || renderer.GetComponent<TMPro.TMP_Text>() != null) continue;
+            if (!pickMeshes.TryGetValue(mesh, out var geometry))
+            {
+                geometry = (mesh.vertices, mesh.triangles);
+                pickMeshes.Add(mesh, geometry);
+            }
+
+            // Keep the direction unnormalized in local space so hit distances are in world units.
+            Matrix4x4 worldToLocal = renderer.transform.worldToLocalMatrix;
+            Vector3 origin = worldToLocal.MultiplyPoint3x4(ray.origin);
+            Vector3 direction = worldToLocal.MultiplyVector(ray.direction);
+            int[] triangles = geometry.triangles;
+            Vector3[] vertices = geometry.vertices;
+            for (int i = 0; i < triangles.Length; i += 3)
+            {
+                if (!TryHitTriangle(origin, direction, vertices[triangles[i]], vertices[triangles[i + 1]],
+                        vertices[triangles[i + 2]], out float distance) || distance >= closestDistance) continue;
+                closestDistance = distance;
+                hit = true;
+            }
+        }
+        renderers.Clear();
+        return hit;
+    }
+
+    private static bool TryHitTriangle(Vector3 origin, Vector3 direction, Vector3 a, Vector3 b, Vector3 c,
+        out float distance)
+    {
+        distance = 0f;
+        Vector3 ab = b - a;
+        Vector3 ac = c - a;
+        Vector3 perpendicular = Vector3.Cross(direction, ac);
+        float determinant = Vector3.Dot(ab, perpendicular);
+        if (Mathf.Abs(determinant) < 1e-8f) return false;
+
+        Vector3 fromA = origin - a;
+        float u = Vector3.Dot(fromA, perpendicular) / determinant;
+        if (u < 0f || u > 1f) return false;
+        Vector3 cross = Vector3.Cross(fromA, ab);
+        float v = Vector3.Dot(direction, cross) / determinant;
+        if (v < 0f || u + v > 1f) return false;
+
+        distance = Vector3.Dot(ac, cross) / determinant;
+        return distance >= 0f;
     }
 
     public bool TryGetFootprint(GameObject obj, Vector3 worldPosition, Quaternion worldRotation,
