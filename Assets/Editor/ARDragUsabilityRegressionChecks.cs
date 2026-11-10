@@ -5,6 +5,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
 
@@ -47,6 +48,7 @@ internal static class ARDragUsabilityRegressionChecks
 
             var input = Child(root, "FixtureInput").AddComponent<ButtonInteractor>();
             input.enabled = false;
+            input.interactiveButtons = new List<RectTransform>();
             controller = Child(root, "FixtureController").AddComponent<TapToPlaceController>();
             controller.enabled = false;
             controller.buttonInteractor = input;
@@ -104,7 +106,7 @@ internal static class ARDragUsabilityRegressionChecks
             near.transform.localPosition = Vector3.forward * 2f;
             results.Add("PASS: nearby picking prefers visible nearest-depth components and ignores hidden/behind-camera targets");
 
-            CheckHeadsetPinch(controller, camera, near);
+            CheckHeadsetPinch(controller, camera, near, results);
             results.Add("PASS: headset pinches grab only where both eyes hit the same component and clear one-eye edge hits");
 
             SetInput(input, visible: true, pinching: true, justPinched: true);
@@ -196,7 +198,8 @@ internal static class ARDragUsabilityRegressionChecks
         }
     }
 
-    private static void CheckHeadsetPinch(TapToPlaceController controller, Camera camera, GameObject near)
+    private static void CheckHeadsetPinch(TapToPlaceController controller, Camera camera, GameObject near,
+        List<string> results)
     {
         var headset = camera.gameObject.AddComponent<PhoneHeadsetAR>();
         var landscape = new RenderTexture(960, 432, 24);
@@ -236,6 +239,7 @@ internal static class ARDragUsabilityRegressionChecks
                 controller.SelectComponent(near);
                 CheckEmptyPinchDeselect(controller, near, edgePointer);
             }
+            CheckHeadsetMenu(headset, controller, camera, near, results);
             input.SetHeadsetCamera(null);
         }
         finally
@@ -248,6 +252,184 @@ internal static class ARDragUsabilityRegressionChecks
             near.transform.localScale = scale;
             UnityEngine.Object.DestroyImmediate(landscape);
             UnityEngine.Object.DestroyImmediate(headset);
+        }
+    }
+
+    private static void CheckHeadsetMenu(PhoneHeadsetAR headset, TapToPlaceController controller, Camera camera,
+        GameObject component, List<string> results)
+    {
+        ButtonInteractor input = controller.buttonInteractor;
+        Set(headset, "arCamera", camera);
+        Set(headset, "placement", controller);
+        Set(headset, "wires", controller.wireConnectionController);
+        Set(headset, "hand", input);
+        Set(headset, "<IsActive>k__BackingField", true);
+        try
+        {
+            Call(headset, "CreatePanel");
+            var panel = (Canvas)Get(headset, "panel");
+            SceneManager.MoveGameObjectToScene(panel.gameObject, camera.gameObject.scene);
+            Require(panel.transform.Find("MENU").Find("Căn trước mặt") == null,
+                "The headset home page must not include a recenter button.");
+            var toolbar = (RectTransform)Get(headset, "componentToolbar");
+            var rotate = ((RectTransform)Get(headset, "rotateAction")).GetComponent<Button>();
+            var delete = ((RectTransform)Get(headset, "deleteAction")).GetComponent<Button>();
+            Require(!toolbar.gameObject.activeSelf && toolbar.parent == panel.transform,
+                "The headset must have one contextual toolbar, independent of the menu pages.");
+            controller.SelectComponent(component);
+            Set(controller, "isDragging", true);
+            Call(headset, "LateUpdate");
+            Require(!toolbar.gameObject.activeSelf, "The toolbar must stay hidden while moving the selected component.");
+            Set(controller, "isDragging", false);
+            Call(headset, "LateUpdate");
+            Require(toolbar.gameObject.activeSelf &&
+                camera.WorldToViewportPoint(toolbar.position).y > camera.WorldToViewportPoint(component.transform.position).y,
+                "Releasing a selected component must show the toolbar above it.");
+
+            Vector3 componentPosition = component.transform.position;
+            component.transform.position = camera.ViewportToWorldPoint(new Vector3(0.5f, 0.83f, 0.6f));
+            Call(headset, "LateUpdate");
+            Require(toolbar.gameObject.activeSelf && camera.WorldToViewportPoint(toolbar.position).y < 0.83f,
+                "A component at the top of the view must get a reachable toolbar below or beside it.");
+            component.transform.position = componentPosition;
+
+            controller.wireConnectionController.isWireMode = true;
+            Call(headset, "LateUpdate");
+            Require(!toolbar.gameObject.activeSelf, "The contextual toolbar must stay hidden in wire mode.");
+            controller.wireConnectionController.isWireMode = false;
+            Call(headset, "LateUpdate");
+
+            Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, rotate.transform.position, false, out Vector2 rotatePoint),
+                "The rotate action must be in view.");
+            var hitAction = typeof(PhoneHeadsetAR).GetMethod("TryGetComponentActionAt", PrivateInstance);
+            var hit = new object[] { rotatePoint, null };
+            Require((bool)hitAction.Invoke(headset, hit) && (RectTransform)hit[1] == rotate.transform,
+                "The world-space toolbar must accept pinch coordinates from its rendered eye projection.");
+            var rotateRect = (RectTransform)rotate.transform;
+            Vector3 rotateEdge = rotateRect.TransformPoint(new Vector3(rotateRect.rect.xMin - 5f, 0f, 0f));
+            Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, rotateEdge, true, out Vector2 rotateEdgePoint),
+                "The extra rotate target must be visible through the right lens.");
+            hit = new object[] { rotateEdgePoint, null };
+            Require((bool)hitAction.Invoke(headset, hit) && (RectTransform)hit[1] == rotateRect,
+                "A pinch just outside the rendered rotate button must hit its larger target.");
+            Vector3 padding = toolbar.TransformPoint(new Vector3(0f, 50f, 0f));
+            Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, padding, false, out Vector2 paddingPoint),
+                "The toolbar padding must be visible in the test.");
+            hit = new object[] { paddingPoint, null };
+            Require((bool)hitAction.Invoke(headset, hit) && hit[1] == null,
+                "The toolbar padding must claim the pointer without hitting a button behind it.");
+            results.Add("PASS: the headset toolbar appears near the released component, fits the lens edge and hides during wiring");
+
+            Quaternion before = component.transform.rotation;
+            Vector3 rotateScale = rotateRect.localScale;
+            Set(input, "lastClickTime", Time.time);
+            Call(input, "ActivatePinchedButton", rotateRect, true);
+            Call(headset, "LateUpdate");
+            Require(Mathf.Abs(Quaternion.Angle(before, component.transform.rotation) - 90f) < 0.1f &&
+                rotateRect.localScale == rotateScale,
+                "The headset Rotate button must work during the menu cooldown and keep its hit area steady.");
+
+            delete.onClick.Invoke();
+            Call(headset, "LateUpdate");
+            Require(component.activeSelf, "A quick click must not bypass the delete hold.");
+            var hold = delete.GetComponent<HoldToActivateButton>();
+            Set(hold, "currentHoldTimer", 0.3f);
+            hold.SetPinchHoverState(true, true);
+            hold.SetPinchHoverState(true, false);
+            Call(hold, "Update");
+            Require((float)Get(hold, "currentHoldTimer") == 0f && component.activeSelf,
+                "Releasing a partial delete hold must immediately clear its progress.");
+            hold.onHoldComplete.Invoke();
+            controller.ClearSelectedComponent();
+            Call(headset, "LateUpdate");
+            Require(component.activeSelf, "A queued delete must be ignored if the selection is cleared.");
+            controller.SelectComponent(component);
+            Call(headset, "LateUpdate");
+            hold.onHoldComplete.Invoke();
+            Call(headset, "LateUpdate");
+            Require(!component.activeSelf && controller.SelectedComponent == null && !toolbar.gameObject.activeSelf,
+                "Confirming the delete hold must remove the selected component and hide the toolbar.");
+            Require(controller.UndoLastPlacedComponent() && component.activeSelf &&
+                controller.UndoLastPlacedComponent() && Quaternion.Angle(before, component.transform.rotation) < 0.1f,
+                "Undo must restore both a headset deletion and a headset rotation.");
+            results.Add("PASS: headset Rotate and held Delete use the shared undo history and a brief pinch cannot delete");
+
+            var grip = (RectTransform)Get(headset, "dragHandleHitbox");
+            panel.transform.position += camera.ViewportToWorldPoint(new Vector3(0.5f, 0.34f, 0.68f)) - grip.position;
+            Vector2 GripPointer()
+            {
+                Vector3 gripEdge = grip.TransformPoint(new Vector3(grip.rect.xMax - 2f, 0f));
+                Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, gripEdge, false, out Vector2 point),
+                    "The widened handle edge must be visible in the left eye.");
+                Set(input, "<CurrentScreenPos>k__BackingField", point);
+                return point;
+            }
+
+            var handlePointer = typeof(PhoneHeadsetAR).GetMethod("HandleMenuPointer", PrivateInstance);
+            bool PointAtGrip(Vector2 point, bool pinchStarted) =>
+                (bool)handlePointer.Invoke(headset, new object[] { point, pinchStarted, false });
+
+            Vector2 edgePointer = GripPointer();
+            Require(!RectTransformUtility.RectangleContainsScreenPoint(grip, edgePointer, camera),
+                "The grip fixture must be outside the center-camera hit box.");
+            SetInput(input, visible: true, pinching: true, justPinched: false);
+            Require(PointAtGrip(edgePointer, false) && !input.PinchConsumedByUI && !(bool)Get(headset, "isDraggingMenu"),
+                "Sliding an already held pinch over the grip must not start a menu drag.");
+
+            Set(controller, "currentPrefabToPlace", component);
+            Require(PointAtGrip(edgePointer, true) && input.PinchConsumedByUI && (bool)Get(headset, "isDraggingMenu"),
+                "A fresh pinch on the stereo grip must claim the gesture even while a preview is open.");
+            Call(headset, "LateUpdate");
+            var bar = (Image)Get(headset, "dragHandleVisual");
+            Require(((Color32)bar.color).Equals(new Color32(100, 220, 255, 255)),
+                "The headset handle must turn cyan on the first captured frame.");
+            Vector3 panelStart = panel.transform.position;
+            Quaternion panelRotation = panel.transform.rotation;
+            Call(headset, "MoveMenu", edgePointer + Vector2.left * 70f, 0.05f);
+            Vector3 movedPanel = panel.transform.position;
+            Require(Vector3.Distance(panelStart, movedPanel) > 0.01f &&
+                Mathf.Abs(Vector3.Dot(movedPanel - panelStart, camera.transform.forward)) < 0.001f &&
+                Quaternion.Angle(panelRotation, panel.transform.rotation) < 0.01f,
+                "Dragging sideways must move the menu on its world plane without changing depth or orientation.");
+            Vector3 cameraStart = camera.transform.position;
+            try
+            {
+                camera.transform.position += camera.transform.forward * 0.18f;
+                Call(headset, "MoveMenu", edgePointer + Vector2.left * 100f, 0.05f);
+                Require(panel.transform.position == movedPanel,
+                    "An active drag must pause if head movement brings its plane too close.");
+            }
+            finally { camera.transform.position = cameraStart; }
+
+            SetInput(input, visible: true, pinching: false, justPinched: false);
+            Call(headset, "LateUpdate");
+            Require(!(bool)Get(headset, "isDraggingMenu"), "Releasing the pinch must release the menu.");
+            SetInput(input, visible: true, pinching: true, justPinched: false);
+            Require(PointAtGrip(GripPointer(), true) && (bool)Get(headset, "isDraggingMenu"),
+                "A quick second pinch must grab the handle again.");
+            results.Add("PASS: headset grip captures an eye-projected edge before world gestures and supports quick regrabs");
+            SetInput(input, visible: true, pinching: false, justPinched: false);
+            Call(headset, "LateUpdate");
+            Vector3 releasedPanel = panel.transform.position;
+            try
+            {
+                camera.transform.position += camera.transform.up * 0.2f;
+                Call(headset, "ShowPage", (RectTransform)panel.transform.Find("KHO LINH KIỆN"));
+                Call(headset, "LateUpdate");
+                Require(panel.transform.position == releasedPanel &&
+                    Quaternion.Angle(panelRotation, panel.transform.rotation) < 0.01f,
+                    "Changing to a taller page near the lens edge must keep the released menu at the same world pose.");
+            }
+            finally { camera.transform.position = cameraStart; }
+            results.Add("PASS: the headset menu drags at fixed depth, pauses close to the camera and keeps its pose across pages");
+        }
+        finally
+        {
+            Set(controller, "currentPrefabToPlace", null);
+            Set(headset, "<IsActive>k__BackingField", false);
+            foreach (var button in (List<RectTransform>)Get(headset, "buttons")) input.UnregisterButton(button);
+            var panel = (Canvas)Get(headset, "panel");
+            if (panel != null) UnityEngine.Object.DestroyImmediate(panel.gameObject);
         }
     }
 

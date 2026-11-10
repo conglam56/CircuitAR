@@ -18,6 +18,7 @@ public class HoldToActivateButton : MonoBehaviour, IPointerDownHandler, IPointer
     [Header("--- CẤU HÌNH THỜI GIAN GIỮ ---")]
     [Tooltip("Thời gian cần giữ liên tục để kích hoạt (giây). Mặc định 1.25s chuẩn công thái học XR.")]
     public float holdDuration = 1.25f;
+    public float pinchReleaseGrace = 0.12f;
 
     [Tooltip("Hành động khi giữ đủ thời gian")]
     public Action onHoldComplete;
@@ -63,8 +64,9 @@ public class HoldToActivateButton : MonoBehaviour, IPointerDownHandler, IPointer
 
     void Update()
     {
-        // Grace period 0.12s cho cử chỉ tay MediaPipe chống rung lắc khung hình (jitter)
-        bool pinchActive = isPinchHovering && (isPinching || (Time.time - lastPinchTime < 0.12f && currentHoldTimer > 0.1f));
+        // Some actions tolerate a brief hand-tracking gap while pinching.
+        bool pinchActive = isPinchHovering && (isPinching ||
+            (Time.time - lastPinchTime < pinchReleaseGrace && currentHoldTimer > 0.1f));
         bool isHolding = pinchActive || isPointerDown;
 
         if (isHolding && !isTriggered)
@@ -109,7 +111,7 @@ public class HoldToActivateButton : MonoBehaviour, IPointerDownHandler, IPointer
 
     private void TriggerAction()
     {
-        Debug.Log("<color=cyan>[HoldToActivateButton]</color> Đã giữ đủ 1.25s -> KÍCH HOẠT HÀNH ĐỘNG: " + defaultLabel);
+        Debug.Log($"<color=cyan>[HoldToActivateButton]</color> Đã giữ đủ {holdDuration:0.##}s: {defaultLabel}");
 
         if (progressRingImage != null) progressRingImage.fillAmount = 1f;
 

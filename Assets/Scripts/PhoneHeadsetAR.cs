@@ -15,6 +15,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private static readonly Color32 Violet = new(77, 53, 137, 255);
     private static readonly Color32 Red = new(119, 47, 56, 255);
     private static readonly Color32 Neutral = new(42, 56, 77, 255);
+    private const float MinimumMenuDepth = 0.60f;
 
     private static readonly (string Key, string Label)[] Components =
     {
@@ -29,6 +30,11 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private Action returnToMenu;
     private Canvas panel;
     private readonly List<RectTransform> buttons = new();
+    private readonly List<Renderer> componentRenderers = new();
+    private RectTransform componentToolbar;
+    private RectTransform rotateAction;
+    private RectTransform deleteAction;
+    private GameObject toolbarTarget;
     private RectTransform currentPage;
     private Action pendingMenuAction;
     private RectTransform simulationPage;
@@ -40,15 +46,12 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private PhoneHeadsetStereo stereo;
     private readonly List<Canvas> hiddenOverlays = new();
 
-    // Thanh trắng điều khiển kéo di chuyển menu trong không gian 3D (Drag Handle / Home Indicator)
     private RectTransform dragHandleHitbox;
     private Image dragHandleVisual;
-    private Outline dragHandleOutline;
     private bool isDraggingMenu;
-    private float dragDistance;
-    private Vector3 dragOffset;
-
-    private float lastHandlePinchTime = -1f;
+    private bool isHoveringDragHandle;
+    private Plane menuDragPlane;
+    private Vector3 menuDragGripOffset;
 
     public bool IsActive { get; private set; }
     public PhoneHeadsetStereo Stereo => stereo;
@@ -100,11 +103,16 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         if (panel != null && panel.gameObject.activeSelf != tracking)
             panel.gameObject.SetActive(tracking);
 
-        // Xử lý kéo di chuyển menu khi cầm vào thanh trắng
-        if (panel != null && panel.gameObject.activeSelf)
+        if (tracking && panel != null)
         {
             UpdateMenuDrag();
+            UpdateComponentToolbar();
             UpdateWorkStatus();
+        }
+        else
+        {
+            isDraggingMenu = false;
+            isHoveringDragHandle = false;
         }
     }
 
@@ -116,9 +124,9 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         if (CircuitSimulationManager.Instance != null)
             CircuitSimulationManager.Instance.SetSimulationMode(false);
         isDraggingMenu = false;
+        isHoveringDragHandle = false;
         dragHandleHitbox = null;
         dragHandleVisual = null;
-        dragHandleOutline = null;
         if (wires != null) wires.IsWireMode = false;
         wires = null;
         stereo?.Dispose();
@@ -142,6 +150,9 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         simulationStatus = null;
         wireHint = null;
         buttons.Clear();
+        componentRenderers.Clear();
+        componentToolbar = rotateAction = deleteAction = null;
+        toolbarTarget = null;
         if (placement != null)
         {
             placement.enableTapToPlace = previousTapToPlace;
@@ -181,9 +192,6 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         simulationPage = CreateSimulationPage(home);
 
         // --- TRANG MENU CHÍNH (home) ---
-        // Nút Căn trước mặt ở góc trên bên phải header
-        AddButton(home, "Căn trước mặt", new Vector2(242f, 160f), new Vector2(170f, 56f), Neutral, RecenterMenu);
-
         // Hàng 1 (3 nút chính to lớn): Kho linh kiện, Dây, Thoát kính (Cách tiêu đề 25px thoáng đãng)
         AddButton(home, "Kho linh kiện", new Vector2(-230f, 40f), new Vector2(210f, 126f), Teal,
             () => ShowPage(toolbox), UIIconAssets.GetHeadsetToolboxSprite());
@@ -244,39 +252,15 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         AddButton(wireTools, "Xóa dây", new Vector2(165f, 10f), new Vector2(300f, 122f), Red,
             () => StartWireMode(WireConnectionController.WireSubMode.Delete, deleting, deleteHint), UIIconAssets.GetWireModeSprite());
 
-        // Tạo thanh trắng dưới menu (Drag Handle dạng Home Indicator) để cầm và di chuyển menu trong không gian 3D
-        var handleObj = new GameObject("Drag Handle Hitbox", typeof(RectTransform), typeof(Image));
-        handleObj.transform.SetParent(panel.transform, false);
-        dragHandleHitbox = handleObj.GetComponent<RectTransform>();
-        dragHandleHitbox.sizeDelta = new Vector2(220f, 44f);
-        dragHandleHitbox.anchoredPosition = new Vector2(0f, -200f);
+        dragHandleHitbox = CreateRect("Drag Handle Hitbox", panel.transform, Vector2.zero, new Vector2(300f, 68f));
+        var bar = CreateSurface("Visual Bar", dragHandleHitbox, Vector2.zero, new Vector2(230f, 22f),
+            new Color32(255, 255, 255, 215));
+        dragHandleVisual = bar.GetComponent<Image>();
+        var outline = bar.gameObject.AddComponent<Outline>();
+        outline.effectColor = new Color32(0, 0, 0, 120);
+        outline.effectDistance = new Vector2(1.5f, -1.5f);
 
-        var hitImg = handleObj.GetComponent<Image>();
-        hitImg.color = new Color(0f, 0f, 0f, 0.005f); // Nhận diện cử chỉ tay MediaPipe qua raycast
-        hitImg.raycastTarget = true;
-
-        // Thanh trắng trực quan bo tròn góc
-        var barObj = new GameObject("Visual Bar", typeof(RectTransform), typeof(Image), typeof(Outline));
-        barObj.transform.SetParent(dragHandleHitbox, false);
-        var barRT = barObj.GetComponent<RectTransform>();
-        barRT.sizeDelta = new Vector2(180f, 12f);
-        barRT.anchoredPosition = Vector2.zero;
-
-        dragHandleVisual = barObj.GetComponent<Image>();
-        dragHandleVisual.sprite = WelcomeScreenController.GetRoundedRectSprite();
-        dragHandleVisual.type = Image.Type.Sliced;
-        dragHandleVisual.pixelsPerUnitMultiplier = 3f;
-        dragHandleVisual.color = new Color32(255, 255, 255, 215);
-        dragHandleVisual.raycastTarget = false;
-
-        dragHandleOutline = barObj.GetComponent<Outline>();
-        dragHandleOutline.effectColor = new Color32(0, 0, 0, 120);
-        dragHandleOutline.effectDistance = new Vector2(1.5f, -1.5f);
-        dragHandleOutline.enabled = true;
-
-        buttons.Add(dragHandleHitbox);
-        hand.RegisterButton(dragHandleHitbox);
-
+        CreateComponentToolbar();
         ShowPage(home);
     }
 
@@ -291,118 +275,227 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private void UpdateDragHandlePosition()
     {
         if (dragHandleHitbox == null || currentPage == null) return;
-        // Tự động định vị thanh kéo bám sát mép đáy của trang hiện tại
-        float bottomY = currentPage.anchoredPosition.y - currentPage.sizeDelta.y * 0.5f - 22f;
+        float bottomY = currentPage.anchoredPosition.y - (currentPage.sizeDelta.y + dragHandleHitbox.sizeDelta.y) * 0.5f;
         dragHandleHitbox.anchoredPosition = new Vector2(0f, bottomY);
+    }
+
+    internal bool HandleMenuPointer(Vector2 screenPoint, bool pinchStarted, bool overComponentAction)
+    {
+        if (!IsActive || panel == null || !panel.isActiveAndEnabled || !stereo.IsReady ||
+            ARSession.state != ARSessionState.SessionTracking || !hand.IsHandVisible) return false;
+
+        if (!hand.isPinching) isDraggingMenu = false;
+        if (isDraggingMenu)
+        {
+            hand.PinchConsumedByUI = true;
+            return true;
+        }
+
+        // A new pinch may take over from a released component still in its release grace period.
+        isHoveringDragHandle = !overComponentAction && (!placement.IsDragging || pinchStarted) &&
+            HitsInEitherEye(dragHandleHitbox, screenPoint);
+        if (isHoveringDragHandle && pinchStarted && !hand.PinchConsumedByUI)
+        {
+            hand.PinchConsumedByUI = true;
+            Vector3 forward = arCamera.transform.forward;
+            float depth = Vector3.Dot(panel.transform.position - arCamera.transform.position, forward);
+            Vector3 grip = dragHandleHitbox.position + forward * Mathf.Max(0f, MinimumMenuDepth - depth);
+            menuDragPlane = new Plane(forward, grip);
+            Ray ray = arCamera.ScreenPointToRay(screenPoint);
+            if (menuDragPlane.Raycast(ray, out float distance))
+            {
+                menuDragGripOffset = grip - ray.GetPoint(distance);
+                isDraggingMenu = true;
+            }
+        }
+        return isHoveringDragHandle;
+    }
+
+    private bool HitsInEitherEye(RectTransform rect, Vector2 screenPoint, Vector2 padding = default)
+    {
+        var plane = new Plane(rect.forward, rect.position);
+        Rect area = rect.rect;
+        area.min -= padding;
+        area.max += padding;
+        for (int eye = 0; eye < 2; eye++)
+        {
+            if (PhoneHeadsetStereo.TryGetEyeRay(arCamera, screenPoint, eye == 1, out Ray ray) &&
+                plane.Raycast(ray, out float distance) &&
+                area.Contains(rect.InverseTransformPoint(ray.GetPoint(distance))))
+                return true;
+        }
+        return false;
     }
 
     private void UpdateMenuDrag()
     {
-        if (panel == null || hand == null || arCamera == null || dragHandleHitbox == null) return;
+        if (!hand.IsHandVisible || !hand.isPinching) isDraggingMenu = false;
+        if (isDraggingMenu) MoveMenu(hand.CurrentScreenPos, Time.unscaledDeltaTime);
 
-        // Tuyệt đối không nhận kéo menu nếu người dùng đang kéo linh kiện trên bàn hoặc đang đặt linh kiện mới
-        bool isHandlingComponent = placement != null && (placement.IsDragging || placement.CurrentPrefabToPlace != null);
-
-        bool isHoveringHandle = hand.IsHandVisible && !isHandlingComponent &&
-            RectTransformUtility.RectangleContainsScreenPoint(dragHandleHitbox, hand.CurrentScreenPos, arCamera);
-
-        // Bắt đầu cầm kéo menu CHỈ KHI người dùng chủ động pinch ngay tại thanh trắng (JustPinched)
-        // Tuyệt đối không nhận nhầm khi đang kéo vật từ dưới lên rồi ngón tay lướt qua thanh
-        if (!isDraggingMenu)
-        {
-            if (isHoveringHandle && hand.JustPinched && !isHandlingComponent)
-            {
-                // Chụm ngón tay 2 lần liên tiếp (double-pinch) trên thanh trắng -> Tự động căn menu về ngay trước mặt
-                if (Time.unscaledTime - lastHandlePinchTime < 0.45f)
-                {
-                    RecenterMenu();
-                    lastHandlePinchTime = -1f;
-                    return;
-                }
-                lastHandlePinchTime = Time.unscaledTime;
-
-                isDraggingMenu = true;
-                hand.PinchConsumedByUI = true;
-                dragDistance = Mathf.Clamp(Vector3.Distance(arCamera.transform.position, panel.transform.position), 0.35f, 1.2f);
-                Ray ray = arCamera.ScreenPointToRay(hand.CurrentScreenPos);
-                Vector3 hitPoint = ray.GetPoint(dragDistance);
-                dragOffset = panel.transform.position - hitPoint;
-            }
-        }
-        else
-        {
-            // Di chuyển menu theo vị trí ngón tay trong không gian 3D
-            if (hand.isPinching && hand.IsHandVisible)
-            {
-                hand.PinchConsumedByUI = true;
-                Ray ray = arCamera.ScreenPointToRay(hand.CurrentScreenPos);
-                Vector3 desiredPos = ray.GetPoint(dragDistance) + dragOffset;
-
-                // 1. Chống giật văng đột ngột: Nếu vị trí mong muốn giật quá xa (> 0.45m trong 1 frame),
-                // đây chắc chắn là lỗi nhiễu landmark MediaPipe hoặc tay ra vào mép khung hình
-                Vector3 displacement = desiredPos - panel.transform.position;
-                if (displacement.magnitude > 0.45f)
-                {
-                    desiredPos = panel.transform.position + displacement.normalized * 0.45f;
-                }
-
-                // 2. Di chuyển mượt mà có giới hạn tốc độ tối đa (2.0 m/s)
-                float maxSpeed = 2.0f;
-                Vector3 step = Vector3.MoveTowards(panel.transform.position, desiredPos, maxSpeed * Time.unscaledDeltaTime);
-                panel.transform.position = Vector3.Lerp(panel.transform.position, step, 1f - Mathf.Exp(-20f * Time.unscaledDeltaTime));
-
-                // 3. Giữ menu luôn nằm trong hình nón quan sát phía trước mặt người dùng, không bao giờ văng ra sau lưng hay trôi mất sang phải
-                Vector3 localPos = arCamera.transform.InverseTransformPoint(panel.transform.position);
-                localPos.z = Mathf.Clamp(localPos.z, 0.35f, 1.2f);
-                localPos.x = Mathf.Clamp(localPos.x, -0.60f, 0.60f); // Giới hạn lệch trái/phải tối đa 60cm
-                localPos.y = Mathf.Clamp(localPos.y, -0.45f, 0.45f); // Giới hạn lệch trên/dưới tối đa 45cm
-                panel.transform.position = arCamera.transform.TransformPoint(localPos);
-
-                // 4. Menu tự động quay mặt nhẹ nhàng về hướng camera (billboard)
-                Vector3 toCam = panel.transform.position - arCamera.transform.position;
-                if (toCam.sqrMagnitude > 0.01f)
-                {
-                    Quaternion targetRot = Quaternion.LookRotation(toCam, Vector3.up);
-                    panel.transform.rotation = Quaternion.Slerp(panel.transform.rotation, targetRot, 1f - Mathf.Exp(-18f * Time.unscaledDeltaTime));
-                }
-            }
-            else
-            {
-                // Nhả ngón tay -> Cố định menu tại vị trí mới trong World Space
-                isDraggingMenu = false;
-            }
-        }
-
-        // Hiệu ứng phản hồi thị giác trên thanh kéo
-        if (dragHandleVisual != null)
-        {
-            if (isDraggingMenu)
-            {
-                dragHandleVisual.color = new Color32(100, 220, 255, 255); // Xanh cyan khi đang cầm kéo
-                dragHandleVisual.rectTransform.localScale = Vector3.Lerp(dragHandleVisual.rectTransform.localScale, new Vector3(1.15f, 1.25f, 1f), Time.deltaTime * 20f);
-            }
-            else if (isHoveringHandle)
-            {
-                dragHandleVisual.color = new Color32(255, 255, 255, 255); // Trắng sáng khi hover
-                dragHandleVisual.rectTransform.localScale = Vector3.Lerp(dragHandleVisual.rectTransform.localScale, new Vector3(1.08f, 1.15f, 1f), Time.deltaTime * 20f);
-            }
-            else
-            {
-                dragHandleVisual.color = new Color32(255, 255, 255, 200); // Trắng ngà nhẹ nhàng
-                dragHandleVisual.rectTransform.localScale = Vector3.Lerp(dragHandleVisual.rectTransform.localScale, Vector3.one, Time.deltaTime * 15f);
-            }
-        }
+        bool hovered = isHoveringDragHandle && hand.IsHandVisible;
+        dragHandleVisual.color = isDraggingMenu ? new Color32(100, 220, 255, 255) :
+            hovered ? new Color32(220, 247, 255, 255) : new Color32(255, 255, 255, 215);
     }
 
-    public void RecenterMenu()
+    private void MoveMenu(Vector2 screenPoint, float deltaTime)
     {
-        if (panel == null || arCamera == null) return;
-        const float distance = PhoneHeadsetStereo.ConvergenceDistance;
-        Vector3 targetPos = arCamera.ViewportToWorldPoint(new Vector3(0.51f, 0.56f, distance));
-        panel.transform.position = targetPos;
-        Vector3 toCam = panel.transform.position - arCamera.transform.position;
-        if (toCam.sqrMagnitude > 0.01f)
-            panel.transform.rotation = Quaternion.LookRotation(toCam, Vector3.up);
+        Ray ray = arCamera.ScreenPointToRay(screenPoint);
+        if (!menuDragPlane.Raycast(ray, out float distance)) return;
+
+        // Keep both the free drag and its viewport limits on the same world plane.
+        Vector3 grip = ray.GetPoint(distance) + menuDragGripOffset;
+        Vector3 viewport = arCamera.WorldToViewportPoint(grip);
+        if (viewport.z <= arCamera.nearClipPlane) return;
+        var bounded = new Vector2(Mathf.Clamp(viewport.x, 0.32f, 0.68f), Mathf.Clamp(viewport.y, 0.16f, 0.84f));
+        if (bounded != (Vector2)viewport)
+        {
+            Ray boundedRay = arCamera.ViewportPointToRay(bounded);
+            if (!menuDragPlane.Raycast(boundedRay, out distance)) return;
+            grip = boundedRay.GetPoint(distance);
+        }
+
+        Vector3 position = panel.transform.position;
+        Vector3 desired = grip - (dragHandleHitbox.position - position);
+        if (arCamera.WorldToViewportPoint(desired).z < MinimumMenuDepth - 0.001f) return;
+        deltaTime = Mathf.Min(deltaTime, 0.05f);
+        Vector3 smoothed = Vector3.Lerp(position, desired, 1f - Mathf.Exp(-24f * deltaTime));
+        panel.transform.position = Vector3.MoveTowards(position, smoothed, 2f * deltaTime);
+    }
+
+    private void CreateComponentToolbar()
+    {
+        componentToolbar = CreateSurface("Linh kiện đang chọn", panel.transform, Vector2.zero,
+            new Vector2(380f, 104f), Backdrop);
+        var rotate = AddButton(componentToolbar, "Xoay 90°", new Vector2(-79f, 0f), new Vector2(196f, 84f),
+            Violet, () =>
+            {
+                if (CanEditToolbarTarget()) placement.RotateSelectedComponent();
+            }, ARFloatingBubbleMenu.GetRotateIconSprite());
+        rotateAction = (RectTransform)rotate.transform;
+
+        const string deleteLabel = "Giữ để xóa";
+        var delete = AddButton(componentToolbar, deleteLabel, new Vector2(113f, 0f), new Vector2(122f, 82f),
+            Red, null, ARFloatingBubbleMenu.GetTrashIconSprite());
+        deleteAction = (RectTransform)delete.transform;
+        var progress = CreateSurface("Tiến trình giữ", deleteAction, new Vector2(0f, -35f),
+            new Vector2(98f, 4f), Color.white).GetComponent<Image>();
+        progress.type = Image.Type.Filled;
+        progress.fillMethod = Image.FillMethod.Horizontal;
+        progress.gameObject.SetActive(false);
+
+        var hold = delete.gameObject.AddComponent<HoldToActivateButton>();
+        hold.holdDuration = 0.55f;
+        hold.pinchReleaseGrace = 0f;
+        hold.defaultLabel = deleteLabel;
+        hold.holdingLabel = "Xóa";
+        hold.labelTMP = delete.GetComponentInChildren<TextMeshProUGUI>();
+        hold.progressRingImage = progress;
+        hold.onHoldComplete = () => pendingMenuAction = () =>
+        {
+            if (CanEditToolbarTarget()) placement.DeleteSelectedComponent();
+        };
+        componentToolbar.gameObject.SetActive(false);
+    }
+
+    internal bool IsComponentAction(RectTransform rect) => rect == rotateAction || rect == deleteAction;
+
+    internal bool TryGetComponentActionAt(Vector2 screenPoint, out RectTransform action)
+    {
+        action = null;
+        if (!CanEditToolbarTarget() || !HitsInEitherEye(componentToolbar, screenPoint)) return false;
+        bool overRotate = HitsInEitherEye(rotateAction, screenPoint, new Vector2(10f, 5f));
+        bool overDelete = HitsInEitherEye(deleteAction, screenPoint);
+        if (overRotate && (!overDelete ||
+            RectTransformUtility.RectangleContainsScreenPoint(rotateAction, screenPoint, arCamera)))
+            action = rotateAction;
+        else if (overDelete && !overRotate) action = deleteAction;
+        return true;
+    }
+
+    private bool CanEditComponent()
+    {
+        return IsActive && stereo?.IsReady == true && ARSession.state == ARSessionState.SessionTracking && !isDraggingMenu &&
+            placement != null && !placement.IsDragging && placement.CurrentPrefabToPlace == null &&
+            placement.SelectedComponent != null && placement.SelectedComponent.activeInHierarchy &&
+            (wires == null || !wires.IsWireMode) && CircuitSimulationManager.Instance?.isSimulationMode != true;
+    }
+
+    private bool CanEditToolbarTarget() => componentToolbar != null && componentToolbar.gameObject.activeInHierarchy &&
+        CanEditComponent() && toolbarTarget == placement.SelectedComponent;
+
+    private void UpdateComponentToolbar()
+    {
+        if (!CanEditComponent())
+        {
+            if (componentToolbar.gameObject.activeSelf) componentToolbar.gameObject.SetActive(false);
+            return;
+        }
+
+        if (toolbarTarget != placement.SelectedComponent)
+        {
+            componentToolbar.gameObject.SetActive(false);
+            toolbarTarget = placement.SelectedComponent;
+            toolbarTarget.GetComponentsInChildren(true, componentRenderers);
+        }
+        bool visible = TryPositionComponentToolbar();
+        if (componentToolbar.gameObject.activeSelf != visible) componentToolbar.gameObject.SetActive(visible);
+    }
+
+    private bool TryPositionComponentToolbar()
+    {
+        Bounds bounds = default;
+        bool found = false;
+        foreach (var renderer in componentRenderers)
+        {
+            if (renderer == null || !renderer.enabled || renderer.forceRenderingOff ||
+                !renderer.gameObject.activeInHierarchy || renderer is LineRenderer) continue;
+            if (found) bounds.Encapsulate(renderer.bounds);
+            else bounds = renderer.bounds;
+            found = true;
+        }
+        if (!found) return false;
+
+        Vector3 center = arCamera.WorldToViewportPoint(bounds.center);
+        if (center.z <= arCamera.nearClipPlane) return false;
+        Vector2 min = center;
+        Vector2 max = center;
+        for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+        for (int z = -1; z <= 1; z += 2)
+        {
+            Vector3 corner = arCamera.WorldToViewportPoint(bounds.center +
+                Vector3.Scale(bounds.extents, new Vector3(x, y, z)));
+            if (corner.z <= arCamera.nearClipPlane) return false;
+            min = Vector2.Min(min, corner);
+            max = Vector2.Max(max, corner);
+        }
+        var visiblePoint = new Vector2(Mathf.Clamp(0.5f, min.x, max.x), Mathf.Clamp(0.5f, min.y, max.y));
+        if (!PhoneHeadsetStereo.ContainsSourcePoint(visiblePoint)) return false;
+
+        const float halfWidth = 0.114f;
+        float halfHeight = halfWidth * componentToolbar.rect.height / componentToolbar.rect.width *
+            arCamera.pixelWidth / arCamera.pixelHeight;
+        const float left = 0.30f, right = 0.70f, bottom = 0.11f, top = 0.89f;
+        float rowX = Mathf.Clamp(center.x, left + halfWidth, right - halfWidth);
+        float sideY = Mathf.Clamp(center.y, bottom + halfHeight, top - halfHeight);
+        const float gapX = 0.018f, gapY = 0.025f;
+
+        bool Place(Vector2 viewport)
+        {
+            if (viewport.x - halfWidth < left - 0.001f || viewport.x + halfWidth > right + 0.001f ||
+                viewport.y - halfHeight < bottom - 0.001f || viewport.y + halfHeight > top + 0.001f) return false;
+            Vector3 position = arCamera.ViewportToWorldPoint(new Vector3(viewport.x, viewport.y, center.z));
+            Vector3 edge = arCamera.ViewportToWorldPoint(new Vector3(viewport.x + halfWidth, viewport.y, center.z));
+            componentToolbar.SetPositionAndRotation(position, arCamera.transform.rotation);
+            componentToolbar.localScale = Vector3.one *
+                (2f * Vector3.Distance(position, edge) / (componentToolbar.rect.width * panel.transform.lossyScale.x));
+            return true;
+        }
+
+        return Place(new Vector2(rowX, max.y + gapY + halfHeight)) ||
+            Place(new Vector2(max.x + gapX + halfWidth, sideY)) ||
+            Place(new Vector2(min.x - gapX - halfWidth, sideY)) ||
+            Place(new Vector2(rowX, min.y - gapY - halfHeight));
     }
 
     private void OnClickUndo()
@@ -522,7 +615,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         button.targetGraphic = background;
         button.transition = Selectable.Transition.None;
         // Apply page and mode changes after all pinch consumers have processed this frame.
-        button.onClick.AddListener(() => pendingMenuAction = action);
+        if (action != null) button.onClick.AddListener(() => pendingMenuAction = action);
         buttons.Add(rect);
         hand.RegisterButton(rect);
 

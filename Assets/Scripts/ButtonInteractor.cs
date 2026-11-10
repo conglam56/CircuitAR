@@ -196,12 +196,16 @@ public class ButtonInteractor : MonoBehaviour
     }
 
     private Camera headsetCamera;
+    private PhoneHeadsetAR headsetControls;
+    private RectTransform heldHeadsetAction;
     public bool IsHeadsetMode => headsetCamera != null;
     private bool headsetNeedsOpenHand;
 
     public void SetHeadsetCamera(Camera camera)
     {
         headsetCamera = camera;
+        headsetControls = camera != null ? camera.GetComponent<PhoneHeadsetAR>() : null;
+        heldHeadsetAction = null;
         headsetNeedsOpenHand = camera != null;
         cursorPositionInitialized = false;
         if (cursorOverlayRoot != null) ConfigureCursorCanvas(cursorOverlayRoot.GetComponent<Canvas>());
@@ -441,6 +445,7 @@ public class ButtonInteractor : MonoBehaviour
 
         if (!visible || videoPanel == null)
         {
+            heldHeadsetAction = null;
             foreach (var btn in interactiveButtons)
             {
                 if (btn != null)
@@ -583,9 +588,20 @@ public class ButtonInteractor : MonoBehaviour
 
         CurrentScreenPos = screenPos;
         CurrentThumbScreenPos = thumbScreenPos;
-        bool anyButtonHovered = false;
         bool pinchStarted = isPinching && !wasPinching;
         if (!isPinching) PinchConsumedByUI = false;
+        RectTransform headsetAction = null;
+        bool overComponentToolbar = headsetControls != null &&
+            headsetControls.TryGetComponentActionAt(screenPos, out headsetAction);
+        bool menuGripOwnsPointer = headsetControls != null &&
+            headsetControls.HandleMenuPointer(screenPos, pinchStarted, overComponentToolbar);
+        if (pinchStarted)
+        {
+            heldHeadsetAction = headsetAction;
+            if (overComponentToolbar) PinchConsumedByUI = true;
+        }
+        else if (!isPinching || heldHeadsetAction != headsetAction) heldHeadsetAction = null;
+        bool anyButtonHovered = menuGripOwnsPointer || overComponentToolbar;
 
         // --- 3. TƯƠNG TÁC GIAO DIỆN UI (HOVER / CLICK / HOLD) ---
         foreach (var btn in interactiveButtons)
@@ -610,7 +626,10 @@ public class ButtonInteractor : MonoBehaviour
                 btnCam = Camera.main;
             }
 
-            bool isHovering = RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam);
+            bool isHeadsetAction = headsetControls != null && headsetControls.IsComponentAction(btn);
+            bool isHovering = !menuGripOwnsPointer && (isHeadsetAction
+                ? btn == headsetAction
+                : !overComponentToolbar && RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam));
             // Chỉ UI ở điểm bắt đầu pinch mới được nhận cử chỉ này. Đi ngang qua
             // nút khi đang giữ pinch đặt vật không được đánh cắp lệnh đặt.
             if (isHovering && pinchStarted) PinchConsumedByUI = true;
@@ -628,7 +647,8 @@ public class ButtonInteractor : MonoBehaviour
             HoldToActivateButton holdComp = btn.GetComponent<HoldToActivateButton>();
             if (holdComp != null)
             {
-                holdComp.SetPinchHoverState(isHovering, isPinching && PinchConsumedByUI);
+                bool ownsPinch = isHeadsetAction ? heldHeadsetAction == btn : PinchConsumedByUI;
+                holdComp.SetPinchHoverState(isHovering, isPinching && ownsPinch);
                 if (isHovering)
                 {
                     anyButtonHovered = true;
@@ -660,7 +680,7 @@ public class ButtonInteractor : MonoBehaviour
                 anyButtonHovered = true;
                 if (!isHitbox) img.color = isPinching ? pressTint : hoverTint;
 
-                if (btn.localScale.sqrMagnitude > 0.25f)
+                if (!isHeadsetAction && btn.localScale.sqrMagnitude > 0.25f)
                 {
                     scaledButtons.Add(btn);
                     // Phản hồi co giãn (scale) rõ nét khi ngắm và khi chụm tay
@@ -668,22 +688,7 @@ public class ButtonInteractor : MonoBehaviour
                     btn.localScale = Vector3.Lerp(btn.localScale, targetScale, Time.unscaledDeltaTime * 18f);
                 }
 
-                if (pinchStarted && Time.time - lastClickTime > clickCooldown)
-                {
-                    Button uiBtn = btn.GetComponent<Button>();
-                    if (uiBtn != null && uiBtn.interactable)
-                    {
-                        if (btn.localScale.sqrMagnitude > 0.25f)
-                        {
-                            scaledButtons.Add(btn);
-                            btn.localScale = new Vector3(0.85f, 0.85f, 1f); // Giật phản hồi tức thì
-                        }
-                        PlayUIClickSound(); // Âm thanh click
-                        uiBtn.onClick.Invoke();
-                    }
-                    if (menuHUD != null) menuHUD.ReceiveClick(btn);
-                    lastClickTime = Time.time;
-                }
+                if (pinchStarted) ActivatePinchedButton(btn, isHeadsetAction);
             }
             else
             {
@@ -703,6 +708,25 @@ public class ButtonInteractor : MonoBehaviour
         wasPinching = isPinching;
         IsPointerOverUI = anyButtonHovered;
 
+    }
+
+    private void ActivatePinchedButton(RectTransform rect, bool isHeadsetAction)
+    {
+        if (!isHeadsetAction && Time.time - lastClickTime <= clickCooldown) return;
+        Button button = rect.GetComponent<Button>();
+        if (button != null && button.interactable)
+        {
+            if (!isHeadsetAction && rect.localScale.sqrMagnitude > 0.25f)
+            {
+                scaledButtons.Add(rect);
+                rect.localScale = new Vector3(0.85f, 0.85f, 1f);
+            }
+            PlayUIClickSound();
+            button.onClick.Invoke();
+        }
+        if (isHeadsetAction) return;
+        if (menuHUD != null) menuHUD.ReceiveClick(rect);
+        lastClickTime = Time.time;
     }
 
     private static bool IsButtonAvailable(RectTransform button, Image image)
