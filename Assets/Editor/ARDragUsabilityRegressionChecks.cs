@@ -105,7 +105,7 @@ internal static class ARDragUsabilityRegressionChecks
             results.Add("PASS: nearby picking prefers visible nearest-depth components and ignores hidden/behind-camera targets");
 
             CheckHeadsetPinch(controller, camera, near);
-            results.Add("PASS: headset pinches can grab a mesh in either eye and a near miss clears selection");
+            results.Add("PASS: headset pinches grab only where both eyes hit the same component and clear one-eye edge hits");
 
             SetInput(input, visible: true, pinching: true, justPinched: true);
             Set(input, "<CurrentScreenPos>k__BackingField", center);
@@ -207,7 +207,7 @@ internal static class ARDragUsabilityRegressionChecks
         camera.targetTexture = landscape;
         camera.aspect = (float)landscape.width / landscape.height;
         near.transform.localPosition = Vector3.forward * 0.38f;
-        near.transform.localScale = Vector3.one * 0.025f;
+        near.transform.localScale = new Vector3(0.1f, 0.025f, 0.025f);
         var stereo = new PhoneHeadsetStereo(camera);
         try
         {
@@ -216,21 +216,25 @@ internal static class ARDragUsabilityRegressionChecks
                 "The fixture must exercise headset rendering with the source camera's object layers masked out.");
             var input = controller.buttonInteractor;
             input.SetHeadsetCamera(camera);
+            Vector2 center = camera.WorldToScreenPoint(near.transform.position);
+            SetInput(input, visible: true, pinching: true, justPinched: true);
+            Set(input, "<CurrentScreenPos>k__BackingField", center);
+            Call(controller, "HandleDragAndDrop");
+            Require(controller.IsDragging && controller.SelectedComponent == near &&
+                (int)Get(controller, "dragEye") >= 0 &&
+                near.transform.localPosition == Vector3.forward * 0.38f &&
+                near.GetComponent<Renderer>().sharedMaterial == Get(controller, "selectionHighlightMat") as Material,
+                "A direct pinch in the shared silhouette must grab and highlight the component without jumping.");
+            Call(controller, "ReleaseDraggedObject");
+            CheckEmptyPinchDeselect(controller, near, center + Vector2.up * 23f);
+
             for (int eye = 0; eye < 2; eye++)
             {
-                Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, near.transform.position, eye == 1, out Vector2 eyeCenter),
-                    "The target must be visible in both eyes.");
-                Require(!near.GetComponent<Renderer>().bounds.IntersectRay(camera.ScreenPointToRay(eyeCenter)),
-                    "The headset fixture must require the correct eye ray instead of a center-camera ray.");
-                SetInput(input, visible: true, pinching: true, justPinched: true);
-                Set(input, "<CurrentScreenPos>k__BackingField", eyeCenter);
-                Call(controller, "HandleDragAndDrop");
-                Require(controller.IsDragging && controller.SelectedComponent == near &&
-                    near.transform.localPosition == Vector3.forward * 0.38f &&
-                    near.GetComponent<Renderer>().sharedMaterial == Get(controller, "selectionHighlightMat") as Material,
-                    "A direct headset pinch must grab and highlight the component without jumping.");
-                Call(controller, "ReleaseDraggedObject");
-                CheckEmptyPinchDeselect(controller, near, eyeCenter + Vector2.up * 23f);
+                Vector3 edge = near.transform.position + Vector3.right * (eye == 0 ? 0.04f : -0.04f);
+                Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, edge, eye == 1, out Vector2 edgePointer),
+                    "The edge point must be visible through the corresponding lens.");
+                controller.SelectComponent(near);
+                CheckEmptyPinchDeselect(controller, near, edgePointer);
             }
             input.SetHeadsetCamera(null);
         }

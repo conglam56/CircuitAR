@@ -68,6 +68,7 @@ public class TapToPlaceController : MonoBehaviour
     private float unpinchGraceTimer = 0f;
     private Vector3 lastValidDragPos = Vector3.zero;
     private Vector2 dragGrabScreenPosition;
+    private int dragEye = -1;
     private bool dragPointerMoved;
     private Quaternion lastValidDragRot = Quaternion.identity;
     private Vector3 dragStartPos = Vector3.zero;
@@ -273,6 +274,7 @@ public class TapToPlaceController : MonoBehaviour
     {
         if (SelectedComponent == null) return;
         bool isOverlapping = CheckOverlap(SelectedComponent.transform.position, SelectedComponent, out _);
+        if (SelectedComponent == draggedObject) isDragBlocked = isOverlapping;
         if (isOverlapping)
         {
             ApplySelectionInvalid(SelectedComponent);
@@ -1047,7 +1049,7 @@ public class TapToPlaceController : MonoBehaviour
                 if (float.IsNegativeInfinity(dragHandLostAt)) dragHandLostAt = Time.unscaledTime;
                 // No stale ray movement: freeze, but survive a brief occluded hand.
                 if (draggedObject != null)
-                    draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
+                    RestoreLastDragPose();
                 if (Time.unscaledTime - dragHandLostAt >= 0.35f) ReleaseDraggedObject();
             }
             return;
@@ -1059,7 +1061,7 @@ public class TapToPlaceController : MonoBehaviour
         {
             placementTapInput.Reset();
             worldPinchArmed = false;
-            if (TryFindPinchTarget(screenPos, out GameObject target))
+            if (TryFindPinchTarget(screenPos, out GameObject target, out dragEye))
             {
                 draggedObject = target;
                 draggedObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
@@ -1067,8 +1069,16 @@ public class TapToPlaceController : MonoBehaviour
                 dragStartPos = draggedObject.transform.position;
                 dragStartRot = draggedObject.transform.rotation;
                 dragLevelTransition.Begin(dragStartPos.y);
-                Vector3 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
-                dragPointerOffset = new Vector2(baseScreen.x, baseScreen.y) - screenPos;
+                Vector2 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
+                if (dragEye >= 0)
+                {
+                    if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, dragStartPos, dragEye == 1,
+                        out Vector2 eyeScreen, clipToLens: false))
+                        baseScreen = eyeScreen;
+                    else
+                        dragEye = -1;
+                }
+                dragPointerOffset = baseScreen - screenPos;
                 dragGrabScreenPosition = screenPos;
                 dragPointerMoved = false;
                 lastValidDragPos = dragStartPos;
@@ -1085,7 +1095,8 @@ public class TapToPlaceController : MonoBehaviour
                     contact.confirmation.Reset();
                 }
 
-                SelectComponent(draggedObject);
+                if (SelectedComponent == draggedObject) UpdateSelectedComponentVisual();
+                else SelectComponent(draggedObject);
                 Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
             }
             else if (SelectedComponent != null)
@@ -1126,49 +1137,37 @@ public class TapToPlaceController : MonoBehaviour
                         ? Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-120f * Time.unscaledDeltaTime))
                         : targetPoint;
 
-                    bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out GameObject overlapObj, 0f);
+                    bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out _, 0f);
                     Quaternion dragTargetRot = dragStartRot;
 
                     draggedObject.transform.position = currentSmoothedDragPos;
                     draggedObject.transform.rotation = dragTargetRot;
 
+                    // Reassigning the same materials each frame allocates arrays
+                    // and invalidates render state on both headset cameras.
+                    if (isDragBlocked != isOverlapping && SelectedComponent == draggedObject)
+                    {
+                        if (isOverlapping) ApplySelectionInvalid(draggedObject);
+                        else ApplySelectionHighlight(draggedObject);
+                    }
+                    isDragBlocked = isOverlapping;
                     if (!isOverlapping)
                     {
-                        isDragBlocked = false;
                         lastValidDragPos = currentSmoothedDragPos;
                         lastValidDragRot = dragTargetRot;
                         dragSurfaceTrackableId = currentPlaneId;
                         dragHasMeasuredSupport = !dragSurfaceIsEstimated;
-
-                        if (SelectedComponent == draggedObject)
-                        {
-                            ApplySelectionHighlight(draggedObject);
-                        }
                     }
-                    else
-                    {
-                        isDragBlocked = true;
-                        if (!sameSupport) dragLevelTransition.Begin(lastValidDragPos.y);
-                        // Vị trí không hợp lệ -> Hiển thị màu đỏ cảnh báo nhưng vẫn bám sát tay để dễ dàng kéo ra vùng trống
-                        if (SelectedComponent == draggedObject)
-                        {
-                            ApplySelectionInvalid(draggedObject);
-                        }
-                    }
+                    else if (!sameSupport) dragLevelTransition.Begin(lastValidDragPos.y);
 
-                    // Cập nhật tọa độ dây nối theo thời gian thực khi di chuyển linh kiện
-                    if (wireConnectionController != null)
-                    {
+                    // Active wires already rebuild after this move in LateUpdate.
+                    if (wireConnectionController != null && !wireConnectionController.isActiveAndEnabled)
                         wireConnectionController.UpdateActiveWirePositionsExternal();
-                    }
                 }
                 else
                 {
                     // Giữ vị trí hợp lệ gần nhất nếu hoàn toàn không có thông tin
-                    draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
-                    currentSmoothedDragPos = lastValidDragPos;
-                    if (SelectedComponent == draggedObject)
-                        UpdateSelectedComponentVisual();
+                    RestoreLastDragPose();
                 }
             }
             else
@@ -1180,6 +1179,15 @@ public class TapToPlaceController : MonoBehaviour
                 }
             }
         }
+    }
+
+    private void RestoreLastDragPose()
+    {
+        bool restoreHighlight = isDragBlocked && draggedObject.transform.position != lastValidDragPos;
+        draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
+        currentSmoothedDragPos = lastValidDragPos;
+        if (restoreHighlight && SelectedComponent == draggedObject)
+            UpdateSelectedComponentVisual();
     }
 
     private void ReleaseDraggedObject()
@@ -1229,6 +1237,7 @@ public class TapToPlaceController : MonoBehaviour
 
         isDragging = false;
         draggedObject = null;
+        dragEye = -1;
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
         dragSurfaceTrackableId = TrackableId.invalidId;
@@ -1554,35 +1563,45 @@ public class TapToPlaceController : MonoBehaviour
         return null;
     }
 
-    private bool TryFindPinchTarget(Vector2 screenPoint, out GameObject target)
+    private bool TryFindPinchTarget(Vector2 screenPoint, out GameObject target, out int eyeIndex)
     {
         target = null;
-        float closestDistance = 20f;
+        eyeIndex = -1;
         if (mainCamera.TryGetComponent(out PhoneHeadsetAR headset) && headset.Stereo?.IsReady == true)
         {
+            if (!PhoneHeadsetStereo.TryGetEyeRay(mainCamera, screenPoint, false, out Ray leftRay) ||
+                !PhoneHeadsetStereo.TryGetEyeRay(mainCamera, screenPoint, true, out Ray rightRay)) return false;
+
+            // The hand cursor has the same source position in both eyes. Their
+            // virtual silhouettes shift, so require agreement on the nearest component.
             int mask = headset.Stereo.SceneCullingMask;
-            for (int eye = 0; eye < 2; eye++)
-            {
-                if (PhoneHeadsetStereo.TryGetEyeRay(mainCamera, screenPoint, eye == 1, out Ray ray))
-                    FindClosestPinchHit(ray, mask, ref closestDistance, ref target);
-            }
+            GameObject leftTarget = FindClosestPinchHit(leftRay, mask, out float leftDistance);
+            if (leftTarget == null) return false;
+            GameObject rightTarget = FindClosestPinchHit(rightRay, mask, out float rightDistance);
+            if (leftTarget != rightTarget) return false;
+
+            target = leftTarget;
+            eyeIndex = rightDistance < leftDistance ? 1 : 0;
         }
         else
         {
-            FindClosestPinchHit(mainCamera.ScreenPointToRay(screenPoint), mainCamera.cullingMask,
-                ref closestDistance, ref target);
+            target = FindClosestPinchHit(mainCamera.ScreenPointToRay(screenPoint), mainCamera.cullingMask,
+                out _);
         }
         return target != null;
     }
 
-    private void FindClosestPinchHit(Ray ray, int cullingMask, ref float closestDistance, ref GameObject target)
+    private GameObject FindClosestPinchHit(Ray ray, int cullingMask, out float closestDistance)
     {
+        GameObject target = null;
+        closestDistance = 20f;
         foreach (GameObject obj in placedObjectsHistory)
         {
             if (obj != null && obj.activeInHierarchy &&
                 geometryCache.TryHitVisibleMesh(obj, ray, cullingMask, ref closestDistance))
                 target = obj;
         }
+        return target;
     }
 
     private bool TryFindTapTarget(Vector2 screenPoint, out GameObject target)
@@ -1657,15 +1676,45 @@ public class TapToPlaceController : MonoBehaviour
         if (mainCamera == null ||
             ARSession.state != ARSessionState.SessionTracking) return false;
         Vector2 offsetPoint = screenPoint + dragPointerOffset;
+        bool canUseEstimatedLevel = enableInstantPlacement && !dragHasMeasuredSupport &&
+            draggedObject != null && instantPlacedObjects.Contains(draggedObject);
+        if (dragEye >= 0)
+        {
+            // Follow the eye that actually grabbed the mesh. Project at the last
+            // accepted height, then translate to the physical camera for any ARCore queries.
+            if (!PhoneHeadsetStereo.TryGetEyeRay(mainCamera, offsetPoint, dragEye == 1, out Ray eyeRay, clipToLens: false) ||
+                !new Plane(Vector3.up, lastValidDragPos).Raycast(eyeRay, out float distance) ||
+                distance <= 0f || distance > 20f)
+            {
+                dragLevelTransition.CancelPending();
+                return false;
+            }
+            Vector3 contact = eyeRay.GetPoint(distance);
+            if (TryGetHeadsetSameLevelSupport(contact, out pose))
+            {
+                planeId = dragSurfaceTrackableId;
+                dragLevelTransition.CancelPending();
+                return true;
+            }
+            if (canUseEstimatedLevel && distance <= 5f && (contact - dragStartPos).sqrMagnitude <= 1f)
+            {
+                // An estimated component can slide at its original height during
+                // this gesture. A newly seen surface must not make it jump.
+                dragSurfaceIsEstimated = true;
+                pose = new Pose(contact, dragStartRot);
+                dragLevelTransition.CancelPending();
+                return true;
+            }
+            offsetPoint = mainCamera.WorldToScreenPoint(contact);
+        }
         if (!TryGetMeasuredDragSupport(offsetPoint, out pose, out planeId) &&
-            (measuredDepth.IsConfirmingSurface || dragPointerOffset.sqrMagnitude < 1f ||
+            (dragEye >= 0 || measuredDepth.IsConfirmingSurface || dragPointerOffset.sqrMagnitude < 1f ||
              !TryGetMeasuredDragSupport(screenPoint, out pose, out planeId)))
         {
             dragLevelTransition.CancelPending();
             // An estimated placement remains movable even before surface detection.
             // Keep its authored height; measured objects retain bounded surface rules.
-            if (enableInstantPlacement && !dragHasMeasuredSupport &&
-                draggedObject != null && instantPlacedObjects.Contains(draggedObject))
+            if (dragEye < 0 && canUseEstimatedLevel)
             {
                 dragSurfaceIsEstimated = true;
                 return TryProjectEstimatedLevel(screenPoint, dragStartPos, out pose);
@@ -1675,6 +1724,20 @@ public class TapToPlaceController : MonoBehaviour
         // Crossing a measured table/floor height is intentional only after a
         // short stable hold. A single ray beyond an edge must not teleport.
         return dragLevelTransition.Accept(GetContactPosition(pose), screenPoint, Time.unscaledTime);
+    }
+
+    private bool TryGetHeadsetSameLevelSupport(Vector3 contact, out Pose pose)
+    {
+        pose = default;
+        if (arPlaneManager == null || dragSurfaceTrackableId == TrackableId.invalidId) return false;
+        ARPlane plane = arPlaneManager.GetPlane(dragSurfaceTrackableId);
+        if (!TryGetVerticalContactOnPlane(contact, plane, out Vector3 measured, requireHeightCorrection: false) ||
+            !IsSameDragSupportLevel(contact.y, measured.y + surfaceContactOffset)) return false;
+
+        // Inside the same tracked polygon, keep the accepted height and avoid
+        // native depth probes competing with hand tracking on every short move.
+        pose = new Pose(contact - Vector3.up * surfaceContactOffset, Quaternion.identity);
+        return true;
     }
 
     private bool TryGetMeasuredDragSupport(Vector2 screenPoint, out Pose pose, out TrackableId planeId)

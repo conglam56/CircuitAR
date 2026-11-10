@@ -842,16 +842,62 @@ internal static class ARPlacementRegressionChecks
                 Require(controller.IsDragging && levelTransition.IsPending && held.transform.position == previousContact,
                     "The live drag must hold its old contact while a higher surface is still being confirmed.");
                 Set(controller, "isDragging", false);
-                Set(controller, "draggedObject", null);
                 input.isPinching = false;
+
+                Set(controller, "dragEye", 1);
+                Set(controller, "dragSurfaceTrackableId", tableId);
+                levelTransition.Begin(previousContact.y);
+                bool HeadsetDragHit(Vector3 contact, out Pose pose, out TrackableId planeId)
+                {
+                    Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, contact, true, out Vector2 pointer, clipToLens: false),
+                        "The headset drag fixture must project a point in front of the selected eye.");
+                    object[] arguments = { pointer, null, null };
+                    bool hit = (bool)typeof(TapToPlaceController).GetMethod("TryGetDragSurface", PrivateInstance)
+                        .Invoke(controller, arguments);
+                    pose = (Pose)arguments[1];
+                    planeId = (TrackableId)arguments[2];
+                    return hit;
+                }
+                table.transform.position = Vector3.up * 0.01f;
+                Vector3 tabletopContact = previousContact + Vector3.right * 0.15f;
+                Require(HeadsetDragHit(tabletopContact, out Pose tablePose, out TrackableId hitId) &&
+                    hitId == tableId &&
+                    Vector3.Distance(tablePose.position + Vector3.up * controller.surfaceContactOffset, tabletopContact) < 0.001f,
+                    "The grab eye must follow immediately within the tracked tabletop and keep the accepted contact height.");
+                Require(!HeadsetDragHit(previousContact + Vector3.right * 0.5f, out _, out _) && levelTransition.IsPending,
+                    "The fast headset path must stop at the polygon edge and require the ordinary level-change hold.");
+
+                Set(controller, "dragSurfaceTrackableId", TrackableId.invalidId);
+                var estimated = (HashSet<GameObject>)Get(controller, "instantPlacedObjects");
+                bool oldInstantPlacement = controller.enableInstantPlacement;
+                estimated.Add(held);
+                controller.enableInstantPlacement = true;
+                try
+                {
+                    Vector3 estimatedContact = previousContact + Vector3.right * 0.45f;
+                    Require(HeadsetDragHit(estimatedContact, out Pose estimatedPose, out hitId) &&
+                        hitId == TrackableId.invalidId && (bool)Get(controller, "dragSurfaceIsEstimated") &&
+                        Vector3.Distance(estimatedPose.position, estimatedContact) < 0.001f && !levelTransition.IsPending,
+                        "An estimated headset drag must follow the grab eye at its original height without waiting on the lower floor.");
+                }
+                finally
+                {
+                    controller.enableInstantPlacement = oldInstantPlacement;
+                    estimated.Remove(held);
+                }
             }
             finally
             {
+                Set(controller, "dragEye", -1);
+                Set(controller, "draggedObject", null);
+                Set(controller, "dragSurfaceTrackableId", TrackableId.invalidId);
                 controller.arPlaneManager = originalManager;
                 camera.transform.SetPositionAndRotation(oldCameraPosition, oldCameraRotation);
             }
             results.Add("PASS: drag rays reject accidental floor jumps but allow a stable deliberate hold over the lower measured floor");
             results.Add("PASS: the live drag cannot bypass the support hold and lift a component onto a higher plane");
+            results.Add("PASS: headset drags follow the grab eye across a tracked tabletop without a height jump and honor its edge");
+            results.Add("PASS: headset drags of estimated placements follow immediately at the original contact height");
 
             controller.StartPreview("Test");
             Set(controller, "placementRequestHasSurface", true);

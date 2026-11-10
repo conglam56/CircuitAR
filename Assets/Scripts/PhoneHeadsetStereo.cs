@@ -136,11 +136,12 @@ public sealed class PhoneHeadsetStereo : IDisposable
         return true;
     }
 
-    internal static bool TryGetEyeRay(Camera source, Vector2 screenPoint, bool rightEye, out Ray ray)
+    internal static bool TryGetEyeRay(Camera source, Vector2 screenPoint, bool rightEye, out Ray ray,
+        bool clipToLens = true)
     {
         ray = default;
         Vector2 viewport = source.ScreenToViewportPoint(screenPoint);
-        if (!ContainsSourcePoint(viewport)) return false;
+        if (clipToLens && !ContainsSourcePoint(viewport)) return false;
 
         float offset = GetEyeOffset(rightEye);
         Matrix4x4 clipToView = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic).inverse;
