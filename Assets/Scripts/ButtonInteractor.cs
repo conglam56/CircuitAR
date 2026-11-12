@@ -8,6 +8,7 @@ using Mediapipe.Tasks.Vision.HandLandmarker;
 public class ButtonInteractor : MonoBehaviour
 {
     private volatile int handChannel;
+    private HandIdentityTracker handIdentity = new HandIdentityTracker();
     public ButtonInteractor SecondHand { get; private set; }
     private ButtonInteractor otherHand;
     private bool ownsHandPoints;
@@ -36,6 +37,8 @@ public class ButtonInteractor : MonoBehaviour
         second.cursorDiameter = cursorDiameter;
         second.pinchDebounceTime = pinchDebounceTime;
         second.clickCooldown = clickCooldown;
+        handIdentity.Reset();
+        second.handIdentity = handIdentity;
         second.handChannel = 2;
         handChannel = 1;
         lock (_lock) { isHandVisible = false; hasRawHandMaskLandmarks = false; }
@@ -50,6 +53,7 @@ public class ButtonInteractor : MonoBehaviour
     public void ReleaseSecondHand()
     {
         handChannel = 0;
+        handIdentity.Reset();
         otherHand = null;
         if (SecondHand == null) return;
         SecondHand.gameObject.SetActive(false);
@@ -284,7 +288,7 @@ public class ButtonInteractor : MonoBehaviour
         if (headsetCamera == null || (!IsHandVisible && Time.unscaledTime > keepHeadsetCursorUntil) || cursorVisual == null) return Vector4.zero;
         // Tăng kích thước con trỏ lên ~2.2 lần (từ 0.00028 lên 0.00062) để dễ nhìn rõ qua thấu kính VR
         float radius = (cursorDiameter * 0.00062f) * cursorVisual.localScale.x;
-        float mode = cursorVisualGraphic.IsRing ? 1f : (isPinching ? 2f : 0f);
+        float mode = isPinching ? 2f : (cursorVisualGraphic.IsRing ? 1f : 0f);
         return new Vector4(displayedCursorAnchor.x, displayedCursorAnchor.y, radius, mode);
     }
 
@@ -505,14 +509,15 @@ public class ButtonInteractor : MonoBehaviour
         if (hasWorldDragPoint) rawWorldDragPoint = Vector2.Scale(indexViewportPoint, new Vector2(Screen.width, Screen.height));
         bool finiteInput = IsFiniteHandPoint(new Vector2(x, y)) &&
             IsFiniteHandPoint(new Vector2(tx, ty)) && !float.IsNaN(dist) && !float.IsInfinity(dist);
-        IsGestureTemporarilyOccluded = !IsHandVisible && freshMissingHand && finiteInput &&
-            videoPanel != null && debugPoint != null && isPinching &&
+        bool briefMissingHand = !IsHandVisible && freshMissingHand && finiteInput &&
+            videoPanel != null && debugPoint != null &&
             Time.unscaledTime - lastVisibleHandAt <= GestureOcclusionGrace &&
             (imageSource == null || imageSource.isPlaying) &&
             (handRunner == null || (!handRunner.IsPaused && handRunner.isActiveAndEnabled));
-        // Preserve a captured gesture across a fresh, brief missing-hand result.
-        // Out-of-lens/stale input still rearms, so re-entry cannot cause a new grab.
-        if (headsetCamera != null && !IsHandVisible && !IsGestureTemporarilyOccluded) headsetNeedsOpenHand = true;
+        IsGestureTemporarilyOccluded = briefMissingHand && isPinching;
+        // A lost sample while the hand is OPEN must not rearm the headset just
+        // before closing. No world actions use the missing pointer during this grace.
+        if (headsetCamera != null && !IsHandVisible && !briefMissingHand) headsetNeedsOpenHand = true;
         if (IsHandVisible) lastVisibleHandAt = Time.unscaledTime;
         handMaskHullCount = 0;
         if (IsHandVisible && hasHandMask &&
@@ -540,10 +545,7 @@ public class ButtonInteractor : MonoBehaviour
             }
             if (debugPoint != null) debugPoint.gameObject.SetActive(false);
             if (thumbPoint != null) thumbPoint.gameObject.SetActive(false);
-            bool keepCursor = freshMissingHand && finiteInput && cursorPositionInitialized &&
-                Time.unscaledTime - lastVisibleHandAt <= 0.18f &&
-                (imageSource == null || imageSource.isPlaying) &&
-                (handRunner == null || (!handRunner.IsPaused && handRunner.isActiveAndEnabled));
+            bool keepCursor = briefMissingHand && cursorPositionInitialized;
             if (cursorOverlayRoot != null) cursorOverlayRoot.SetActive(keepCursor);
             keepHeadsetCursorUntil = keepCursor ? lastVisibleHandAt + 0.18f : float.NegativeInfinity;
 
@@ -552,7 +554,7 @@ public class ButtonInteractor : MonoBehaviour
             // No pointer or depth mask is valid during this gap. Retain only
             // the active gesture's identity/owner so one missing inference
             // cannot cancel a world pinch or turn a UI pinch into a world one.
-            if (IsGestureTemporarilyOccluded) return;
+            if (briefMissingHand) return;
             PinchConsumedByUI = false;
             wasPinchingGlobal = false;
             wasPinching = false;
@@ -960,7 +962,8 @@ public class ButtonInteractor : MonoBehaviour
         // only; source lookup and Unity object checks belong to Update.
         long sourceTicks = ReferenceEquals(handRunner, null) ? 0L : handRunner.LatestResultSourceReadyTimestamp;
         long resultTicks = sourceTicks > 0L ? sourceTicks : System.Diagnostics.Stopwatch.GetTimestamp();
-        int handIndex = FindHandIndex(result, handChannel);
+        int channel = handChannel;
+        int handIndex = handIdentity.Find(result, channel, resultTicks);
         if (handIndex < 0 || result.handLandmarks[handIndex].landmarks == null ||
             result.handLandmarks[handIndex].landmarks.Count < HandMaskLandmarkCount)
         {
@@ -1033,6 +1036,108 @@ public class ButtonInteractor : MonoBehaviour
             selected = i;
         }
         return selected;
+    }
+
+    // Handedness is a classifier, not a persistent ID: pinching/overlapping hands
+    // can briefly receive the same label. Match both palms jointly so the two
+    // interactors never claim one detection or switch owners on a label flicker.
+    private sealed class HandIdentityTracker
+    {
+        private readonly object gate = new object();
+        private readonly Vector2[] positions = new Vector2[2];
+        private readonly long[] seen = new long[2];
+        private long sample;
+        private int left = -1, right = -1, singleSlot = -1;
+
+        public void Reset()
+        {
+            lock (gate) { seen[0] = seen[1] = sample = 0; left = right = singleSlot = -1; }
+        }
+
+        public int Find(HandLandmarkerResult result, int channel, long ticks)
+        {
+            lock (gate)
+            {
+                if (sample != ticks || ticks == 0)
+                {
+                    sample = ticks;
+                    Match(result, ticks);
+                }
+                if (channel == 0)
+                {
+                    if (singleSlot < 0 || ((singleSlot == 0 ? left : right) < 0 && !Recent(singleSlot, ticks)))
+                    {
+                        int first = FindHandIndex(result, 0);
+                        singleSlot = left == first && left >= 0 ? 0 : right == first && right >= 0 ? 1 : left >= 0 ? 0 : right >= 0 ? 1 : -1;
+                    }
+                    return singleSlot < 0 ? -1 : singleSlot == 0 ? left : right;
+                }
+                return channel == 1 ? left : right;
+            }
+        }
+
+        private bool Recent(int slot, long ticks) => seen[slot] > 0 && ticks >= seen[slot] &&
+            (ticks - seen[slot]) / (double)System.Diagnostics.Stopwatch.Frequency <= 0.65;
+
+        private static bool Palm(HandLandmarkerResult result, int index, out Vector2 point)
+        {
+            point = default;
+            var landmarks = result.handLandmarks[index].landmarks;
+            if (landmarks == null || landmarks.Count < HandMaskLandmarkCount) return false;
+            foreach (int i in PalmIndices)
+            {
+                var p = new Vector2(landmarks[i].x, landmarks[i].y);
+                if (!IsFiniteHandPoint(p)) return false;
+                point += p * 0.25f;
+            }
+            return true;
+        }
+        private static readonly int[] PalmIndices = { 0, 5, 9, 17 };
+
+        private static float LabelCost(HandLandmarkerResult result, int index, int slot)
+        {
+            if (result.handedness == null || index >= result.handedness.Count) return 0.02f;
+            var labels = result.handedness[index].categories;
+            if (labels == null || labels.Count == 0 || labels[0].score < 0.6f) return 0.02f;
+            return labels[0].categoryName == (slot == 0 ? "Left" : "Right") ? 0f : 0.08f;
+        }
+
+        private float Cost(HandLandmarkerResult result, int index, Vector2 point, int slot, long ticks) =>
+            Recent(slot, ticks) ? (point - positions[slot]).sqrMagnitude
+                : 0.15f + LabelCost(result, index, slot);
+
+        private void Match(HandLandmarkerResult result, long ticks)
+        {
+            left = right = -1;
+            if (result.handLandmarks == null) return;
+            int first = -1, second = -1;
+            Vector2 a = default, b = default;
+            for (int i = 0; i < result.handLandmarks.Count; i++)
+            {
+                if (!Palm(result, i, out Vector2 point)) continue;
+                if (first < 0) { first = i; a = point; }
+                else { second = i; b = point; break; }
+            }
+            if (first < 0) return;
+            if (second >= 0)
+            {
+                float direct = Cost(result, first, a, 0, ticks) + Cost(result, second, b, 1, ticks);
+                float swapped = Cost(result, first, a, 1, ticks) + Cost(result, second, b, 0, ticks);
+                left = direct <= swapped ? first : second;
+                right = direct <= swapped ? second : first;
+                positions[0] = left == first ? a : b;
+                positions[1] = right == first ? a : b;
+                seen[0] = seen[1] = ticks;
+                return;
+            }
+            int owner = Cost(result, first, a, 0, ticks) <= Cost(result, first, a, 1, ticks) ? 0 : 1;
+            // A sole remaining detection belongs to just one channel; do not
+            // hand it to a distant, recently occluded owner based on its label.
+            if (Recent(owner, ticks) && (a - positions[owner]).sqrMagnitude > 0.09f) return;
+            if (owner == 0) left = first; else right = first;
+            positions[owner] = a;
+            seen[owner] = ticks;
+        }
     }
 
     private static Vector2 FilterCursorAnchor(Vector2 current, Vector2 target, Vector2 screenSize,

@@ -101,6 +101,15 @@ public class WireConnectionController : MonoBehaviour
         public GameObject connectorB;
         public Color actualWireColor;
 
+        // Per-wire buffers are retained while dragging; idle frames do not upload
+        // unchanged tube geometry or allocate fresh vertex/index arrays.
+        [System.NonSerialized] internal WireGeometryInputs geometryInputs;
+        [System.NonSerialized] internal bool hasGeometry;
+        [System.NonSerialized] internal int geometryRevision;
+        [System.NonSerialized] internal Vector3[] curvePoints, tangents, normals, binormals, vertices, meshNormals;
+        [System.NonSerialized] internal Vector2[] uvs;
+        [System.NonSerialized] internal int[] triangles;
+
         public WireRecord(Transform a, Transform b, GameObject obj, MeshFilter mf, MeshRenderer mr, Mesh mesh, GameObject pA, GameObject pB, GameObject cA, GameObject cB, Color col)
         {
             terminalA = a;
@@ -115,6 +124,21 @@ public class WireConnectionController : MonoBehaviour
             connectorB = cB;
             actualWireColor = col;
         }
+    }
+
+    internal struct WireGeometryInputs : System.IEquatable<WireGeometryInputs>
+    {
+        public Vector3 baseA, baseB, junctionA, junctionB, rotationA, rotationB;
+        public Matrix4x4 worldToLocal;
+        public Vector4 shape;
+        public Vector2Int segments;
+        public int flags;
+        public Mesh mesh;
+        public bool Equals(WireGeometryInputs other) => baseA.Equals(other.baseA) && baseB.Equals(other.baseB) &&
+            junctionA.Equals(other.junctionA) && junctionB.Equals(other.junctionB) &&
+            rotationA.Equals(other.rotationA) && rotationB.Equals(other.rotationB) &&
+            worldToLocal.Equals(other.worldToLocal) && shape.Equals(other.shape) &&
+            segments.Equals(other.segments) && flags == other.flags && mesh == other.mesh;
     }
 
     [Header("--- DANH SÁCH DÂY ĐANG KẾT NỐI ---")]
@@ -229,6 +253,44 @@ public class WireConnectionController : MonoBehaviour
         }
     }
 
+    private sealed class WirePinchRequest
+    {
+        public ButtonInteractor owner;
+        public bool pending;
+        public float expiresAt;
+    }
+    private readonly WirePinchRequest primaryWirePinch = new();
+    private readonly WirePinchRequest secondaryWirePinch = new();
+    private readonly RaycastHit[] terminalHits = new RaycastHit[64];
+    private readonly List<Terminal> nearbyTerminals = new();
+    private Transform lastGestureTerminal;
+    private int lastGestureFrame = -1;
+
+    private void ProcessWirePinch(ButtonInteractor input, WirePinchRequest request)
+    {
+        if (request.owner != input) { request.owner = input; request.pending = false; }
+        if (input == null) return;
+        if (input.JustPinched)
+        {
+            request.pending = input.IsHandVisible && !input.PinchConsumedByUI && !input.IsPointerOverUI;
+            request.expiresAt = Time.unscaledTime + 0.18f;
+        }
+        if (!request.pending) return;
+        if (Time.unscaledTime > request.expiresAt || input.PinchConsumedByUI || input.IsPointerOverUI || !input.isPinching)
+        {
+            request.pending = false;
+            return;
+        }
+        if (!input.IsHandVisible) return; // Never cast from a missing/stale hand.
+        Transform terminal = FindTerminalAt(input.CurrentScreenPos);
+        if (terminal == null) return;
+        request.pending = false; // One successful selection per physical pinch.
+        if (lastGestureFrame == Time.frameCount && lastGestureTerminal == terminal) return;
+        lastGestureTerminal = terminal;
+        lastGestureFrame = Time.frameCount;
+        OnTerminalPinched(terminal);
+    }
+
     void Update()
     {
         if ((firstSelectedTerminal == null && originalTerminalMaterials != null) ||
@@ -251,6 +313,7 @@ public class WireConnectionController : MonoBehaviour
         // 1. NẾU CHẾ ĐỘ NỐI DÂY ĐANG TẮT (NORMAL / MOVE MODE) -> KHÔNG THỰC HIỆN NỐI DÂY!
         if (!isWireMode)
         {
+            primaryWirePinch.pending = secondaryWirePinch.pending = false;
             if (firstSelectedTerminal != null)
             {
                 CancelSelection();
@@ -261,6 +324,7 @@ public class WireConnectionController : MonoBehaviour
         // 2. Nếu đang mở menu đặt linh kiện mới, huỷ thao tác nối dây dở dang
         if (menuHUD != null && menuHUD.HasSelection)
         {
+            primaryWirePinch.pending = secondaryWirePinch.pending = false;
             if (firstSelectedTerminal != null)
             {
                 CancelSelection();
@@ -268,14 +332,10 @@ public class WireConnectionController : MonoBehaviour
             return;
         }
 
-        // 3. Lắng nghe cử chỉ Pinch trong Wire Mode
-        if (buttonInteractor.IsHandVisible && buttonInteractor.JustPinched && !buttonInteractor.PinchConsumedByUI)
-        {
-            HandlePinchRaycast(buttonInteractor.CurrentScreenPos);
-        }
-        var second = buttonInteractor.SecondHand;
-        if (second != null && second.IsHandVisible && second.JustPinched && !second.PinchConsumedByUI)
-            HandlePinchRaycast(second.CurrentScreenPos);
+        // Keep a short intent window while the fingers finish closing. A miss
+        // on the first sample must not force another open/close cycle.
+        ProcessWirePinch(buttonInteractor, primaryWirePinch);
+        ProcessWirePinch(buttonInteractor.SecondHand, secondaryWirePinch);
     }
 
     void LateUpdate()
@@ -287,65 +347,104 @@ public class WireConnectionController : MonoBehaviour
     /// <summary>
     /// Bắn raycast 3D từ con trỏ ngón tay vào không gian để tìm Collider mang Tag "Terminal"
     /// </summary>
-    private void HandlePinchRaycast(Vector2 screenPos)
+    private Transform FindTerminalAt(Vector2 screenPos)
     {
         Ray ray = mainCamera.ScreenPointToRay(screenPos);
         Physics.SyncTransforms();
-
-        RaycastHit[] hits = Physics.RaycastAll(ray, maxRaycastDistance, Physics.DefaultRaycastLayers,
+        int count = Physics.RaycastNonAlloc(ray, terminalHits, maxRaycastDistance, Physics.DefaultRaycastLayers,
             QueryTriggerInteraction.Collide);
+        // Saturation must not silently lose a closer terminal in a dense circuit.
+        RaycastHit[] hits = count == terminalHits.Length
+            ? Physics.RaycastAll(ray, maxRaycastDistance, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Collide)
+            : terminalHits;
+        if (hits != terminalHits) count = hits.Length;
         Transform hitTerminal = null;
         float minDistance = float.MaxValue;
-
-        foreach (var hit in hits)
+        for (int i = 0; i < count; i++)
         {
+            var hit = hits[i];
             if (hit.distance >= minDistance) continue;
             var terminal = hit.collider.GetComponentInParent<Terminal>();
             if (terminal == null && !hit.collider.CompareTag("Terminal")) continue;
             minDistance = hit.distance;
             hitTerminal = terminal != null ? terminal.transform : hit.collider.transform;
         }
-
-        if (hitTerminal == null && buttonInteractor.IsHeadsetMode)
-            hitTerminal = FindHeadsetTerminalNear(screenPos);
-
-        if (hitTerminal != null)
-        {
-            OnTerminalPinched(hitTerminal);
-        }
+        return hitTerminal != null ? hitTerminal : FindTerminalNear(screenPos);
     }
 
-    private Transform FindHeadsetTerminalNear(Vector2 screenPoint)
+    private Transform FindTerminalNear(Vector2 screenPoint)
     {
         if (tapToPlaceController == null) return null;
-        float radius = mainCamera.pixelHeight * 0.022f;
-        float closest = radius * radius;
+        bool headset = buttonInteractor != null && buttonInteractor.IsHeadsetMode;
+        if (headset && !PhoneHeadsetStereo.ContainsSourcePoint(mainCamera.ScreenToViewportPoint(screenPoint))) return null;
+        // Only terminal targets get this small allowance. Body grabs retain their
+        // strict visible-silhouette hit test.
+        float padding = Mathf.Clamp(Mathf.Min(mainCamera.pixelWidth, mainCamera.pixelHeight) * 0.028f, 18f, 32f);
+        float closest = float.PositiveInfinity;
         Transform result = null;
         foreach (var placed in tapToPlaceController.placedObjectsHistory)
         {
             if (placed == null || !placed.activeInHierarchy) continue;
-            foreach (var terminal in placed.GetComponentsInChildren<Terminal>())
+            nearbyTerminals.Clear();
+            placed.GetComponentsInChildren(false, nearbyTerminals);
+            foreach (var terminal in nearbyTerminals)
             {
                 if (!terminal.isActiveAndEnabled ||
                     !TryGetTerminalBounds(terminal.transform, out Bounds bounds) ||
-                    (bounds.center - mainCamera.transform.position).sqrMagnitude > maxRaycastDistance * maxRaycastDistance)
-                    continue;
-
-                if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, bounds.center, false, out Vector2 left))
-                    Consider(left, terminal.transform);
-                if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, bounds.center, true, out Vector2 right))
-                    Consider(right, terminal.transform);
+                    (bounds.center - mainCamera.transform.position).sqrMagnitude > maxRaycastDistance * maxRaycastDistance) continue;
+                int views = headset ? 2 : 1;
+                for (int eye = 0; eye < views; eye++)
+                {
+                    if (!TryProjectTerminalBounds(bounds, headset, eye == 1, out Rect rect, out Vector2 center)) continue;
+                    Vector2 nearest = new Vector2(Mathf.Clamp(screenPoint.x, rect.xMin, rect.xMax),
+                        Mathf.Clamp(screenPoint.y, rect.yMin, rect.yMax));
+                    if ((nearest - screenPoint).sqrMagnitude > padding * padding) continue;
+                    float score = (center - screenPoint).sqrMagnitude;
+                    if (score >= closest) continue;
+                    closest = score;
+                    result = terminal.transform;
+                }
             }
         }
         return result;
+    }
 
-        void Consider(Vector2 projected, Transform terminal)
+    private bool TryProjectTerminalBounds(Bounds bounds, bool headset, bool right, out Rect rect, out Vector2 center)
+    {
+        rect = default;
+        center = default;
+        if (headset)
         {
-            float distance = (screenPoint - projected).sqrMagnitude;
-            if (distance >= closest) return;
-            closest = distance;
-            result = terminal;
+            if (!PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, bounds.center, right, out center)) return false;
         }
+        else
+        {
+            Vector3 point = mainCamera.WorldToScreenPoint(bounds.center);
+            if (point.z <= mainCamera.nearClipPlane) return false;
+            center = point;
+        }
+        Vector2 min = center, max = center;
+        for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+        for (int z = -1; z <= 1; z += 2)
+        {
+            Vector3 corner = bounds.center + Vector3.Scale(bounds.extents, new Vector3(x, y, z));
+            Vector2 projected;
+            if (headset)
+            {
+                if (!PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, corner, right, out projected, false)) continue;
+            }
+            else
+            {
+                Vector3 point = mainCamera.WorldToScreenPoint(corner);
+                if (point.z <= mainCamera.nearClipPlane) continue;
+                projected = point;
+            }
+            min = Vector2.Min(min, projected);
+            max = Vector2.Max(max, projected);
+        }
+        rect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
+        return true;
     }
 
     private static bool TryGetTerminalBounds(Transform terminal, out Bounds bounds)
@@ -665,6 +764,13 @@ public class WireConnectionController : MonoBehaviour
 
     // Quản lý các Node ngã rẽ trực quan (Junction Nodes) khi một cọc có từ 2 kết nối trở lên
     private readonly Dictionary<Transform, GameObject> activeJunctionNodes = new Dictionary<Transform, GameObject>();
+    private readonly Dictionary<Transform, List<WireRecord>> terminalWires = new();
+    private readonly Stack<List<WireRecord>> terminalWireLists = new();
+    private readonly Dictionary<Transform, TerminalJunctionInfo> junctionMap = new();
+    private readonly HashSet<Transform> currentBranchedTerminals = new();
+    private readonly List<Transform> otherTerms = new();
+    private readonly List<Transform> toRemoveNodes = new();
+
 
     private struct TerminalJunctionInfo
     {
@@ -735,6 +841,21 @@ public class WireConnectionController : MonoBehaviour
         Vector3 basePosA = GetTerminalBaseAnchor(wire.terminalA);
         Vector3 basePosB = GetTerminalBaseAnchor(wire.terminalB);
 
+        var inputs = new WireGeometryInputs
+        {
+            baseA = basePosA, baseB = basePosB, junctionA = jPosA, junctionB = jPosB,
+            rotationA = connectorRotationOffsetA, rotationB = connectorRotationOffsetB,
+            worldToLocal = wire.wireObject.transform.worldToLocalMatrix,
+            shape = new Vector4(wireRadius, archHeight, archFactor, textureTilingPerMeter),
+            segments = new Vector2Int(Mathf.Max(16, curveSegments), Mathf.Max(6, radialSegments)),
+            flags = (isBranchedA ? 1 : 0) | (isPrimaryA ? 2 : 0) | (isBranchedB ? 4 : 0) |
+                (isPrimaryB ? 8 : 0) | (useLabPlugStyle ? 16 : 0) |
+                (wire.pivotA != null && wire.pivotA.activeSelf ? 32 : 0) |
+                (wire.pivotB != null && wire.pivotB.activeSelf ? 64 : 0),
+            mesh = wire.wireMesh
+        };
+        if (wire.hasGeometry && wire.geometryInputs.Equals(inputs)) return;
+
         // Điểm xuất phát của sợi dây: nhô ra từ đỉnh của giắc cắm
         float plugTopOffset = useLabPlugStyle ? LAB_PLUG_HEIGHT : 0.005f;
         Vector3 p0 = basePosA + Vector3.up * plugTopOffset;
@@ -743,8 +864,15 @@ public class WireConnectionController : MonoBehaviour
         int N = Mathf.Max(16, curveSegments);
         int K = Mathf.Max(6, radialSegments);
 
-        Vector3[] curvePoints = new Vector3[N + 1];
-        Vector3[] tangents = new Vector3[N + 1];
+        if (wire.curvePoints == null || wire.curvePoints.Length != N + 1)
+        {
+            wire.curvePoints = new Vector3[N + 1];
+            wire.tangents = new Vector3[N + 1];
+            wire.normals = new Vector3[N + 1];
+            wire.binormals = new Vector3[N + 1];
+        }
+        Vector3[] curvePoints = wire.curvePoints;
+        Vector3[] tangents = wire.tangents;
 
         // Xác định điểm thực sự bắt đầu và kết thúc của đoạn uốn lượn chính
         // Nếu là nhánh phụ (không phải Primary), điểm bắt đầu/kết thúc chính là Junction Node
@@ -811,8 +939,8 @@ public class WireConnectionController : MonoBehaviour
 
 
         // 2. HỆ TRỤC TỌA ĐỘ QUAY (Parallel Transport Frame) chống xoắn vặn
-        Vector3[] normals = new Vector3[N + 1];
-        Vector3[] binormals = new Vector3[N + 1];
+        Vector3[] normals = wire.normals;
+        Vector3[] binormals = wire.binormals;
 
         Vector3 initialUp = Mathf.Abs(Vector3.Dot(tangents[0], Vector3.up)) < 0.9f ? Vector3.up : Vector3.right;
         normals[0] = Vector3.Cross(tangents[0], initialUp).normalized;
@@ -827,9 +955,15 @@ public class WireConnectionController : MonoBehaviour
 
         // 3. TẠO ĐỈNH, PHÁP TUYẾN VÀ UV
         int vertCount = (N + 1) * (K + 1);
-        Vector3[] vertices = new Vector3[vertCount];
-        Vector3[] meshNormals = new Vector3[vertCount];
-        Vector2[] uvs = new Vector2[vertCount];
+        if (wire.vertices == null || wire.vertices.Length != vertCount)
+        {
+            wire.vertices = new Vector3[vertCount];
+            wire.meshNormals = new Vector3[vertCount];
+            wire.uvs = new Vector2[vertCount];
+        }
+        Vector3[] vertices = wire.vertices;
+        Vector3[] meshNormals = wire.meshNormals;
+        Vector2[] uvs = wire.uvs;
 
         float cumulativeDist = 0f;
         int vIdx = 0;
@@ -854,7 +988,8 @@ public class WireConnectionController : MonoBehaviour
 
         // 4. TẠO TAM GIÁC MESH
         int triCount = N * K * 6;
-        int[] triangles = new int[triCount];
+        if (wire.triangles == null || wire.triangles.Length != triCount) wire.triangles = new int[triCount];
+        int[] triangles = wire.triangles;
         int tIdx = 0;
 
         for (int i = 0; i < N; i++)
@@ -924,6 +1059,9 @@ public class WireConnectionController : MonoBehaviour
                 }
             }
         }
+        wire.geometryInputs = inputs;
+        wire.hasGeometry = true;
+        wire.geometryRevision++;
     }
 
     /// <summary>
@@ -953,7 +1091,12 @@ public class WireConnectionController : MonoBehaviour
         }
 
         // 2. Gom nhóm các dây theo từng terminal
-        Dictionary<Transform, List<WireRecord>> terminalWires = new Dictionary<Transform, List<WireRecord>>();
+        foreach (var list in terminalWires.Values)
+        {
+            list.Clear();
+            terminalWireLists.Push(list);
+        }
+        terminalWires.Clear();
         for (int i = 0; i < activeWires.Count; i++)
         {
             var wire = activeWires[i];
@@ -961,22 +1104,22 @@ public class WireConnectionController : MonoBehaviour
 
             if (!terminalWires.TryGetValue(wire.terminalA, out var listA))
             {
-                listA = new List<WireRecord>();
+                listA = terminalWireLists.Count > 0 ? terminalWireLists.Pop() : new List<WireRecord>();
                 terminalWires[wire.terminalA] = listA;
             }
             listA.Add(wire);
 
             if (!terminalWires.TryGetValue(wire.terminalB, out var listB))
             {
-                listB = new List<WireRecord>();
+                listB = terminalWireLists.Count > 0 ? terminalWireLists.Pop() : new List<WireRecord>();
                 terminalWires[wire.terminalB] = listB;
             }
             listB.Add(wire);
         }
 
         // 3. Tính toán Junction Data cho các terminal có >= 2 dây kết nối
-        Dictionary<Transform, TerminalJunctionInfo> junctionMap = new Dictionary<Transform, TerminalJunctionInfo>();
-        HashSet<Transform> currentBranchedTerminals = new HashSet<Transform>();
+        junctionMap.Clear();
+        currentBranchedTerminals.Clear();
         float plugTopOffset = useLabPlugStyle ? LAB_PLUG_HEIGHT : 0.005f;
 
         foreach (var kvp in terminalWires)
@@ -990,7 +1133,7 @@ public class WireConnectionController : MonoBehaviour
             Vector3 termPlugPos = GetTerminalBaseAnchor(term) + Vector3.up * plugTopOffset;
 
             // Thu thập các terminal đối diện kết nối với cọc term (loại trừ trùng lặp và sắp xếp deterministic)
-            List<Transform> otherTerms = new List<Transform>();
+            otherTerms.Clear();
             for (int i = 0; i < wiresOnTerm.Count; i++)
             {
                 Transform other = (wiresOnTerm[i].terminalA == term) ? wiresOnTerm[i].terminalB : wiresOnTerm[i].terminalA;
@@ -1060,7 +1203,7 @@ public class WireConnectionController : MonoBehaviour
         }
 
         // Dọn dẹp các Junction Node không còn phân nhánh (< 2 dây)
-        List<Transform> toRemoveNodes = new List<Transform>();
+        toRemoveNodes.Clear();
         foreach (var kvp in activeJunctionNodes)
         {
             if (!currentBranchedTerminals.Contains(kvp.Key))

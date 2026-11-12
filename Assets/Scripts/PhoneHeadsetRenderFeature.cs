@@ -95,7 +95,8 @@ public sealed class PhoneHeadsetRenderFeature : ScriptableRendererFeature
                 data.ImageOffset = headset.ImageOffset;
                 builder.UseTexture(data.Background);
                 builder.UseTexture(graph.ImportTexture(stereo.Left, eyeInfo));
-                builder.UseTexture(graph.ImportTexture(stereo.Right, eyeInfo));
+                if (!stereo.SharesEyeView)
+                    builder.UseTexture(graph.ImportTexture(stereo.Right, eyeInfo));
                 builder.SetRenderAttachment(destination, 0, AccessFlags.WriteAll);
                 builder.SetRenderFunc(static (CompositeData pass, RasterGraphContext context) =>
                 {

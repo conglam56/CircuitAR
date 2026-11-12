@@ -98,6 +98,20 @@ internal static class HandInputLatencyRegressionChecks
                 "Reacquisition must snap to the current fingertip instead of travelling from the lost position.");
             results.Add("PASS: hand reacquisition restores the cursor on its first result without a stale-position tail");
 
+            NewSample(1f);
+            NewSample(1f);
+            Set(input, "lastGlobalPinchTime", float.NegativeInfinity);
+            NewSample(0.01f);
+            Set(input, "isHandVisible", false);
+            Set(input, "lastHandResultTicks", Stopwatch.GetTimestamp());
+            Set(input, "lastVisibleHandAt", Time.unscaledTime - 0.1f);
+            Update(input);
+            Require(!input.IsHandVisible && !input.JustPinched, "A short inference gap must not create a pointer action.");
+            NewSample(0.01f);
+            Require(input.isPinching && input.JustPinched,
+                "A brief missing sample must not erase the previous valid pinch confirmation sample in AR.");
+            results.Add("PASS: AR pinch confirmation survives a brief missing sample without acting on a stale pointer");
+
             if (Screen.width > Screen.height)
             {
                 var headsetCamera = Child(root, "OcclusionHeadsetCamera").AddComponent<Camera>();
@@ -134,6 +148,23 @@ internal static class HandInputLatencyRegressionChecks
                     NewSample(0.01f);
                     Require(!input.isPinching && (bool)Get(input, "headsetNeedsOpenHand"),
                         "Sustained loss must still require opening before any new headset grab.");
+                    NewSample(1f);
+                    Set(input, "isHandVisible", false);
+                    Set(input, "lastHandResultTicks", Stopwatch.GetTimestamp());
+                    Set(input, "lastVisibleHandAt", Time.unscaledTime - 0.1f);
+                    Update(input);
+                    Require(!input.IsHandVisible && !(bool)Get(input, "headsetNeedsOpenHand"),
+                        "Losing one OPEN-hand sample must not require another open gesture just before pinching.");
+                    Set(input, "lastGlobalPinchTime", float.NegativeInfinity);
+                    NewSample(0.01f);
+                    input.SetPlacementFeedback(ButtonInteractor.PlacementFeedback.SearchingSurface);
+                    Require(input.isPinching && input.JustPinched && input.GetHeadsetCursor().w == 2f,
+                        "A fresh pinch after an open-hand gap must turn the headset cursor active even while placement feedback draws a ring.");
+                    var graphic = (HandCursorGraphic)Get(input, "cursorVisualGraphic");
+                    Require(graphic.color.g > 0.9f && graphic.color.r < 0.3f,
+                        "The ordinary AR cursor must also show the recognized held-pinch color.");
+                    input.SetPlacementFeedback(ButtonInteractor.PlacementFeedback.None);
+                    results.Add("PASS: open-hand occlusion does not swallow the next pinch, and active pinch color takes priority over the searching ring");
                     NewSample(1f);
                     results.Add("PASS: headset pinch survives transient hand loss and resumes without rearming; sustained loss still blocks stale grabs");
                 }
@@ -203,6 +234,70 @@ internal static class HandInputLatencyRegressionChecks
         result.handLandmarks.RemoveAt(1);
         Require(Index(1) == -1 && Index(2) == 0, "Losing one hand must not transfer its pointer to the remaining hand.");
         results.Add("PASS: two-hand identities survive result reordering and loss without assigning both pointers to one hand");
+        CheckTemporalHandIdentity(results);
+
+    }
+
+    private static void CheckTemporalHandIdentity(List<string> results)
+    {
+        var result = Mediapipe.Tasks.Vision.HandLandmarker.HandLandmarkerResult.Alloc(2);
+        Mediapipe.Tasks.Components.Containers.NormalizedLandmarks Palm(float x)
+        {
+            var points = Mediapipe.Tasks.Components.Containers.NormalizedLandmarks.Alloc(21);
+            for (int i = 0; i < 21; i++) points.landmarks.Add(
+                Mediapipe.Tasks.Components.Containers.NormalizedLandmark.CreateFrom(new Mediapipe.NormalizedLandmark { X = x, Y = 0.5f }));
+            return points;
+        }
+        Mediapipe.Tasks.Components.Containers.Classifications Label(string name, float score) =>
+            Mediapipe.Tasks.Components.Containers.Classifications.CreateFrom(new Mediapipe.ClassificationList
+            { Classification = { new Mediapipe.Classification { Label = name, Score = score } } });
+        result.handLandmarks.Add(Palm(0.25f));
+        result.handLandmarks.Add(Palm(0.75f));
+        result.handedness.Add(Label("Left", 0.99f));
+        result.handedness.Add(Label("Right", 0.99f));
+        var trackerType = typeof(ButtonInteractor).GetNestedType("HandIdentityTracker", BindingFlags.NonPublic);
+        object tracker = Activator.CreateInstance(trackerType, true);
+        var find = trackerType.GetMethod("Find");
+        long ticks = Stopwatch.GetTimestamp();
+        int Find(int channel) => (int)find.Invoke(tracker, new object[] { result, channel, ticks });
+        Require(Find(1) == 0 && Find(2) == 1, "Two hands must initially use their confident handedness labels.");
+        ticks += Stopwatch.Frequency / 30;
+        result.handLandmarks.Reverse();
+        result.handedness.Reverse();
+        Require(Find(1) == 1 && Find(2) == 0, "Reordering detections must preserve both physical palm identities.");
+        ticks += Stopwatch.Frequency / 30;
+        result.handedness[0] = Label("Left", 0.49f);
+        result.handedness[1] = Label("Left", 0.51f);
+        Require(Find(1) == 1 && Find(2) == 0,
+            "Duplicate/low-confidence handedness labels must not suppress or exchange valid tracked palms.");
+        foreach (float separation in new[] { 0.2f, 0.08f, 0.02f })
+        {
+            ticks += Stopwatch.Frequency / 30;
+            result.handLandmarks[0] = Palm(0.5f + separation * 0.5f);
+            result.handLandmarks[1] = Palm(0.5f - separation * 0.5f);
+            Require(Find(1) == 1 && Find(2) == 0,
+                "Bringing the palms close while handedness is ambiguous must preserve two distinct input owners.");
+        }
+        ticks += Stopwatch.Frequency / 30;
+        result.handLandmarks.RemoveAt(1);
+        result.handedness.RemoveAt(1);
+        result.handedness[0] = Label("Left", 0.99f);
+        Require(Find(1) == -1 && Find(2) == 0,
+            "One occluded hand must not steal the remaining palm when its handedness briefly flips.");
+        ticks += Stopwatch.Frequency / 30;
+        result.handLandmarks.Add(Palm(0.49f));
+        result.handedness.Add(Label("Right", 0.99f));
+        Require(Find(1) == 1 && Find(2) == 0, "Both hands must reacquire their own palms despite swapped labels.");
+        results.Add("PASS: joint palm tracking preserves two independent hands through reordering, duplicate labels, low handedness confidence and single-hand occlusion");
+        trackerType.GetMethod("Reset").Invoke(tracker, null);
+        ticks += Stopwatch.Frequency / 30;
+        Require(Find(0) == 0, "Single-pointer AR should initially use the first valid hand.");
+        ticks += Stopwatch.Frequency / 30;
+        result.handLandmarks.Reverse();
+        result.handedness.Reverse();
+        Require(Find(0) == 1,
+            "Single-pointer AR must retain the same palm when two-hand inference changes its result order.");
+        results.Add("PASS: the ordinary AR cursor stays with its current hand instead of jumping between reordered detections");
     }
 
     private static void CheckSourceFreshness(ButtonInteractor input,

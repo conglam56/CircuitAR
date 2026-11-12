@@ -100,11 +100,194 @@ internal static class ARContactRegressionChecks
                 finally { UnityEngine.Object.DestroyImmediate(model); }
             }
             results.Add("PASS: shipped lamp, battery, voltmeter, ammeter and switch geometry contact their support at four yaw angles");
+            CheckWireGeometry(root, results);
+            CheckWirePinch(root, results);
         }
         finally
         {
             EditorSceneManager.ClosePreviewScene(scene);
             if (syntheticMesh != null) UnityEngine.Object.DestroyImmediate(syntheticMesh);
+        }
+    }
+
+    private static void CheckWirePinch(GameObject root, List<string> results)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var fixture = Child(root, "WirePinchFixture");
+        fixture.transform.position = Vector3.up * 500f;
+        var camera = Child(fixture, "Camera").AddComponent<Camera>();
+        camera.enabled = false;
+        camera.pixelRect = new Rect(0f, 0f, 1000f, 600f);
+        camera.aspect = 1000f / 600f;
+        camera.nearClipPlane = 0.02f;
+        var headset = camera.gameObject.AddComponent<PhoneHeadsetAR>();
+        var placement = Child(fixture, "Placement").AddComponent<TapToPlaceController>();
+        placement.enabled = false;
+        var input = Child(fixture, "Input").AddComponent<ButtonInteractor>();
+        input.enabled = false;
+        var second = Child(fixture, "OtherInput").AddComponent<ButtonInteractor>();
+        second.enabled = false;
+        var wires = Child(fixture, "Wires").AddComponent<WireConnectionController>();
+        wires.enabled = false;
+        wires.buttonInteractor = input;
+        wires.tapToPlaceController = placement;
+        wires.isWireMode = true;
+        typeof(WireConnectionController).GetField("mainCamera", flags).SetValue(wires, camera);
+        var body = Child(fixture, "Component");
+        body.transform.localPosition = new Vector3(0f, 0f, 1f);
+        var terminal = Child(body, "Terminal").AddComponent<Terminal>();
+        terminal.gameObject.AddComponent<BoxCollider>().size = Vector3.one * 0.008f;
+        placement.placedObjectsHistory.Add(body);
+        var near = typeof(WireConnectionController).GetMethod("FindTerminalNear", flags);
+        var process = typeof(WireConnectionController).GetMethod("ProcessWirePinch", flags);
+        var cancel = typeof(WireConnectionController).GetMethod("CancelSelection", flags | BindingFlags.Public);
+        object request = typeof(WireConnectionController).GetField("primaryWirePinch", flags).GetValue(wires);
+        object otherRequest = typeof(WireConnectionController).GetField("secondaryWirePinch", flags).GetValue(wires);
+        Vector2 center = camera.WorldToScreenPoint(terminal.transform.position);
+        void SetInput(ButtonInteractor hand, Vector2 point, bool started, bool visible = true, bool ui = false)
+        {
+            typeof(ButtonInteractor).GetField("<CurrentScreenPos>k__BackingField", flags).SetValue(hand, point);
+            typeof(ButtonInteractor).GetField("<JustPinched>k__BackingField", flags).SetValue(hand, started);
+            typeof(ButtonInteractor).GetField("<IsHandVisible>k__BackingField", flags).SetValue(hand, visible);
+            hand.PinchConsumedByUI = ui;
+            hand.isPinching = true;
+        }
+        void Step(ButtonInteractor hand, object state) => process.Invoke(wires, new[] { hand, state });
+        void ResetSelection()
+        {
+            cancel.Invoke(wires, null);
+            typeof(WireConnectionController).GetField("lastGestureFrame", flags).SetValue(wires, -1);
+        }
+        try
+        {
+            foreach (bool vr in new[] { false, true })
+            {
+                input.SetHeadsetCamera(vr ? camera : null);
+                Require((Transform)near.Invoke(wires, new object[] { center + Vector2.right * 14f }) == terminal.transform,
+                    "A small allowance around a tiny terminal must work in AR and camera-aligned VR.");
+                Require(near.Invoke(wires, new object[] { center + Vector2.right * 80f }) == null,
+                    "Terminal padding must remain bounded rather than accepting a pinch far from the visible pole.");
+            }
+            results.Add("PASS: AR and VR terminal targets accept a small screen-space margin while rejecting distant pinches");
+            SetInput(input, center + Vector2.up * 100f, true);
+            Step(input, request);
+            Require(!wires.HasSelectedTerminal, "A missed fresh pinch must not choose a distant terminal.");
+            SetInput(input, center, false);
+            Step(input, request);
+            Require(wires.HasSelectedTerminal, "A fresh held pinch must be allowed to settle onto the tiny terminal briefly after its first missed sample.");
+            Step(input, request);
+            Require(wires.HasSelectedTerminal, "The same held pinch must not immediately toggle its selected terminal off.");
+            SetInput(second, center, true);
+            Step(second, otherRequest);
+            Require(wires.HasSelectedTerminal, "Two hands pinching the same terminal on the same frame must not select then immediately deselect it.");
+            results.Add("PASS: wire pinch tolerates a brief aiming miss, commits once per gesture and ignores duplicate same-frame selections from the other hand");
+            ResetSelection();
+            SetInput(input, center, true, ui: true);
+            Step(input, request);
+            SetInput(input, center, false);
+            Step(input, request);
+            Require(!wires.HasSelectedTerminal, "A UI-origin pinch must never become a terminal selection when the pointer leaves the UI.");
+            SetInput(input, center + Vector2.up * 100f, true);
+            Step(input, request);
+            request.GetType().GetField("expiresAt").SetValue(request, Time.unscaledTime - 0.01f);
+            SetInput(input, center, false);
+            Step(input, request);
+            Require(!wires.HasSelectedTerminal, "A held gesture must not auto-select after its short intent window expires.");
+            SetInput(input, center + Vector2.up * 100f, true);
+            Step(input, request);
+            SetInput(input, center, false, visible: false);
+            Step(input, request);
+            Require(!wires.HasSelectedTerminal, "A lost hand must not select a terminal from its retained cursor appearance.");
+            SetInput(input, center, false);
+            Step(input, request);
+            Require(wires.HasSelectedTerminal, "A newly valid live pointer may complete an unexpired wire pinch after a brief occlusion.");
+            results.Add("PASS: wire intent rejects UI ownership, expired gestures and invisible pointers, then resumes only with fresh visible input");
+            ResetSelection();
+        }
+        finally
+        {
+            placement.placedObjectsHistory.Clear();
+            UnityEngine.Object.DestroyImmediate(fixture);
+        }
+    }
+
+    private static void CheckWireGeometry(GameObject root, List<string> results)
+    {
+        var fixture = Child(root, "WirePerformanceFixture");
+        fixture.SetActive(false);
+        var wires = fixture.AddComponent<WireConnectionController>();
+        var a = Child(fixture, "TerminalA").transform;
+        var b = Child(fixture, "TerminalB").transform;
+        a.localPosition = Vector3.left * 0.15f;
+        b.localPosition = Vector3.right * 0.15f;
+        var obj = Child(fixture, "Wire");
+        var filter = obj.AddComponent<MeshFilter>();
+        var renderer = obj.AddComponent<MeshRenderer>();
+        var mesh = new Mesh();
+        filter.sharedMesh = mesh;
+        var pivotA = Child(obj, "PlugA");
+        var pivotB = Child(obj, "PlugB");
+        var record = new WireConnectionController.WireRecord(a, b, obj, filter, renderer, mesh, pivotA, pivotB, null, null, Color.red);
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var update = typeof(WireConnectionController).GetMethod("UpdateWireGeometry", flags);
+        var revision = typeof(WireConnectionController.WireRecord).GetField("geometryRevision", flags);
+        var buffer = typeof(WireConnectionController.WireRecord).GetField("vertices", flags);
+        void Draw(bool branch = false) => update.Invoke(wires, new object[]
+            { record, branch, branch, a.position + new Vector3(0.04f, 0.02f, 0f), false, false, Vector3.zero });
+        try
+        {
+            Draw();
+            Require(mesh.vertexCount > 0, "The first wire draw must create visible geometry.");
+            int first = (int)revision.GetValue(record);
+            var vertices = buffer.GetValue(record);
+            for (int i = 0; i < 60; i++) Draw();
+            Require((int)revision.GetValue(record) == first,
+                "Stationary wires must not regenerate and upload their tube mesh on idle frames.");
+            results.Add("PASS: stationary wires retain their mesh across 60 idle updates without redundant geometry uploads");
+            var before = mesh.bounds;
+            b.position += new Vector3(0.05f, 0.03f, 0f);
+            Draw();
+            Require((int)revision.GetValue(record) == first + 1 && ReferenceEquals(vertices, buffer.GetValue(record)) &&
+                !mesh.bounds.Equals(before) && Vector3.Distance(pivotB.transform.position, wires.GetTerminalBaseAnchor(b)) < 0.00001f,
+                "Dragging an endpoint must update the wire and plug immediately while reusing existing geometry buffers.");
+            Draw(true);
+            Require((int)revision.GetValue(record) == first + 2,
+                "Adding a junction must invalidate the cached shape even when the terminals did not move.");
+            wires.radialSegments += 2;
+            Draw(true);
+            Require(mesh.vertexCount == (Mathf.Max(16, wires.curveSegments) + 1) * (wires.radialSegments + 1),
+                "Changing wire topology must allocate the correct buffer sizes and rebuild a valid mesh.");
+            obj.transform.localScale = Vector3.one * 2f;
+            int prior = (int)revision.GetValue(record);
+            Draw(true);
+            Require((int)revision.GetValue(record) == prior + 1,
+                "Changing the wire container transform must refresh world-to-local geometry.");
+            results.Add("PASS: wires update immediately after endpoint, junction, segment and container changes; drag updates reuse buffers");
+            wires.enabled = false;
+            fixture.SetActive(true);
+            wires.activeWires.Add(record);
+            wires.UpdateActiveWirePositionsExternal();
+            int idleRevision = (int)revision.GetValue(record);
+            long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 120; i++) wires.UpdateActiveWirePositionsExternal();
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            Require((int)revision.GetValue(record) == idleRevision && allocated <= 1024,
+                "Warm idle wire updates must reuse grouping collections and geometry buffers; allocated bytes=" + allocated);
+            a.gameObject.SetActive(false);
+            wires.UpdateActiveWirePositionsExternal();
+            Require(!obj.activeSelf && wires.activeWires.Count == 1,
+                "An invisible endpoint must hide the wire without destroying its cached connection.");
+            a.gameObject.SetActive(true);
+            wires.UpdateActiveWirePositionsExternal();
+            Require(obj.activeSelf && mesh.vertexCount > 0,
+                "Restoring endpoint visibility must recover the wire after pooled grouping lists were cleared.");
+            results.Add("PASS: 120 warm idle wire updates stay within 1 KB of managed allocations and preserve hide/restore behavior");
+        }
+        finally
+        {
+            wires.activeWires.Clear();
+            UnityEngine.Object.DestroyImmediate(mesh);
+            UnityEngine.Object.DestroyImmediate(fixture);
         }
     }
 

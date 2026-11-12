@@ -11,7 +11,12 @@ using UnityEngine.XR.ARCore;
 internal static class ARInstantPlacementBuild
 {
     [MenuItem("CircuitAR/Validate and Build Instant Placement APK")]
-    public static void Run()
+    public static void Run() => ValidateAndBuild(true);
+
+    [MenuItem("CircuitAR/Validate and Build Release APK")]
+    public static void RunRelease() => ValidateAndBuild(false);
+
+    private static void ValidateAndBuild(bool development)
     {
         if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android)
             throw new InvalidOperationException("Select Android as the active build target first.");
@@ -26,9 +31,9 @@ internal static class ARInstantPlacementBuild
         BuildReport report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
         {
             scenes = EditorBuildSettings.scenes.Where(scene => scene.enabled).Select(scene => scene.path).ToArray(),
-            locationPathName = "Builds/CircuitAR-instant-placement.apk",
+            locationPathName = development ? "Builds/CircuitAR-instant-placement.apk" : "Builds/CircuitAR-release.apk",
             target = BuildTarget.Android,
-            options = BuildOptions.Development
+            options = development ? BuildOptions.Development : BuildOptions.None
         });
         string summary = report.summary.result + ": " + report.summary.totalErrors + " errors; " +
             report.summary.outputPath;

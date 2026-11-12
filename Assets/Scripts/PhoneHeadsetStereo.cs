@@ -20,9 +20,10 @@ public sealed class PhoneHeadsetStereo : IDisposable
     private Vector2Int targetSize;
 
     public RTHandle Left => targets[0];
-    public RTHandle Right => targets[1];
+    public RTHandle Right => targets[SharesEyeView ? 0 : 1];
     public RenderTexture LeftTexture => textures[0];
-    public RenderTexture RightTexture => textures[1];
+    public RenderTexture RightTexture => textures[SharesEyeView ? 0 : 1];
+    public bool SharesEyeView { get; private set; }
     public bool IsReady { get; private set; }
     internal int SceneCullingMask => sourceCullingMask;
 
@@ -62,6 +63,12 @@ public sealed class PhoneHeadsetStereo : IDisposable
     public void Prepare()
     {
         bool landscape = source.pixelWidth > source.pixelHeight;
+        // Phone passthrough registers virtual content to the same physical camera
+        // in both eyes. Render that identical view once, then composite it twice.
+        bool share = source.TryGetComponent(out PhoneHeadsetAR headset) && headset.CameraAlignedProjection;
+        bool modeChanged = share != SharesEyeView;
+        SharesEyeView = share;
+        if (modeChanged) targetSize = Vector2Int.zero;
         if (landscape)
         {
             int halfWidth = source.pixelWidth / 2;
@@ -69,11 +76,12 @@ public sealed class PhoneHeadsetStereo : IDisposable
             float scale = Mathf.Min(1f, MaxEyeDimension / (float)Mathf.Max(halfWidth, height));
             var size = new Vector2Int(Mathf.Max(1, Mathf.RoundToInt(halfWidth * scale)),
                                       Mathf.Max(1, Mathf.RoundToInt(height * scale)));
-            if (targetSize != size)
+            if (targetSize != size || modeChanged)
             {
                 for (int i = 0; i < eyes.Length; i++)
                 {
                     ReleaseTarget(i);
+                    if (SharesEyeView && i == 1) continue;
                     var texture = new RenderTexture(size.x, size.y, 24, RenderTextureFormat.ARGB32)
                     {
                         name = eyes[i].name,
@@ -89,16 +97,16 @@ public sealed class PhoneHeadsetStereo : IDisposable
                 targetSize = size;
             }
         }
-        if (landscape == IsReady) return;
         IsReady = landscape;
         source.cullingMask = landscape ? 0 : sourceCullingMask;
-        foreach (var eye in eyes) eye.enabled = landscape;
+        for (int i = 0; i < eyes.Length; i++)
+            eyes[i].enabled = landscape && (!SharesEyeView || i == 0);
     }
 
     private void UpdatePoses(ScriptableRenderContext context, List<Camera> cameras)
     {
         if (!IsReady || !cameras.Contains(source)) return;
-        for (int i = 0; i < eyes.Length; i++)
+        for (int i = 0; i < (SharesEyeView ? 1 : eyes.Length); i++)
         {
             float offset = GetEyeOffset(source, i == 1);
             eyes[i].transform.localPosition = Vector3.right * offset;

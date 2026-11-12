@@ -288,7 +288,15 @@ internal static class ARDragUsabilityRegressionChecks
         try
         {
             Set(headset, "stereo", stereo);
+            var eyeCameras = (Camera[])Get(stereo, "eyes");
+            Require(stereo.SharesEyeView && ReferenceEquals(stereo.LeftTexture, stereo.RightTexture) &&
+                ReferenceEquals(stereo.Left, stereo.Right) && eyeCameras[0].enabled && !eyeCameras[1].enabled,
+                "Camera-aligned phone passthrough must draw identical virtual content only once and share the result across both lenses.");
+            results.Add("PASS: phone passthrough shares one rendered virtual view and one target between both eye composites");
             Set(headset, "cameraAlignedProjection", false); // Retain coverage of the optional geometric stereo helpers.
+            stereo.Prepare();
+            Require(!stereo.SharesEyeView && stereo.LeftTexture != stereo.RightTexture && eyeCameras[0].enabled && eyeCameras[1].enabled,
+                "Geometric stereo must retain two distinct render targets and eye cameras rather than sharing incompatible views.");
             Set(headset, "eyeSeparation", 0.064f);
             Set(headset, "convergenceDistance", 1.2f);
             Vector3 convergencePoint = camera.transform.TransformPoint(new Vector3(0.08f, 0.03f, 1.2f));
@@ -333,6 +341,10 @@ internal static class ARDragUsabilityRegressionChecks
                 CheckEmptyPinchDeselect(controller, near, edgePointer);
             }
             Set(headset, "cameraAlignedProjection", true);
+            stereo.Prepare();
+            Require(stereo.SharesEyeView && ReferenceEquals(stereo.LeftTexture, stereo.RightTexture) && !eyeCameras[1].enabled,
+                "Returning to camera-aligned passthrough must release the second target and stop drawing the duplicate camera.");
+            results.Add("PASS: switching projection modes preserves distinct geometric eyes and restores the single-draw passthrough path");
             foreach (float depth in new[] { 0.3f, 0.85f, 1.5f })
             {
                 Vector3 contact = camera.transform.TransformPoint(new Vector3(0.02f, 0.01f, depth));
