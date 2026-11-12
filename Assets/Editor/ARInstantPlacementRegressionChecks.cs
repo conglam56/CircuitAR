@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEditor.SceneManagement;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
@@ -60,6 +61,8 @@ internal static class ARInstantPlacementRegressionChecks
                 controller.arPlaneManager == null && controller.arAnchorManager == null,
                 "The immediate-placement fixture must have neither hand data nor native surface/anchor managers.");
 
+            CheckComponentSizes(controller, scene, results);
+
             Vector3 contact = root.transform.position + Vector3.forward;
             Vector2 screenPoint = camera.WorldToScreenPoint(contact);
             var taps = new ARPlacementTapInput();
@@ -80,6 +83,7 @@ internal static class ARInstantPlacementRegressionChecks
                 (Vector2)Get(controller, "placementRequestScreenPosition") == screenPoint,
                 "A confirmed screen tap must create a placement request without dereferencing hand input.");
             Set(controller, "placementTapThisFrame", false);
+            Vector3 previewScale = ((GameObject)Get(controller, "previewVisual")).transform.localScale;
             Pose requested = new Pose(contact, Quaternion.Euler(0f, 20f, 0f));
             Set(controller, "placementRequestHasEstimate", true);
             Set(controller, "placementRequestEstimate", requested);
@@ -96,7 +100,22 @@ internal static class ARInstantPlacementRegressionChecks
                 !(bool)Get(controller, "placementPending"),
                 "An immediate commit must finish preview and record one history action in the same call.");
             GameObject placed = controller.placedObjectsHistory[0];
+            Require(placed.transform.GetChild(0).localScale == previewScale,
+                "Committing must retain the normalized preview body scale instead of reverting to the imported prefab scale.");
+            results.Add("PASS: normalized component scale survives immediate placement");
             var helper = placed.GetComponent<ARInstantPlacementAnchor>();
+            for (int i = 0; i < 6; i++)
+            {
+                Call(helper, "SchedulePromotionRetry");
+                float delay = (float)Get(helper, "promotionNotBefore") - Time.realtimeSinceStartup;
+                Require(delay > 0f && delay <= 4.01f,
+                    "Native anchor failure must schedule a bounded background retry instead of permanently abandoning tracking.");
+            }
+            Set(helper, "promotionNotBefore", 0f);
+            Call(helper, "Update");
+            Require(!(bool)Get(helper, "promotionExhausted"),
+                "The exhausted attempt must become eligible again after its backoff.");
+            results.Add("PASS: unavailable native anchors use bounded background retries and recover after their backoff");
             Require(helper != null && (bool)Get(helper, "configured") && helper.IsEstimated &&
                 helper.SupportRoot == placed.transform.parent && !placed.transform.IsChildOf(camera.transform),
                 "The placed component must own a configured estimated-support helper outside the camera hierarchy.");
@@ -146,10 +165,15 @@ internal static class ARInstantPlacementRegressionChecks
             Set(controller, "draggedObject", placed);
             Set(controller, "dragStartPos", stablePosition);
             Vector2 dragPoint = camera.WorldToScreenPoint(stablePosition + new Vector3(0.15f, 0f, 0.05f));
+            Set(controller, "dragFreePlane", new Plane(camera.transform.forward, stablePosition));
             Require(DragSurface(controller, dragPoint, out Pose dragPose) &&
-                Mathf.Abs(dragPose.position.y - stablePosition.y) < 0.0001f &&
+                Mathf.Abs(Vector3.Dot(dragPose.position - stablePosition, camera.transform.forward)) < 0.0001f &&
                 (bool)Get(controller, "dragSurfaceIsEstimated"),
-                "An estimated object must remain draggable at its authored height before any real surface is detected.");
+                "An estimated object must remain draggable without a measured plane.");
+            Vector2 lowerPointer = (Vector2)camera.WorldToScreenPoint(stablePosition) + Vector2.down * 100f;
+            Require(DragSurface(controller, lowerPointer, out Pose lowerPose) && lowerPose.position.y < stablePosition.y - 0.01f,
+                "Lowering the hand must lower an estimated object, even before a real surface is detected.");
+            results.Add("PASS: lowering an estimated component changes its height instead of locking it in mid-air");
             controller.enableInstantPlacement = false;
             Require(!DragSurface(controller, dragPoint, out _),
                 "Disabling instant placement must preserve the measured-only drag restriction.");
@@ -167,7 +191,7 @@ internal static class ARInstantPlacementRegressionChecks
                 "Grabbing must invalidate old refinement requests without deleting support or changing the placed pose.");
             Set(controller, "isDragging", false);
             Set(controller, "draggedObject", null);
-            results.Add("PASS: only estimated objects use authored-height drag fallback, and grabbing permanently cancels native ray refinement");
+            results.Add("PASS: only estimated objects use free hand-plane drag fallback, and grabbing permanently cancels native ray refinement");
 
             CheckAuthoringCancellation(root, camera, results);
 
@@ -235,6 +259,45 @@ internal static class ARInstantPlacementRegressionChecks
             RaycasterManager.GetRaycasters().Clear();
             foreach (BaseRaycaster raycaster in previousRaycasters)
                 if (raycaster != null) RaycasterManager.GetRaycasters().Add(raycaster);
+        }
+    }
+
+    private static void CheckComponentSizes(TapToPlaceController controller, Scene scene, List<string> results)
+    {
+        var previousPrefabs = controller.componentPrefabs;
+        var previousNames = controller.componentNames;
+        var terminal = typeof(TapToPlaceController).GetMethod("IsTerminalVisual", BindingFlags.Static | BindingFlags.NonPublic);
+        try
+        {
+            foreach (string name in new[] { "Battery", "lamp", "key", "ammetr", "voltmetr" })
+            {
+                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/Prefabs/Components/" + name + ".prefab");
+                Require(prefab != null, "The shipped component prefab must exist: " + name);
+                controller.componentPrefabs = new[] { prefab };
+                controller.componentNames = new[] { name };
+                controller.StartPreview(name);
+                MovePreview(controller, scene);
+                var visual = (GameObject)Get(controller, "previewVisual");
+                Bounds bounds = default;
+                bool found = false;
+                foreach (var renderer in visual.GetComponentsInChildren<Renderer>())
+                {
+                    if (!renderer.enabled || renderer is LineRenderer || (bool)terminal.Invoke(null, new object[] { renderer.transform, visual.transform })) continue;
+                    if (found) bounds.Encapsulate(renderer.bounds);
+                    else { bounds = renderer.bounds; found = true; }
+                }
+                float longest = Mathf.Max(bounds.size.x, bounds.size.y, bounds.size.z);
+                Require(found && Mathf.Abs(longest - controller.componentBodySize) < 0.0005f,
+                    "All inventory bodies must share a comparable physical size: " + name + " size=" + longest);
+                controller.ClearPreview();
+            }
+            results.Add("PASS: all five shipped component bodies normalize to the same physical size despite different imported units");
+        }
+        finally
+        {
+            controller.ClearPreview();
+            controller.componentPrefabs = previousPrefabs;
+            controller.componentNames = previousNames;
         }
     }
 

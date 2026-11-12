@@ -33,8 +33,11 @@ public sealed class PhoneHeadsetRenderFeature : ScriptableRendererFeature
         private static readonly int BackgroundId = Shader.PropertyToID("_BlitTexture");
         private static readonly int LeftId = Shader.PropertyToID("_LeftEye");
         private static readonly int RightId = Shader.PropertyToID("_RightEye");
+        private static readonly int SecondCursorId = Shader.PropertyToID("_HeadsetSecondCursor");
         private static readonly int CursorId = Shader.PropertyToID("_HeadsetCursor");
         private static readonly int AspectId = Shader.PropertyToID("_HeadsetAspect");
+        private static readonly int ViewScaleId = Shader.PropertyToID("_HeadsetViewScale");
+        private static readonly int ImageOffsetId = Shader.PropertyToID("_HeadsetImageOffset");
         private static readonly int ScaleBiasId = Shader.PropertyToID("_BlitScaleBias");
 
         private sealed class CompositeData
@@ -43,8 +46,10 @@ public sealed class PhoneHeadsetRenderFeature : ScriptableRendererFeature
             public MaterialPropertyBlock Properties;
             public TextureHandle Background;
             public Texture Left, Right;
-            public Vector4 Cursor;
+            public Vector4 Cursor, SecondCursor;
             public float Aspect;
+            public float ViewScale;
+            public float ImageOffset;
         }
 
         public HeadsetPass(Material material)
@@ -84,7 +89,10 @@ public sealed class PhoneHeadsetRenderFeature : ScriptableRendererFeature
                 data.Left = stereo.LeftTexture;
                 data.Right = stereo.RightTexture;
                 data.Cursor = headset.Cursor;
+                data.SecondCursor = headset.SecondCursor;
                 data.Aspect = (float)descriptor.width / descriptor.height;
+                data.ViewScale = headset.ViewScale;
+                data.ImageOffset = headset.ImageOffset;
                 builder.UseTexture(data.Background);
                 builder.UseTexture(graph.ImportTexture(stereo.Left, eyeInfo));
                 builder.UseTexture(graph.ImportTexture(stereo.Right, eyeInfo));
@@ -96,7 +104,10 @@ public sealed class PhoneHeadsetRenderFeature : ScriptableRendererFeature
                     block.SetTexture(LeftId, pass.Left);
                     block.SetTexture(RightId, pass.Right);
                     block.SetVector(CursorId, pass.Cursor);
+                    block.SetVector(SecondCursorId, pass.SecondCursor);
                     block.SetFloat(AspectId, pass.Aspect);
+                    block.SetFloat(ViewScaleId, pass.ViewScale);
+                    block.SetFloat(ImageOffsetId, pass.ImageOffset);
                     block.SetVector(ScaleBiasId, new Vector4(1f, 1f, 0f, 0f));
                     context.cmd.DrawProcedural(Matrix4x4.identity, pass.Material, 0, MeshTopology.Triangles, 3, 1, block);
                 });

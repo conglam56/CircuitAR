@@ -28,6 +28,8 @@ public class TapToPlaceController : MonoBehaviour
     [Header("Cấu hình Preview & Di chuyển")]
     [Range(0.1f, 1f)] public float previewAlpha = 0.6f;
     public float scaleMultiplier = 0.035f;
+    [Tooltip("Chuẩn hóa cạnh dài nhất của thân linh kiện theo mét, tránh khác đơn vị import.")]
+    public float componentBodySize = 0.12f;
     [Tooltip("Độ lệch đáy hình học khỏi mặt thật (mét). Để 0 để đáy chạm đúng mặt đo được.")]
     [Range(-0.03f, 0.02f)] public float surfaceContactOffset = 0f;
     [Tooltip("Thời gian chờ trước khi báo vị trí kéo không hợp lệ khi AR raycast hụt tạm thời.")]
@@ -61,9 +63,10 @@ public class TapToPlaceController : MonoBehaviour
 
     // --- DI CHUYỂN VẬT THỂ (DRAG & DROP) ---
     private GameObject draggedObject = null;
-    public GameObject DraggedObject => draggedObject;
+    public GameObject DraggedObject => isDragging ? draggedObject : secondDrag.draggedObject;
     private bool isDragging = false;
-    public bool IsDragging => isDragging;
+    public bool IsDragging => isDragging || secondDrag.isDragging ||
+        (processingSecondHand && primaryDrag.isDragging);
     private ARFloatingBubbleMenu floatingMenu = null;
     private float unpinchGraceTimer = 0f;
     private Vector3 lastValidDragPos = Vector3.zero;
@@ -75,7 +78,8 @@ public class TapToPlaceController : MonoBehaviour
     private Vector2 dragPointerOffset;
     private float dragHandLostAt = float.NegativeInfinity;
     private bool dragNeedsOpenHandAfterPlacement;
-    private readonly ARSupportPolicy.LevelTransition dragLevelTransition = new ARSupportPolicy.LevelTransition();
+    private Plane dragFreePlane;
+    private ARSupportPolicy.LevelTransition dragLevelTransition = new ARSupportPolicy.LevelTransition();
     private Quaternion dragStartRot = Quaternion.identity;
     private Vector3 currentSmoothedDragPos = Vector3.zero;
     private bool isDragBlocked = false;
@@ -121,7 +125,7 @@ public class TapToPlaceController : MonoBehaviour
     private TrackableId surfaceTransitionTrackableId = TrackableId.invalidId;
     private float nextPlacementDiagnosticAt;
     private ButtonInteractor.PlacementFeedback lastPlacementFeedback;
-    private readonly MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
+    private MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
     private readonly MeasuredDepthSurfaceProvider contactDepth = new MeasuredDepthSurfaceProvider { RequireVisibleHand = false };
     private sealed class PlacedContact
     {
@@ -260,12 +264,11 @@ public class TapToPlaceController : MonoBehaviour
     private void EnsureOriginalMaterialsSaved(GameObject obj)
     {
         if (obj == null) return;
-        if (originalSelectedMaterials.Count > 0) return;
 
         Renderer[] rens = obj.GetComponentsInChildren<Renderer>(true);
         foreach (var r in rens)
         {
-            if (r is LineRenderer) continue;
+            if (r is LineRenderer || originalSelectedMaterials.ContainsKey(r)) continue;
             originalSelectedMaterials[r] = r.sharedMaterials;
         }
     }
@@ -348,14 +351,25 @@ public class TapToPlaceController : MonoBehaviour
 
     private void ClearSelectionHighlight()
     {
-        foreach (var kvp in originalSelectedMaterials)
+        var restored = new List<Renderer>();
+        foreach (var pair in originalSelectedMaterials)
         {
-            if (kvp.Key != null && kvp.Value != null)
-            {
-                kvp.Key.sharedMaterials = kvp.Value;
-            }
+            if (pair.Key != null && IsObjectBeingDragged(FindPlacedRoot(pair.Key.transform))) continue;
+            if (pair.Key != null && pair.Value != null) pair.Key.sharedMaterials = pair.Value;
+            restored.Add(pair.Key);
         }
-        originalSelectedMaterials.Clear();
+        foreach (var renderer in restored) originalSelectedMaterials.Remove(renderer);
+    }
+
+    private void RestoreReleasedHighlight(GameObject obj)
+    {
+        if (obj == null || obj == SelectedComponent) return;
+        foreach (var renderer in obj.GetComponentsInChildren<Renderer>(true))
+            if (originalSelectedMaterials.TryGetValue(renderer, out var materials))
+            {
+                renderer.sharedMaterials = materials;
+                originalSelectedMaterials.Remove(renderer);
+            }
     }
 
     /// <summary>
@@ -381,12 +395,14 @@ public class TapToPlaceController : MonoBehaviour
     // Called after Reset destroys all active and undone content/support roots.
     public void ClearPlacedObjectState()
     {
+        ClearPreview();
         foreach (GameObject placed in placedObjectsHistory)
         {
             if (placed == null) continue;
             var pendingSupport = placed.GetComponent<ARInstantPlacementAnchor>();
             if (pendingSupport != null) pendingSupport.enabled = false;
         }
+        secondDrag = new HandDragState();
         placedObjectsHistory.Clear();
         instantPlacedObjects.Clear();
         objectAnchors.Clear();
@@ -414,6 +430,8 @@ public class TapToPlaceController : MonoBehaviour
 
     void OnDisable()
     {
+        if (isDragging) ReleaseDraggedObject();
+        ProcessSecondHand(HandOperation.Release);
         renderPolicy.Restore();
         placementTapInput.Reset();
         CancelContactCorrections();
@@ -478,6 +496,273 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    // Reuse the AR placement and drag logic with independent preview, gesture and support state per hand.
+    private sealed class HandDragState
+    {
+        public bool previewSurfaceIsDepth;
+        public GameObject previewAnchor;
+        public GameObject previewVisual;
+        public GameObject currentPrefabToPlace;
+        public bool canPlace = false;
+        public float cooldownTimer = 0f;
+        public TrackableId lastPreviewTrackableId = TrackableId.invalidId;
+        public Vector2 smoothedPlacementScreenPosition;
+        public bool hasSmoothedPlacementScreenPosition = false;
+        public bool hasPreviewSurfacePose = false;
+        public float previewBoundsRadius;
+        public Vector3 previewBoundsLocalCenter;
+        public bool hasUngroundedPreviewFrame;
+        public Matrix4x4 ungroundedPreviewProjection;
+        public ARSessionState ungroundedPreviewSessionState;
+        public bool placementPending;
+        public int placementGeneration;
+        public float placementRequestExpiresAt = float.NegativeInfinity;
+        public Vector2 placementRequestScreenPosition;
+        public bool placementRequestAwaitingSurface;
+        public bool placementRequestHasSurface;
+        public bool placementRequestIsDepth;
+        public bool placementRequestFromTap;
+        public bool placementRequestHasEstimate;
+        public Pose placementRequestEstimate;
+        public bool placementTapThisFrame;
+        public Pose placementRequestDepthPose;
+        public TrackableId placementRequestPlaneId = TrackableId.invalidId;
+        public Vector3 placementRequestLocalPoint;
+        public bool placementRetryEligible;
+        public float nextPlacementAttemptAt;
+        public bool surfaceTransitionActive;
+        public float surfaceTransitionStartedAt;
+        public Pose surfaceTransitionStartPose;
+        public TrackableId surfaceTransitionTrackableId = TrackableId.invalidId;
+        public bool loggedMeasuredPreviewGeometry;
+        public string selectedDisplayName;
+        public bool? previewIsInvalid;
+        public ButtonInteractor previewInput;
+        public bool previewNeedsRelease;
+        public bool requireMeasuredForPreview;
+        public GameObject draggedObject = null;
+        public bool isDragging = false;
+        public float unpinchGraceTimer = 0f;
+        public Vector3 lastValidDragPos = Vector3.zero;
+        public Vector2 dragGrabScreenPosition = Vector2.zero;
+        public int dragEye = -1;
+        public bool dragPointerMoved = false;
+        public Quaternion lastValidDragRot = Quaternion.identity;
+        public Vector3 dragStartPos = Vector3.zero;
+        public Vector2 dragPointerOffset = Vector2.zero;
+        public float dragHandLostAt = float.NegativeInfinity;
+        public bool dragNeedsOpenHandAfterPlacement = false;
+        public Plane dragFreePlane;
+        public ARSupportPolicy.LevelTransition dragLevelTransition = new ARSupportPolicy.LevelTransition();
+        public Quaternion dragStartRot = Quaternion.identity;
+        public Vector3 currentSmoothedDragPos = Vector3.zero;
+        public bool isDragBlocked = false;
+        public bool dragHasMeasuredSupport = false;
+        public bool dragSurfaceIsEstimated = false;
+        public TrackableId dragSurfaceTrackableId = TrackableId.invalidId;
+        public MeasuredDepthSurfaceProvider measuredDepth = new MeasuredDepthSurfaceProvider();
+        public bool hasDepthSupportEvidence = false;
+        public Pose lastDepthSupportEvidence = default;
+        public Vector2 lastDepthEvidencePointer = Vector2.zero;
+        public void Capture(TapToPlaceController owner)
+        {
+            previewAnchor = owner.previewAnchor;
+            previewVisual = owner.previewVisual;
+            currentPrefabToPlace = owner.currentPrefabToPlace;
+            canPlace = owner.canPlace;
+            cooldownTimer = owner.cooldownTimer;
+            lastPreviewTrackableId = owner.lastPreviewTrackableId;
+            smoothedPlacementScreenPosition = owner.smoothedPlacementScreenPosition;
+            hasSmoothedPlacementScreenPosition = owner.hasSmoothedPlacementScreenPosition;
+            hasPreviewSurfacePose = owner.hasPreviewSurfacePose;
+            previewSurfaceIsDepth = owner.previewSurfaceIsDepth;
+            previewBoundsRadius = owner.previewBoundsRadius;
+            previewBoundsLocalCenter = owner.previewBoundsLocalCenter;
+            hasUngroundedPreviewFrame = owner.hasUngroundedPreviewFrame;
+            ungroundedPreviewProjection = owner.ungroundedPreviewProjection;
+            ungroundedPreviewSessionState = owner.ungroundedPreviewSessionState;
+            placementPending = owner.placementPending;
+            placementGeneration = owner.placementGeneration;
+            placementRequestExpiresAt = owner.placementRequestExpiresAt;
+            placementRequestScreenPosition = owner.placementRequestScreenPosition;
+            placementRequestAwaitingSurface = owner.placementRequestAwaitingSurface;
+            placementRequestHasSurface = owner.placementRequestHasSurface;
+            placementRequestIsDepth = owner.placementRequestIsDepth;
+            placementRequestFromTap = owner.placementRequestFromTap;
+            placementRequestHasEstimate = owner.placementRequestHasEstimate;
+            placementRequestEstimate = owner.placementRequestEstimate;
+            placementTapThisFrame = owner.placementTapThisFrame;
+            placementRequestDepthPose = owner.placementRequestDepthPose;
+            placementRequestPlaneId = owner.placementRequestPlaneId;
+            placementRequestLocalPoint = owner.placementRequestLocalPoint;
+            placementRetryEligible = owner.placementRetryEligible;
+            nextPlacementAttemptAt = owner.nextPlacementAttemptAt;
+            surfaceTransitionActive = owner.surfaceTransitionActive;
+            surfaceTransitionStartedAt = owner.surfaceTransitionStartedAt;
+            surfaceTransitionStartPose = owner.surfaceTransitionStartPose;
+            surfaceTransitionTrackableId = owner.surfaceTransitionTrackableId;
+            loggedMeasuredPreviewGeometry = owner.loggedMeasuredPreviewGeometry;
+            selectedDisplayName = owner.selectedDisplayName;
+            previewIsInvalid = owner.previewIsInvalid;
+            previewInput = owner.previewInput;
+            previewNeedsRelease = owner.previewNeedsRelease;
+            requireMeasuredForPreview = owner.requireMeasuredForPreview;
+            draggedObject = owner.draggedObject;
+            isDragging = owner.isDragging;
+            unpinchGraceTimer = owner.unpinchGraceTimer;
+            lastValidDragPos = owner.lastValidDragPos;
+            dragGrabScreenPosition = owner.dragGrabScreenPosition;
+            dragEye = owner.dragEye;
+            dragPointerMoved = owner.dragPointerMoved;
+            lastValidDragRot = owner.lastValidDragRot;
+            dragStartPos = owner.dragStartPos;
+            dragPointerOffset = owner.dragPointerOffset;
+            dragHandLostAt = owner.dragHandLostAt;
+            dragNeedsOpenHandAfterPlacement = owner.dragNeedsOpenHandAfterPlacement;
+            dragFreePlane = owner.dragFreePlane;
+            dragLevelTransition = owner.dragLevelTransition;
+            dragStartRot = owner.dragStartRot;
+            currentSmoothedDragPos = owner.currentSmoothedDragPos;
+            isDragBlocked = owner.isDragBlocked;
+            dragHasMeasuredSupport = owner.dragHasMeasuredSupport;
+            dragSurfaceIsEstimated = owner.dragSurfaceIsEstimated;
+            dragSurfaceTrackableId = owner.dragSurfaceTrackableId;
+            measuredDepth = owner.measuredDepth;
+            hasDepthSupportEvidence = owner.hasDepthSupportEvidence;
+            lastDepthSupportEvidence = owner.lastDepthSupportEvidence;
+            lastDepthEvidencePointer = owner.lastDepthEvidencePointer;
+        }
+        public void Restore(TapToPlaceController owner)
+        {
+            owner.previewAnchor = previewAnchor;
+            owner.previewVisual = previewVisual;
+            owner.currentPrefabToPlace = currentPrefabToPlace;
+            owner.canPlace = canPlace;
+            owner.cooldownTimer = cooldownTimer;
+            owner.lastPreviewTrackableId = lastPreviewTrackableId;
+            owner.smoothedPlacementScreenPosition = smoothedPlacementScreenPosition;
+            owner.hasSmoothedPlacementScreenPosition = hasSmoothedPlacementScreenPosition;
+            owner.hasPreviewSurfacePose = hasPreviewSurfacePose;
+            owner.previewSurfaceIsDepth = previewSurfaceIsDepth;
+            owner.previewBoundsRadius = previewBoundsRadius;
+            owner.previewBoundsLocalCenter = previewBoundsLocalCenter;
+            owner.hasUngroundedPreviewFrame = hasUngroundedPreviewFrame;
+            owner.ungroundedPreviewProjection = ungroundedPreviewProjection;
+            owner.ungroundedPreviewSessionState = ungroundedPreviewSessionState;
+            owner.placementPending = placementPending;
+            owner.placementGeneration = placementGeneration;
+            owner.placementRequestExpiresAt = placementRequestExpiresAt;
+            owner.placementRequestScreenPosition = placementRequestScreenPosition;
+            owner.placementRequestAwaitingSurface = placementRequestAwaitingSurface;
+            owner.placementRequestHasSurface = placementRequestHasSurface;
+            owner.placementRequestIsDepth = placementRequestIsDepth;
+            owner.placementRequestFromTap = placementRequestFromTap;
+            owner.placementRequestHasEstimate = placementRequestHasEstimate;
+            owner.placementRequestEstimate = placementRequestEstimate;
+            owner.placementTapThisFrame = placementTapThisFrame;
+            owner.placementRequestDepthPose = placementRequestDepthPose;
+            owner.placementRequestPlaneId = placementRequestPlaneId;
+            owner.placementRequestLocalPoint = placementRequestLocalPoint;
+            owner.placementRetryEligible = placementRetryEligible;
+            owner.nextPlacementAttemptAt = nextPlacementAttemptAt;
+            owner.surfaceTransitionActive = surfaceTransitionActive;
+            owner.surfaceTransitionStartedAt = surfaceTransitionStartedAt;
+            owner.surfaceTransitionStartPose = surfaceTransitionStartPose;
+            owner.surfaceTransitionTrackableId = surfaceTransitionTrackableId;
+            owner.loggedMeasuredPreviewGeometry = loggedMeasuredPreviewGeometry;
+            owner.selectedDisplayName = selectedDisplayName;
+            owner.previewIsInvalid = previewIsInvalid;
+            owner.previewInput = previewInput;
+            owner.previewNeedsRelease = previewNeedsRelease;
+            owner.requireMeasuredForPreview = requireMeasuredForPreview;
+            owner.draggedObject = draggedObject;
+            owner.isDragging = isDragging;
+            owner.unpinchGraceTimer = unpinchGraceTimer;
+            owner.lastValidDragPos = lastValidDragPos;
+            owner.dragGrabScreenPosition = dragGrabScreenPosition;
+            owner.dragEye = dragEye;
+            owner.dragPointerMoved = dragPointerMoved;
+            owner.lastValidDragRot = lastValidDragRot;
+            owner.dragStartPos = dragStartPos;
+            owner.dragPointerOffset = dragPointerOffset;
+            owner.dragHandLostAt = dragHandLostAt;
+            owner.dragNeedsOpenHandAfterPlacement = dragNeedsOpenHandAfterPlacement;
+            owner.dragFreePlane = dragFreePlane;
+            owner.dragLevelTransition = dragLevelTransition;
+            owner.dragStartRot = dragStartRot;
+            owner.currentSmoothedDragPos = currentSmoothedDragPos;
+            owner.isDragBlocked = isDragBlocked;
+            owner.dragHasMeasuredSupport = dragHasMeasuredSupport;
+            owner.dragSurfaceIsEstimated = dragSurfaceIsEstimated;
+            owner.dragSurfaceTrackableId = dragSurfaceTrackableId;
+            owner.measuredDepth = measuredDepth;
+            owner.hasDepthSupportEvidence = hasDepthSupportEvidence;
+            owner.lastDepthSupportEvidence = lastDepthSupportEvidence;
+            owner.lastDepthEvidencePointer = lastDepthEvidencePointer;
+        }
+    }
+    private enum HandOperation { Drag, ExistingDrag, Preview, Release, Frame }
+    private HandDragState secondDrag = new HandDragState();
+    private readonly HandDragState primaryDrag = new HandDragState();
+    private ButtonInteractor secondInput;
+    private ButtonInteractor previewInput;
+    private bool previewNeedsRelease;
+    private bool requireMeasuredForPreview;
+    private bool processingSecondHand;
+
+    public bool IsObjectBeingDragged(GameObject obj) =>
+        obj != null && ((isDragging && draggedObject == obj) ||
+        (secondDrag.isDragging && secondDrag.draggedObject == obj) ||
+        (processingSecondHand && primaryDrag.isDragging && primaryDrag.draggedObject == obj));
+
+    public void SetSecondHand(ButtonInteractor input)
+    {
+        if (secondInput == input) return;
+        if (secondInput != null && secondDrag.previewAnchor != null) RunWithSecondHand(ClearActivePreview);
+        if (secondInput != null) ProcessSecondHand(HandOperation.Release);
+        secondInput = input;
+        secondDrag = new HandDragState();
+    }
+
+    private void ProcessSecondHand(HandOperation operation)
+    {
+        if (secondInput == null || (operation != HandOperation.Release && !secondInput.isActiveAndEnabled) ||
+            (operation == HandOperation.ExistingDrag && !secondDrag.isDragging)) return;
+        RunWithSecondHand(() =>
+        {
+            measuredDepth.Configure(mainCamera, arRaycastManager, buttonInteractor);
+            if (operation == HandOperation.Frame)
+            {
+                cooldownTimer = Mathf.Max(0f, cooldownTimer - Time.deltaTime);
+                UpdateActiveHand();
+            }
+            else if (operation == HandOperation.Preview)
+            {
+                if (isDragging) ReleaseDraggedObject();
+                UpdatePreviewAndPlacement();
+            }
+            else if (operation == HandOperation.Release) ReleaseDraggedObject();
+            else HandleDragAndDrop();
+        });
+    }
+
+    private void RunWithSecondHand(System.Action action)
+    {
+        ButtonInteractor primaryInput = buttonInteractor;
+        primaryDrag.Capture(this);
+        secondDrag.Restore(this);
+        buttonInteractor = secondInput;
+        processingSecondHand = true;
+        try { action(); }
+        finally
+        {
+            secondDrag.Capture(this);
+            primaryDrag.Restore(this);
+            buttonInteractor = primaryInput;
+            processingSecondHand = false;
+        }
+    }
+
     void Update()
     {
         RefreshSurfaceGuidance();
@@ -519,34 +804,25 @@ public class TapToPlaceController : MonoBehaviour
         if (!buttonInteractor.IsHandVisible || buttonInteractor.PinchConsumedByUI)
             worldPinchArmed = false;
 
-        // 1. CHẾ ĐỘ ĐẶT VẬT MỚI
-        bool hasSelection = (menuHUD != null && menuHUD.HasSelection);
-        bool hasDirectPreview = (currentPrefabToPlace != null && previewAnchor != null);
-
-        if (hasSelection || hasDirectPreview)
-        {
-            if (isDragging) ReleaseDraggedObject();
-
-            if (hasSelection && currentPrefabToPlace == null)
-            {
-                StartPreview(menuHUD.SelectedComponent);
-            }
-
-            UpdatePreviewAndPlacement();
-        }
-        // 2. CHẾ ĐỘ DI CHUYỂN VẬT CŨ (DRAG & DROP)
-        else
-        {
-            if (previewAnchor != null)
-            {
-                Destroy(previewAnchor);
-                currentPrefabToPlace = null;
-            }
-
-            HandleDragAndDrop();
-        }
+        if (menuHUD != null && menuHUD.HasSelection && currentPrefabToPlace == null)
+            StartPreview(menuHUD.SelectedComponent);
+        UpdateActiveHand();
+        ProcessSecondHand(HandOperation.Frame);
         UpdatePlacedContacts();
     }
+
+    private void UpdateActiveHand()
+    {
+        if (currentPrefabToPlace != null && previewAnchor != null)
+        {
+            if (isDragging) ReleaseDraggedObject();
+            UpdatePreviewAndPlacement();
+        }
+        else HandleDragAndDrop();
+    }
+
+    public bool HasAnyPreview => currentPrefabToPlace != null || secondDrag.currentPrefabToPlace != null ||
+        (processingSecondHand && primaryDrag.currentPrefabToPlace != null);
 
     private void UpdatePreviewAndPlacement()
     {
@@ -603,7 +879,7 @@ public class TapToPlaceController : MonoBehaviour
                 out Pose requestPose, out TrackableId requestPlaneId, out bool requestIsDepth))
                 TryCaptureMeasuredPlacementRequest(requestPose, requestPlaneId, requestIsDepth);
             else if (IsWorldPinchHeld() && !enableInstantPlacement) placementRequestAwaitingSurface = true;
-            if (enableInstantPlacement && !placementRequestHasSurface && !placementRequestHasEstimate &&
+            if (enableInstantPlacement && !requireMeasuredForPreview && !placementRequestHasSurface && !placementRequestHasEstimate &&
                 TryGetInstantPlacementPose(placementRequestScreenPosition, out placementRequestEstimate))
                 placementRequestHasEstimate = true;
         }
@@ -661,9 +937,9 @@ public class TapToPlaceController : MonoBehaviour
             previewAnchor.SetActive(true);
             bool overlapping = CheckOverlap(estimatedPose.position, null, out _);
             UpdatePreviewVisual(overlapping);
-            canPlace = !overlapping && cooldownTimer <= 0f;
+            canPlace = !requireMeasuredForPreview && !overlapping && cooldownTimer <= 0f;
             SetPlacementFeedback(overlapping ? ButtonInteractor.PlacementFeedback.Blocked :
-                ButtonInteractor.PlacementFeedback.Ready);
+                (requireMeasuredForPreview ? ButtonInteractor.PlacementFeedback.SearchingSurface : ButtonInteractor.PlacementFeedback.Ready));
             if (canPlace && Time.unscaledTime <= placementRequestExpiresAt && placementRequestHasEstimate)
                 PlaceInstantObject(placementRequestEstimate, placementRequestScreenPosition, TrackableId.invalidId, false);
             return;
@@ -675,10 +951,13 @@ public class TapToPlaceController : MonoBehaviour
         else UpdatePreviewVisual(false);
     }
 
+    private ButtonInteractor PlacementInput => previewInput != null ? previewInput : buttonInteractor;
+
     private bool HasWorldPlacementPointer()
     {
-        return buttonInteractor != null && buttonInteractor.IsHandVisible && !buttonInteractor.PinchConsumedByUI &&
-            (!buttonInteractor.IsPointerOverUI || buttonInteractor.isPinching);
+        var input = PlacementInput;
+        return input != null && input.IsHandVisible && !input.PinchConsumedByUI &&
+            (!input.IsPointerOverUI || input.isPinching);
     }
 
     private void ClearPlacementRequest()
@@ -696,6 +975,13 @@ public class TapToPlaceController : MonoBehaviour
 
     private void UpdatePlacementRequest(bool hasWorldPointer, Vector2 screenPosition)
     {
+        if (previewNeedsRelease)
+        {
+            ClearPlacementRequest();
+            if (buttonInteractor.IsHandVisible && !buttonInteractor.isPinching && !buttonInteractor.IsGestureTemporarilyOccluded)
+                previewNeedsRelease = false;
+            return;
+        }
         if (placementTapThisFrame)
         {
             ClearPlacementRequest();
@@ -814,7 +1100,7 @@ public class TapToPlaceController : MonoBehaviour
 
     private bool TryCommitPlacementRequest()
     {
-        if (Time.unscaledTime > placementRequestExpiresAt || cooldownTimer > 0f ||
+        if (previewNeedsRelease || Time.unscaledTime > placementRequestExpiresAt || cooldownTimer > 0f ||
             (!enableInstantPlacement && surfaceTransitionActive) ||
             Time.unscaledTime < nextPlacementAttemptAt) return false;
         if (!TryResolvePlacementRequestSurface(out Pose surfacePose, out TrackableId planeId)) return false;
@@ -892,7 +1178,7 @@ public class TapToPlaceController : MonoBehaviour
 
     private void SetPlacementFeedback(ButtonInteractor.PlacementFeedback feedback)
     {
-        if (buttonInteractor != null) buttonInteractor.SetPlacementFeedback(feedback);
+        if (PlacementInput != null) PlacementInput.SetPlacementFeedback(feedback);
         if (feedback != ButtonInteractor.PlacementFeedback.None &&
             Time.unscaledTime >= nextPlacementDiagnosticAt)
         {
@@ -945,7 +1231,6 @@ public class TapToPlaceController : MonoBehaviour
         previewAnchor.transform.localScale = Vector3.one;
         if (previewVisual != null)
         {
-            previewVisual.transform.localScale = Vector3.one * scaleMultiplier;
             // Tính lại sau khi gắn native anchor để sai số transform/pivot không
             // làm đáy vật nhấc khỏi mặt thật ở frame xác nhận.
             AlignVisualBaseToAnchor(previewAnchor, previewVisual);
@@ -997,7 +1282,11 @@ public class TapToPlaceController : MonoBehaviour
         placementConfirmedUntil = Time.unscaledTime + 2.5f;
         // A closed placement gesture, including a hand re-detected still
         // closed, must never silently become a new grab of the placed object.
-        dragNeedsOpenHandAfterPlacement = true;
+        if (previewInput == secondInput && secondInput != null && !processingSecondHand)
+            secondDrag.dragNeedsOpenHandAfterPlacement = true;
+        else if (processingSecondHand && previewInput != secondInput)
+            primaryDrag.dragNeedsOpenHandAfterPlacement = true;
+        else dragNeedsOpenHandAfterPlacement = true;
         History.RecordAction(new PlaceComponentAction(placedObject, this));
         Debug.Log($"<color=green>[TapToPlace]</color> Đã đặt thành công: [{placedObject.name}]. Tổng số linh kiện: {placedObjectsHistory.Count}");
 
@@ -1015,13 +1304,53 @@ public class TapToPlaceController : MonoBehaviour
         OnPlacementFinished?.Invoke();
     }
 
+    private void BeginHandDrag(GameObject target, Vector2 screenPos)
+    {
+        draggedObject = target;
+        draggedObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
+        isDragging = true;
+        dragStartPos = draggedObject.transform.position;
+        dragStartRot = draggedObject.transform.rotation;
+        dragLevelTransition.Begin(dragStartPos.y);
+        Vector2 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
+        if (dragEye >= 0)
+        {
+            if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, dragStartPos, dragEye == 1,
+                out Vector2 eyeScreen, clipToLens: false))
+                baseScreen = eyeScreen;
+            else
+                dragEye = -1;
+        }
+        dragPointerOffset = baseScreen - screenPos;
+        dragGrabScreenPosition = screenPos;
+        dragPointerMoved = false;
+        lastValidDragPos = dragStartPos;
+        lastValidDragRot = dragStartRot;
+        currentSmoothedDragPos = dragStartPos;
+        isDragBlocked = false;
+        unpinchGraceTimer = 0f;
+        dragSurfaceTrackableId = TrackableId.invalidId;
+        dragHasMeasuredSupport = false;
+        if (placedContacts.TryGetValue(draggedObject, out PlacedContact contact))
+        {
+            dragSurfaceTrackableId = contact.planeId;
+            contact.settling = false;
+            contact.confirmation.Reset();
+        }
+
+        if (SelectedComponent == draggedObject) UpdateSelectedComponentVisual();
+        else SelectComponent(draggedObject);
+        Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
+        dragFreePlane = new Plane(mainCamera.transform.forward, dragStartPos);
+    }
+
     private void HandleDragAndDrop()
     {
         // Tracking/UI ownership ends a drag immediately. A brief hand occlusion
         // below freezes the last measured world pose instead of dropping it.
         if ((!isDragging && buttonInteractor.IsPointerOverUI) ||
             buttonInteractor.PinchConsumedByUI || ARSession.state != ARSessionState.SessionTracking ||
-            (wireConnectionController != null && wireConnectionController.IsWireMode))
+            (!isDragging && wireConnectionController != null && wireConnectionController.IsWireMode))
         {
             placementTapInput.Reset();
             if (isDragging) ReleaseDraggedObject();
@@ -1063,43 +1392,10 @@ public class TapToPlaceController : MonoBehaviour
             worldPinchArmed = false;
             if (TryFindPinchTarget(screenPos, out GameObject target, out dragEye))
             {
-                draggedObject = target;
-                draggedObject.GetComponent<ARInstantPlacementAnchor>()?.StopRefinement();
-                isDragging = true;
-                dragStartPos = draggedObject.transform.position;
-                dragStartRot = draggedObject.transform.rotation;
-                dragLevelTransition.Begin(dragStartPos.y);
-                Vector2 baseScreen = mainCamera.WorldToScreenPoint(dragStartPos);
-                if (dragEye >= 0)
-                {
-                    if (PhoneHeadsetStereo.TryProjectIntoEye(mainCamera, dragStartPos, dragEye == 1,
-                        out Vector2 eyeScreen, clipToLens: false))
-                        baseScreen = eyeScreen;
-                    else
-                        dragEye = -1;
-                }
-                dragPointerOffset = baseScreen - screenPos;
-                dragGrabScreenPosition = screenPos;
-                dragPointerMoved = false;
-                lastValidDragPos = dragStartPos;
-                lastValidDragRot = dragStartRot;
-                currentSmoothedDragPos = dragStartPos;
-                isDragBlocked = false;
-                unpinchGraceTimer = 0f;
-                dragSurfaceTrackableId = TrackableId.invalidId;
-                dragHasMeasuredSupport = false;
-                if (placedContacts.TryGetValue(draggedObject, out PlacedContact contact))
-                {
-                    dragSurfaceTrackableId = contact.planeId;
-                    contact.settling = false;
-                    contact.confirmation.Reset();
-                }
-
-                if (SelectedComponent == draggedObject) UpdateSelectedComponentVisual();
-                else SelectComponent(draggedObject);
-                Debug.Log("[ARDrag] Grabbed " + draggedObject.name);
+                if (IsObjectBeingDragged(target)) return;
+                BeginHandDrag(target, screenPos);
             }
-            else if (SelectedComponent != null)
+            else if (SelectedComponent != null && !IsObjectBeingDragged(SelectedComponent))
             {
 #if UNITY_2023_1_OR_NEWER
                 if (floatingMenu == null) floatingMenu = FindFirstObjectByType<ARFloatingBubbleMenu>();
@@ -1133,9 +1429,7 @@ public class TapToPlaceController : MonoBehaviour
                     // A cross-level interpolation can display the new height above the old surface.
                     bool sameSupport = currentPlaneId == dragSurfaceTrackableId &&
                         Mathf.Abs(targetPoint.y - lastValidDragPos.y) <= ARSupportPolicy.LevelTransition.SameLevelTolerance;
-                    currentSmoothedDragPos = sameSupport
-                        ? Vector3.Lerp(currentSmoothedDragPos, targetPoint, 1f - Mathf.Exp(-120f * Time.unscaledDeltaTime))
-                        : targetPoint;
+                    currentSmoothedDragPos = targetPoint;
 
                     bool isOverlapping = CheckOverlap(currentSmoothedDragPos, draggedObject, out _, 0f);
                     Quaternion dragTargetRot = dragStartRot;
@@ -1145,7 +1439,7 @@ public class TapToPlaceController : MonoBehaviour
 
                     // Reassigning the same materials each frame allocates arrays
                     // and invalidates render state on both headset cameras.
-                    if (isDragBlocked != isOverlapping && SelectedComponent == draggedObject)
+                    if (isDragBlocked != isOverlapping)
                     {
                         if (isOverlapping) ApplySelectionInvalid(draggedObject);
                         else ApplySelectionHighlight(draggedObject);
@@ -1186,12 +1480,16 @@ public class TapToPlaceController : MonoBehaviour
         bool restoreHighlight = isDragBlocked && draggedObject.transform.position != lastValidDragPos;
         draggedObject.transform.SetPositionAndRotation(lastValidDragPos, lastValidDragRot);
         currentSmoothedDragPos = lastValidDragPos;
-        if (restoreHighlight && SelectedComponent == draggedObject)
-            UpdateSelectedComponentVisual();
+        if (restoreHighlight)
+        {
+            if (CheckOverlap(draggedObject.transform.position, draggedObject, out _)) ApplySelectionInvalid(draggedObject);
+            else ApplySelectionHighlight(draggedObject);
+        }
     }
 
     private void ReleaseDraggedObject()
     {
+        GameObject releasedObject = draggedObject;
         if (draggedObject != null)
         {
             // Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
@@ -1237,6 +1535,7 @@ public class TapToPlaceController : MonoBehaviour
 
         isDragging = false;
         draggedObject = null;
+        RestoreReleasedHighlight(releasedObject);
         dragEye = -1;
         unpinchGraceTimer = 0f;
         isDragBlocked = false;
@@ -1272,7 +1571,7 @@ public class TapToPlaceController : MonoBehaviour
         ARAnchor replacement = null;
         bool StillCurrent() => this != null && obj != null && obj.activeInHierarchy && isActiveAndEnabled &&
             dragAnchorRequests.TryGetValue(obj, out int current) && current == request &&
-            !(isDragging && draggedObject == obj) && obj.transform.parent == oldParent &&
+            !IsObjectBeingDragged(obj) && obj.transform.parent == oldParent &&
             Vector3.Distance(obj.transform.localPosition, localPosition) < 0.0001f &&
             Quaternion.Angle(obj.transform.localRotation, localRotation) < 0.1f;
         try
@@ -1330,14 +1629,15 @@ public class TapToPlaceController : MonoBehaviour
     private void RememberPlacedContact(GameObject obj, TrackableId planeId)
     {
         placedContacts[obj] = new PlacedContact { planeId = planeId,
-            parent = obj.transform.parent, expectedLocal = obj.transform.localPosition };
+            parent = obj.transform.parent, expectedLocal = GetAuthoredContactLocalPosition(obj) };
     }
 
     private void UpdatePlacedContacts()
     {
-        bool idle = ARSession.state == ARSessionState.SessionTracking && !isDragging && !placementPending &&
-            currentPrefabToPlace == null && !(menuHUD != null && menuHUD.HasSelection) &&
+        bool idle = ARSession.state == ARSessionState.SessionTracking && !IsDragging && !placementPending &&
+            !HasAnyPreview && !(menuHUD != null && menuHUD.HasSelection) &&
             !(buttonInteractor != null && buttonInteractor.isPinching) &&
+            !(secondInput != null && secondInput.isPinching) &&
             !(wireConnectionController != null && wireConnectionController.IsWireMode);
         bool wiresChanged = false;
         foreach (var entry in placedContacts)
@@ -1345,8 +1645,7 @@ public class TapToPlaceController : MonoBehaviour
             GameObject obj = entry.Key;
             PlacedContact contact = entry.Value;
             if (obj == null) continue;
-            if (!idle || !obj.activeInHierarchy || !objectAnchors.TryGetValue(obj, out ARAnchor anchor) ||
-                anchor == null || anchor.pending || anchor.trackingState != TrackingState.Tracking ||
+            if (!idle || !obj.activeInHierarchy || !HasStableContactBinding(obj) ||
                 dragAnchorRequests.ContainsKey(obj))
             {
                 contact.settling = false;
@@ -1356,11 +1655,11 @@ public class TapToPlaceController : MonoBehaviour
             if (obj.transform.parent != contact.parent)
             {
                 contact.parent = obj.transform.parent;
-                contact.expectedLocal = obj.transform.localPosition;
+                contact.expectedLocal = GetAuthoredContactLocalPosition(obj);
                 contact.settling = false;
                 contact.confirmation.Reset();
             }
-            else if (Vector3.Distance(obj.transform.localPosition, contact.expectedLocal) > 0.006f)
+            else if (Vector3.Distance(GetAuthoredContactLocalPosition(obj), contact.expectedLocal) > 0.006f)
             {
                 // Undo/redo or another authored move owns the new contact. Do not
                 // settle it back onto the surface associated with the old pose.
@@ -1378,7 +1677,7 @@ public class TapToPlaceController : MonoBehaviour
                     ReanchorDraggedObject(obj);
                 }
             }
-            contact.expectedLocal = obj.transform.localPosition;
+            contact.expectedLocal = GetAuthoredContactLocalPosition(obj);
         }
         if (wiresChanged) wireConnectionController?.UpdateActiveWirePositionsExternal();
         if (!idle || mainCamera == null || arPlaneManager == null ||
@@ -1392,8 +1691,7 @@ public class TapToPlaceController : MonoBehaviour
         if (candidate == null || !candidate.activeInHierarchy ||
             !placedContacts.TryGetValue(candidate, out PlacedContact state) || state.settling ||
             dragAnchorRequests.ContainsKey(candidate) ||
-            !objectAnchors.TryGetValue(candidate, out ARAnchor native) || native == null || native.pending ||
-            native.trackingState != TrackingState.Tracking) return;
+            !HasStableContactBinding(candidate)) return;
         if (!TryGetVerticalContactSupport(candidate.transform.position, state.planeId,
             out Vector3 support, out TrackableId supportId))
         {
@@ -1417,6 +1715,13 @@ public class TapToPlaceController : MonoBehaviour
             depth = contactDepth.ConfirmingSurfacePose;
             measured = true; // The per-object confirmation below supplies the dwell.
         }
+        // Confirm a bounded tracked plane even on devices without running depth.
+        // A running depth provider still has to agree before changing contact.
+        if (!measured && !contactDepth.IsReady)
+        {
+            depth = new Pose(support, Quaternion.identity);
+            measured = true;
+        }
         if (!measured || Mathf.Abs(depth.position.y - support.y) > 0.025f ||
             Vector2.Distance(new Vector2(depth.position.x, depth.position.z), new Vector2(support.x, support.z)) > 0.08f)
         {
@@ -1438,6 +1743,20 @@ public class TapToPlaceController : MonoBehaviour
             Debug.Log($"[ARGroundContact] {candidate.name}#{candidate.GetInstanceID()}; " +
                 $"fromY={candidate.transform.position.y:F3}; measuredY={height:F3}; plane={supportId}; XZ=preserved");
         }
+    }
+
+    private static Vector3 GetAuthoredContactLocalPosition(GameObject obj)
+    {
+        var stabilizer = obj.GetComponent<ARPlacedObjectStabilizer>();
+        return stabilizer != null ? stabilizer.AuthoredContactLocalPosition : obj.transform.localPosition;
+    }
+
+    private bool HasStableContactBinding(GameObject obj)
+    {
+        if (objectAnchors.TryGetValue(obj, out ARAnchor anchor) && anchor != null)
+            return !anchor.pending && anchor.trackingState == TrackingState.Tracking;
+        var instant = obj.GetComponent<ARInstantPlacementAnchor>();
+        return instant != null && instant.SupportRoot != null;
     }
 
     private static void StepContactCorrection(Transform body, float height, float deltaTime)
@@ -1513,7 +1832,7 @@ public class TapToPlaceController : MonoBehaviour
         foreach (GameObject placed in placedObjectsHistory)
         {
             if (placed == null || placed == ignore || !placed.activeInHierarchy ||
-                (isDragging && draggedObject == placed) || dragAnchorRequests.ContainsKey(placed) ||
+                IsObjectBeingDragged(placed) || dragAnchorRequests.ContainsKey(placed) ||
                 !objectAnchors.TryGetValue(placed, out ARAnchor candidate) || candidate == null ||
                 !candidate.isActiveAndEnabled || placed.transform.parent != candidate.transform ||
                 (mainCamera != null && candidate.transform.IsChildOf(mainCamera.transform)) ||
@@ -1678,6 +1997,32 @@ public class TapToPlaceController : MonoBehaviour
         Vector2 offsetPoint = screenPoint + dragPointerOffset;
         bool canUseEstimatedLevel = enableInstantPlacement && !dragHasMeasuredSupport &&
             draggedObject != null && instantPlacedObjects.Contains(draggedObject);
+        if (!canUseEstimatedLevel && TryProjectDragOnBoundPlane(offsetPoint, out pose))
+        {
+            planeId = dragSurfaceTrackableId;
+            dragLevelTransition.Begin(GetContactPosition(pose).y);
+            return true;
+        }
+        // A measured surface takes priority over an estimated object's old air height.
+        if (canUseEstimatedLevel && arPlaneManager != null &&
+            TryGetVerticalContactSupport(lastValidDragPos, TrackableId.invalidId, out Vector3 below, out TrackableId belowId))
+        {
+            pose = new Pose(below, Quaternion.identity);
+            dragLevelTransition.Begin(GetContactPosition(pose).y);
+            planeId = belowId;
+            return true;
+        }
+        if (TryGetRealHorizontalSurface(screenPoint, dragSurfaceTrackableId, out Pose rawSupport, out TrackableId rawId))
+        {
+            if (canUseEstimatedLevel || dragLevelTransition.Accept(GetContactPosition(rawSupport), screenPoint, Time.unscaledTime))
+            {
+                pose = OffsetMeasuredDragSupport(screenPoint, rawSupport, rawId);
+                if (canUseEstimatedLevel) dragLevelTransition.Begin(GetContactPosition(pose).y);
+                planeId = rawId;
+                return true;
+            }
+            return false;
+        }
         if (dragEye >= 0)
         {
             // Follow the eye that actually grabbed the mesh. Project at the last
@@ -1687,21 +2032,17 @@ public class TapToPlaceController : MonoBehaviour
                 distance <= 0f || distance > 20f)
             {
                 dragLevelTransition.CancelPending();
+                if (canUseEstimatedLevel)
+                {
+                    dragSurfaceIsEstimated = true;
+                    return TryProjectFreeHandDrag(offsetPoint, out pose);
+                }
                 return false;
             }
             Vector3 contact = eyeRay.GetPoint(distance);
             if (TryGetHeadsetSameLevelSupport(contact, out pose))
             {
                 planeId = dragSurfaceTrackableId;
-                dragLevelTransition.CancelPending();
-                return true;
-            }
-            if (canUseEstimatedLevel && distance <= 5f && (contact - dragStartPos).sqrMagnitude <= 1f)
-            {
-                // An estimated component can slide at its original height during
-                // this gesture. A newly seen surface must not make it jump.
-                dragSurfaceIsEstimated = true;
-                pose = new Pose(contact, dragStartRot);
                 dragLevelTransition.CancelPending();
                 return true;
             }
@@ -1713,17 +2054,62 @@ public class TapToPlaceController : MonoBehaviour
         {
             dragLevelTransition.CancelPending();
             // An estimated placement remains movable even before surface detection.
-            // Keep its authored height; measured objects retain bounded surface rules.
-            if (dragEye < 0 && canUseEstimatedLevel)
+            // The frozen grab-depth plane permits lowering the hand; measured objects retain bounded surface rules.
+            if (canUseEstimatedLevel)
             {
                 dragSurfaceIsEstimated = true;
-                return TryProjectEstimatedLevel(screenPoint, dragStartPos, out pose);
+                return TryProjectFreeHandDrag(offsetPoint, out pose);
             }
             return false;
         }
         // Crossing a measured table/floor height is intentional only after a
         // short stable hold. A single ray beyond an edge must not teleport.
         return dragLevelTransition.Accept(GetContactPosition(pose), screenPoint, Time.unscaledTime);
+    }
+
+    private bool TryProjectDragOnBoundPlane(Vector2 pointer, out Pose pose)
+    {
+        pose = default;
+        if (arPlaneManager == null || dragSurfaceTrackableId == TrackableId.invalidId) return false;
+        ARPlane plane = arPlaneManager.GetPlane(dragSurfaceTrackableId);
+        for (int i = 0; i < 16 && plane != null && plane.subsumedBy != null; i++) plane = plane.subsumedBy;
+        if (!IsUsableSurfacePlane(plane)) return false;
+        Ray ray = mainCamera.ScreenPointToRay(pointer);
+        if (dragEye >= 0 && !PhoneHeadsetStereo.TryGetEyeRay(mainCamera, pointer, dragEye == 1, out ray, clipToLens: false)) return false;
+        Vector2 center = plane.center;
+        Vector3 origin = plane.transform.TransformPoint(new Vector3(center.x, 0f, center.y));
+        if (!new Plane(plane.transform.up, origin).Raycast(ray, out float distance) || distance <= 0f || distance > 20f) return false;
+        Vector3 contact = ray.GetPoint(distance);
+        Vector3 local = plane.transform.InverseTransformPoint(contact);
+        if (!IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary)) return false;
+        pose = new Pose(contact, plane.transform.rotation);
+        dragSurfaceTrackableId = plane.trackableId;
+        return true;
+    }
+
+    private Pose OffsetMeasuredDragSupport(Vector2 pointer, Pose measured, TrackableId id)
+    {
+        Ray ray = mainCamera.ScreenPointToRay(pointer + dragPointerOffset);
+        if (dragEye >= 0 && !PhoneHeadsetStereo.TryGetEyeRay(mainCamera, pointer + dragPointerOffset,
+            dragEye == 1, out ray, clipToLens: false)) return measured;
+        if (!new Plane(Vector3.up, GetContactPosition(measured)).Raycast(ray, out float distance) || distance <= 0f || distance > 20f)
+            return measured;
+        Vector3 point = ray.GetPoint(distance);
+        ARPlane plane = arPlaneManager != null ? arPlaneManager.GetPlane(id) : null;
+        return TryGetVerticalContactOnPlane(point, plane, out Vector3 support, requireHeightCorrection: false)
+            ? new Pose(support, measured.rotation) : measured;
+    }
+
+    private bool TryProjectFreeHandDrag(Vector2 pointer, out Pose pose)
+    {
+        pose = default;
+        Ray ray = mainCamera.ScreenPointToRay(pointer);
+        if (dragEye >= 0 && !PhoneHeadsetStereo.TryGetEyeRay(mainCamera, pointer, dragEye == 1, out ray, clipToLens: false)) return false;
+        if (!dragFreePlane.Raycast(ray, out float distance) || distance <= 0f || distance > 5f) return false;
+        Vector3 point = ray.GetPoint(distance);
+        if ((point - dragStartPos).sqrMagnitude > 1f) return false;
+        pose = new Pose(point, dragStartRot);
+        return true;
     }
 
     private bool TryGetHeadsetSameLevelSupport(Vector3 contact, out Pose pose)
@@ -1736,7 +2122,7 @@ public class TapToPlaceController : MonoBehaviour
 
         // Inside the same tracked polygon, keep the accepted height and avoid
         // native depth probes competing with hand tracking on every short move.
-        pose = new Pose(contact - Vector3.up * surfaceContactOffset, Quaternion.identity);
+        pose = new Pose(measured, Quaternion.identity);
         return true;
     }
 
@@ -1756,6 +2142,7 @@ public class TapToPlaceController : MonoBehaviour
     {
         if (buttonInteractor == null || !buttonInteractor.IsHandVisible)
             return new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+        // One cursor filter is enough: use the same visible point for UI and held objects.
         return buttonInteractor.CurrentScreenPos;
     }
 
@@ -2206,6 +2593,15 @@ public class TapToPlaceController : MonoBehaviour
             SetPlacementFeedback(ButtonInteractor.PlacementFeedback.Blocked);
             return false;
         }
+        // Nearby measured components should share one tracked coordinate frame,
+        // including the immediate-placement path used by AR and phone VR.
+        if (measuredSurface && TryGetNearbySupportAnchor(pose.position, null, out ARAnchor sharedAnchor))
+        {
+            placementRequestPlaneId = planeId;
+            previewAnchor.SetActive(true);
+            CompletePlacement(pose.position, pose.rotation, sharedAnchor.transform, sharedAnchor);
+            return true;
+        }
         GameObject placed = previewAnchor;
         Transform support = new GameObject("InstantSupport_" + currentPrefabToPlace.name).transform;
         if (arRaycastManager != null && !arRaycastManager.transform.IsChildOf(mainCamera.transform))
@@ -2232,14 +2628,16 @@ public class TapToPlaceController : MonoBehaviour
         if (stabilizer == null) stabilizer = obj.AddComponent<ARPlacedObjectStabilizer>();
         stabilizer.Bind(this, anchor);
         if (measuredSurface) instantPlacedObjects.Remove(obj);
-        RememberPlacedContact(obj, TrackableId.invalidId);
+        TrackableId supportId = placedContacts.TryGetValue(obj, out PlacedContact contact)
+            ? contact.planeId : TrackableId.invalidId;
+        RememberPlacedContact(obj, supportId);
         wireConnectionController?.UpdateActiveWirePositionsExternal();
     }
 
     internal bool TryRefineInstantPlacement(GameObject obj, Transform support, ARPlane measuredPlane)
     {
         if (obj == null || support == null || !obj.activeInHierarchy ||
-            (isDragging && draggedObject == obj) ||
+            IsObjectBeingDragged(obj) ||
             (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)) return false;
         Vector3 position = obj.transform.position;
         if (mainCamera == null ||
@@ -2248,7 +2646,7 @@ public class TapToPlaceController : MonoBehaviour
         float height = point.y + surfaceContactOffset;
         float change = height - position.y;
         if (change >= 0f) return change <= 0.012f;
-        if (change < -0.012f && !ARSupportPolicy.CanCorrectContactHeight(position.y, height)) return false;
+        if (change < -0.002f && !ARSupportPolicy.CanCorrectContactHeight(position.y, height)) return false;
         Vector3 candidate = new Vector3(position.x, height, position.z);
         if (CheckOverlapForObject(obj, candidate, obj.transform.rotation, obj, out _, 0f)) return false;
         support.position += candidate - position;
@@ -2358,13 +2756,13 @@ public class TapToPlaceController : MonoBehaviour
 
     private bool IsWorldPinchHeld()
     {
-        return HasWorldPlacementPointer() && buttonInteractor.isPinching;
+        return HasWorldPlacementPointer() && PlacementInput.isPinching;
     }
 
     private bool ShouldCancelPendingPlacement()
     {
         return ARSession.state != ARSessionState.SessionTracking ||
-            (buttonInteractor != null && buttonInteractor.JustPinched && buttonInteractor.PinchConsumedByUI) ||
+            (PlacementInput != null && PlacementInput.JustPinched && PlacementInput.PinchConsumedByUI) ||
             (placementRequestHasSurface && !TryResolvePlacementRequestSurface(out _, out _));
     }
 
@@ -2385,7 +2783,7 @@ public class TapToPlaceController : MonoBehaviour
     {
         // Một lần nhả/mất tay/UI trong lúc chờ native anchor kết thúc quyền retry
         // của cử chỉ cũ, kể cả người dùng đã pinch lại trước callback thất bại.
-        if (!IsWorldPinchHeld() || buttonInteractor.JustPinched) placementRetryEligible = false;
+        if (!IsWorldPinchHeld() || PlacementInput.JustPinched) placementRetryEligible = false;
     }
 
     private void RetryPlacementIfStillHeld(int generation, GameObject requestedPreview)
@@ -2400,7 +2798,7 @@ public class TapToPlaceController : MonoBehaviour
         {
             ClearPlacementRequest();
             placementRequestAwaitingSurface = true;
-            placementRequestScreenPosition = buttonInteractor.CurrentScreenPos;
+            placementRequestScreenPosition = PlacementInput.CurrentScreenPos;
         }
         nextPlacementAttemptAt = Time.unscaledTime + 0.25f;
         placementRequestExpiresAt = nextPlacementAttemptAt + previewSurfaceTransitionDuration + 0.7f;
@@ -2641,9 +3039,32 @@ public class TapToPlaceController : MonoBehaviour
                viewport.y >= 0.04f && viewport.y <= 0.96f;
     }
 
+    public bool StartHandPreview(string componentName, ButtonInteractor input)
+    {
+        if (input == null || !input.IsHandVisible || CircuitSimulationManager.Instance?.isSimulationMode == true) return false;
+        bool started = false;
+        void StartForOwner()
+        {
+            if (isDragging) ReleaseDraggedObject();
+            StartPreview(componentName, buttonInteractor);
+            previewNeedsRelease = true;
+            requireMeasuredForPreview = false;
+            started = previewAnchor != null;
+        }
+        if (input == secondInput) RunWithSecondHand(StartForOwner);
+        else if (input == buttonInteractor) StartForOwner();
+        return started;
+    }
+
     public void StartPreview(string componentName)
     {
-        ClearPreview();
+        StartPreview(componentName, buttonInteractor);
+    }
+
+    public void StartPreview(string componentName, ButtonInteractor input)
+    {
+        ClearActivePreview();
+        previewInput = input;
 
         GameObject prefab = GetPrefabByName(componentName);
         if (prefab == null)
@@ -2659,7 +3080,10 @@ public class TapToPlaceController : MonoBehaviour
         previewAnchor = new GameObject("PreviewAnchor_" + prefab.name);
         previewVisual = Instantiate(prefab);
         previewVisual.transform.SetParent(previewAnchor.transform, false);
+        // A prefab's authored scene position is not a placement offset.
+        previewVisual.transform.localPosition = Vector3.zero;
         previewVisual.transform.localScale = Vector3.one * scaleMultiplier;
+        NormalizeComponentBody(previewVisual);
 
         // VÔ HIỆU HOÁ TOÀN BỘ COLLIDER KHI PREVIEW ĐỂ KHÔNG TỰ CHẶN RAYCAST (KHẮC PHỤC TRIỆT ĐỂ LỖI NHÁP NHÁY)
         Collider[] colliders = previewVisual.GetComponentsInChildren<Collider>();
@@ -2724,6 +3148,16 @@ public class TapToPlaceController : MonoBehaviour
 
     public void ClearPreview()
     {
+        ClearActivePreview();
+        if (!processingSecondHand && secondInput != null && secondDrag.previewAnchor != null)
+            RunWithSecondHand(ClearActivePreview);
+    }
+
+    private void ClearActivePreview()
+    {
+        previewNeedsRelease = requireMeasuredForPreview = false;
+        if (previewInput != null) previewInput.SetPlacementFeedback(ButtonInteractor.PlacementFeedback.None);
+        previewInput = null;
         placementGeneration++;
         placementPending = false;
         ClearPlacementRequest();
@@ -2747,7 +3181,7 @@ public class TapToPlaceController : MonoBehaviour
         hasSmoothedPlacementScreenPosition = false;
         hasPreviewSurfacePose = false;
         previewSurfaceIsDepth = false;
-        measuredDepth.Reset();
+        if (!isDragging) measuredDepth.Reset();
         hasDepthSupportEvidence = false;
         hasUngroundedPreviewFrame = false;
         canPlace = false;
@@ -2756,13 +3190,30 @@ public class TapToPlaceController : MonoBehaviour
 
     public void CancelPlacement()
     {
-        bool hadPreview = currentPrefabToPlace != null || previewAnchor != null;
+        if (isDragging) ReleaseDraggedObject();
+        ProcessSecondHand(HandOperation.Release);
+        bool hadPreview = HasAnyPreview;
         ClearPreview();
         canPlace = false;
         isDragging = false;
         draggedObject = null;
         Debug.Log("<color=yellow>[TapToPlace]</color> Đã hủy chế độ đặt linh kiện (Placement Cancelled).");
         if (hadPreview) OnPlacementFinished?.Invoke();
+    }
+
+    private void NormalizeComponentBody(GameObject visual)
+    {
+        Bounds bounds = default;
+        bool found = false;
+        foreach (var renderer in visual.GetComponentsInChildren<Renderer>())
+        {
+            if (!renderer.enabled || renderer is LineRenderer || IsTerminalVisual(renderer.transform, visual.transform)) continue;
+            if (found) bounds.Encapsulate(renderer.bounds);
+            else { bounds = renderer.bounds; found = true; }
+        }
+        float longest = Mathf.Max(bounds.size.x, bounds.size.y, bounds.size.z);
+        if (found && longest > 0.00001f && componentBodySize > 0f)
+            visual.transform.localScale *= componentBodySize / longest;
     }
 
     private void AlignVisualBaseToAnchor(GameObject anchor, GameObject visual)

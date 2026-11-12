@@ -7,6 +7,55 @@ using Mediapipe.Tasks.Vision.HandLandmarker;
 [DefaultExecutionOrder(-100)]
 public class ButtonInteractor : MonoBehaviour
 {
+    private volatile int handChannel;
+    public ButtonInteractor SecondHand { get; private set; }
+    private ButtonInteractor otherHand;
+    private bool ownsHandPoints;
+
+    public ButtonInteractor CreateSecondHand(Camera camera)
+    {
+        if (SecondHand != null) return SecondHand;
+        var root = new GameObject("VR Second Hand");
+        root.SetActive(false);
+        root.transform.SetParent(transform, false);
+        var second = root.AddComponent<ButtonInteractor>();
+        second.handRunner = handRunner;
+        second.videoPanel = videoPanel;
+        var point = new GameObject("Second Hand Finger", typeof(RectTransform));
+        point.transform.SetParent(videoPanel, false);
+        second.debugPoint = point.GetComponent<RectTransform>();
+        second.ownsHandPoints = true;
+        second.interactiveButtons = new List<RectTransform>();
+        second.hoanDoiTrucXY = hoanDoiTrucXY;
+        second.latNguocTrucX = latNguocTrucX;
+        second.latNguocTrucY = latNguocTrucY;
+        second.pinchThreshold = pinchThreshold;
+        second.pinchExitThreshold = pinchExitThreshold;
+        second.minStablePinchFrames = minStablePinchFrames;
+        second.cursorFollowSpeed = cursorFollowSpeed;
+        second.cursorDiameter = cursorDiameter;
+        second.pinchDebounceTime = pinchDebounceTime;
+        second.clickCooldown = clickCooldown;
+        second.handChannel = 2;
+        handChannel = 1;
+        lock (_lock) { isHandVisible = false; hasRawHandMaskLandmarks = false; }
+        second.otherHand = this;
+        otherHand = second;
+        SecondHand = second;
+        second.SetHeadsetCamera(camera);
+        root.SetActive(true);
+        return second;
+    }
+
+    public void ReleaseSecondHand()
+    {
+        handChannel = 0;
+        otherHand = null;
+        if (SecondHand == null) return;
+        SecondHand.gameObject.SetActive(false);
+        Destroy(SecondHand.gameObject);
+        SecondHand = null;
+    }
     private static readonly Color32 HeadsetHover = new(27, 101, 116, 255);
     private static readonly Color32 HeadsetPress = new(29, 122, 131, 255);
 
@@ -73,6 +122,9 @@ public class ButtonInteractor : MonoBehaviour
 
     // Tọa độ màn hình ngón trỏ và ngón cái cho các hệ thống khác sử dụng
     public Vector2 CurrentScreenPos { get; private set; }
+    private Vector2 rawWorldDragPoint;
+    private bool hasWorldDragPoint;
+    public Vector2 WorldDragScreenPos => hasWorldDragPoint ? rawWorldDragPoint : CurrentScreenPos;
     public Vector2 CurrentThumbScreenPos { get; private set; }
     public bool JustPinched { get; private set; }
     public bool IsHandVisible { get; private set; }
@@ -201,8 +253,16 @@ public class ButtonInteractor : MonoBehaviour
     public bool IsHeadsetMode => headsetCamera != null;
     private bool headsetNeedsOpenHand;
 
+    private int savedStablePinchFrames;
     public void SetHeadsetCamera(Camera camera)
     {
+        if (camera != null && headsetCamera == null)
+        {
+            savedStablePinchFrames = minStablePinchFrames;
+            minStablePinchFrames = 1;
+        }
+        else if (camera == null && headsetCamera != null)
+            minStablePinchFrames = savedStablePinchFrames;
         headsetCamera = camera;
         headsetControls = camera != null ? camera.GetComponent<PhoneHeadsetAR>() : null;
         heldHeadsetAction = null;
@@ -218,9 +278,10 @@ public class ButtonInteractor : MonoBehaviour
         canvas.enabled = headsetCamera == null;
     }
 
+    private float keepHeadsetCursorUntil = float.NegativeInfinity;
     public Vector4 GetHeadsetCursor()
     {
-        if (headsetCamera == null || !IsHandVisible || !cursorPositionInitialized) return Vector4.zero;
+        if (headsetCamera == null || (!IsHandVisible && Time.unscaledTime > keepHeadsetCursorUntil) || cursorVisual == null) return Vector4.zero;
         // Tăng kích thước con trỏ lên ~2.2 lần (từ 0.00028 lên 0.00062) để dễ nhìn rõ qua thấu kính VR
         float radius = (cursorDiameter * 0.00062f) * cursorVisual.localScale.x;
         float mode = cursorVisualGraphic.IsRing ? 1f : (isPinching ? 2f : 0f);
@@ -340,11 +401,18 @@ public class ButtonInteractor : MonoBehaviour
         interactiveButtons.Remove(btn);
     }
 
-    void OnEnable() { if (handRunner != null) handRunner.OnHandResult += ProcessHandResult; }
+    void OnEnable()
+    {
+        if (handRunner != null) handRunner.OnHandResult += ProcessHandResult;
+        if (SecondHand != null) SecondHand.enabled = true;
+    }
     void OnDisable()
     {
+        if (SecondHand != null) SecondHand.enabled = false;
         if (handRunner != null) handRunner.OnHandResult -= ProcessHandResult;
         IsHandVisible = false;
+        keepHeadsetCursorUntil = float.NegativeInfinity;
+        hasWorldDragPoint = false;
         IsGestureTemporarilyOccluded = false;
         lastVisibleHandAt = float.NegativeInfinity;
         isPinching = false;
@@ -363,6 +431,11 @@ public class ButtonInteractor : MonoBehaviour
 
     void OnDestroy()
     {
+        if (ownsHandPoints)
+        {
+            if (debugPoint != null) Destroy(debugPoint.gameObject);
+            if (thumbPoint != null) Destroy(thumbPoint.gameObject);
+        }
         if (cursorOverlayRoot != null)
         {
             if (Application.isPlaying) Destroy(cursorOverlayRoot);
@@ -426,9 +499,10 @@ public class ButtonInteractor : MonoBehaviour
         {
             visible = visible && Screen.width > Screen.height &&
                 PhoneHeadsetStereo.ContainsSourcePoint(indexViewportPoint);
-            if (!visible) headsetNeedsOpenHand = true;
         }
         IsHandVisible = visible && videoPanel != null && debugPoint != null;
+        hasWorldDragPoint = IsHandVisible;
+        if (hasWorldDragPoint) rawWorldDragPoint = Vector2.Scale(indexViewportPoint, new Vector2(Screen.width, Screen.height));
         bool finiteInput = IsFiniteHandPoint(new Vector2(x, y)) &&
             IsFiniteHandPoint(new Vector2(tx, ty)) && !float.IsNaN(dist) && !float.IsInfinity(dist);
         IsGestureTemporarilyOccluded = !IsHandVisible && freshMissingHand && finiteInput &&
@@ -436,6 +510,9 @@ public class ButtonInteractor : MonoBehaviour
             Time.unscaledTime - lastVisibleHandAt <= GestureOcclusionGrace &&
             (imageSource == null || imageSource.isPlaying) &&
             (handRunner == null || (!handRunner.IsPaused && handRunner.isActiveAndEnabled));
+        // Preserve a captured gesture across a fresh, brief missing-hand result.
+        // Out-of-lens/stale input still rearms, so re-entry cannot cause a new grab.
+        if (headsetCamera != null && !IsHandVisible && !IsGestureTemporarilyOccluded) headsetNeedsOpenHand = true;
         if (IsHandVisible) lastVisibleHandAt = Time.unscaledTime;
         handMaskHullCount = 0;
         if (IsHandVisible && hasHandMask &&
@@ -450,6 +527,7 @@ public class ButtonInteractor : MonoBehaviour
             {
                 if (btn != null)
                 {
+                    if (headsetControls != null && !headsetControls.CanResetControl(btn, this)) continue;
                     if (buttonImages.ContainsKey(btn))
                         buttonImages[btn].color = originalColors[btn];
 
@@ -462,7 +540,12 @@ public class ButtonInteractor : MonoBehaviour
             }
             if (debugPoint != null) debugPoint.gameObject.SetActive(false);
             if (thumbPoint != null) thumbPoint.gameObject.SetActive(false);
-            if (cursorOverlayRoot != null) cursorOverlayRoot.SetActive(false);
+            bool keepCursor = freshMissingHand && finiteInput && cursorPositionInitialized &&
+                Time.unscaledTime - lastVisibleHandAt <= 0.18f &&
+                (imageSource == null || imageSource.isPlaying) &&
+                (handRunner == null || (!handRunner.IsPaused && handRunner.isActiveAndEnabled));
+            if (cursorOverlayRoot != null) cursorOverlayRoot.SetActive(keepCursor);
+            keepHeadsetCursorUntil = keepCursor ? lastVisibleHandAt + 0.18f : float.NegativeInfinity;
 
             JustPinched = false;
             IsPointerOverUI = false;
@@ -476,8 +559,7 @@ public class ButtonInteractor : MonoBehaviour
             consecutivePinchFrames = 0;
             consecutiveReleaseFrames = 0;
             isPinching = false;
-            cursorPositionInitialized = false;
-            ResetCursorVisual();
+            if (!keepCursor) { cursorPositionInitialized = false; ResetCursorVisual(); }
             return;
         }
 
@@ -594,7 +676,7 @@ public class ButtonInteractor : MonoBehaviour
         bool overComponentToolbar = headsetControls != null &&
             headsetControls.TryGetComponentActionAt(screenPos, out headsetAction);
         bool menuGripOwnsPointer = headsetControls != null &&
-            headsetControls.HandleMenuPointer(screenPos, pinchStarted, overComponentToolbar);
+            headsetControls.HandleMenuPointer(screenPos, pinchStarted, overComponentToolbar, this);
         if (pinchStarted)
         {
             heldHeadsetAction = headsetAction;
@@ -607,6 +689,11 @@ public class ButtonInteractor : MonoBehaviour
         foreach (var btn in interactiveButtons)
         {
             if (btn == null || !btn.gameObject.activeInHierarchy || !buttonImages.ContainsKey(btn)) continue;
+            if (headsetControls != null && !headsetControls.CanProcessControl(btn, this))
+            {
+                if (headsetControls.CanResetControl(btn, this)) btn.GetComponent<HoldToActivateButton>()?.ResetHoldState();
+                continue;
+            }
 
             Image img = buttonImages[btn];
             if (!IsButtonAvailable(btn, img))
@@ -627,12 +714,20 @@ public class ButtonInteractor : MonoBehaviour
             }
 
             bool isHeadsetAction = headsetControls != null && headsetControls.IsComponentAction(btn);
+            bool overButton = headsetControls != null && headsetControls.IsHeadsetControl(btn)
+                ? headsetControls.HitsInEitherEye(btn, screenPos)
+                : RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam);
             bool isHovering = !menuGripOwnsPointer && (isHeadsetAction
                 ? btn == headsetAction
-                : !overComponentToolbar && RectTransformUtility.RectangleContainsScreenPoint(btn, screenPos, btnCam));
+                : !overComponentToolbar && overButton);
             // Chỉ UI ở điểm bắt đầu pinch mới được nhận cử chỉ này. Đi ngang qua
             // nút khi đang giữ pinch đặt vật không được đánh cắp lệnh đặt.
-            if (isHovering && pinchStarted) PinchConsumedByUI = true;
+            if (isHovering && pinchStarted)
+            {
+                PinchConsumedByUI = true;
+                if (headsetControls != null && headsetControls.IsHeadsetControl(btn))
+                    headsetControls.ClaimControl(btn, this);
+            }
 
             bool isHitbox = originalColors[btn].a < 0.05f;
             Color hoverTint = headsetCamera != null
@@ -722,6 +817,7 @@ public class ButtonInteractor : MonoBehaviour
                 rect.localScale = new Vector3(0.85f, 0.85f, 1f);
             }
             PlayUIClickSound();
+            headsetControls?.NotifyControlHand(this);
             button.onClick.Invoke();
         }
         if (isHeadsetAction) return;
@@ -864,8 +960,9 @@ public class ButtonInteractor : MonoBehaviour
         // only; source lookup and Unity object checks belong to Update.
         long sourceTicks = ReferenceEquals(handRunner, null) ? 0L : handRunner.LatestResultSourceReadyTimestamp;
         long resultTicks = sourceTicks > 0L ? sourceTicks : System.Diagnostics.Stopwatch.GetTimestamp();
-        if (result.handLandmarks == null || result.handLandmarks.Count == 0 ||
-            result.handLandmarks[0].landmarks == null || result.handLandmarks[0].landmarks.Count < HandMaskLandmarkCount)
+        int handIndex = FindHandIndex(result, handChannel);
+        if (handIndex < 0 || result.handLandmarks[handIndex].landmarks == null ||
+            result.handLandmarks[handIndex].landmarks.Count < HandMaskLandmarkCount)
         {
             lock (_lock)
             {
@@ -876,7 +973,7 @@ public class ButtonInteractor : MonoBehaviour
             return;
         }
 
-        var hand = result.handLandmarks[0];
+        var hand = result.handLandmarks[handIndex];
         var indexTip = hand.landmarks[8];
         var thumbTip = hand.landmarks[4];
 
@@ -919,6 +1016,25 @@ public class ButtonInteractor : MonoBehaviour
         }
     }
 
+    private static int FindHandIndex(HandLandmarkerResult result, int channel)
+    {
+        if (result.handLandmarks == null || result.handLandmarks.Count == 0) return -1;
+        if (channel == 0) return 0;
+        string label = channel == 1 ? "Left" : "Right";
+        int selected = -1;
+        float confidence = 0.5f;
+        for (int i = 0; i < result.handLandmarks.Count && i < (result.handedness?.Count ?? 0); i++)
+        {
+            var categories = result.handedness[i].categories;
+            if (categories == null || categories.Count == 0) continue;
+            var category = categories[0];
+            if (category.categoryName != label || category.score < confidence) continue;
+            confidence = category.score;
+            selected = i;
+        }
+        return selected;
+    }
+
     private static Vector2 FilterCursorAnchor(Vector2 current, Vector2 target, Vector2 screenSize,
         float deltaTime, float followSpeed)
     {
@@ -938,7 +1054,10 @@ public class ButtonInteractor : MonoBehaviour
     /// It must not filter plane hits, UI hover or the normal world pointer: those
     /// intentionally originate at the user's fingertip.
     /// </summary>
-    public bool IsPointOverTrackedHand(Vector2 screenPoint)
+    public bool IsPointOverTrackedHand(Vector2 screenPoint) =>
+        IsPointOverOwnHand(screenPoint) || (otherHand != null && otherHand.IsPointOverOwnHand(screenPoint));
+
+    private bool IsPointOverOwnHand(Vector2 screenPoint)
     {
         if (!IsHandVisible || handMaskHullCount < 3 ||
             (handRunner != null && (handRunner.IsPaused || !handRunner.isActiveAndEnabled))) return false;

@@ -819,6 +819,12 @@ internal static class ARPlacementRegressionChecks
                 Require(!DragHit(Vector3.zero), "Losing tabletop tracking must freeze the drag, not jump to the tracked floor.");
 
                 SetPlaneTracking(table, tableId, TrackingState.Tracking, PlaneAlignment.HorizontalUp);
+                Set(controller, "dragSurfaceTrackableId", tableId);
+                table.transform.position = Vector3.up * 0.05f;
+                Require(DragHit(new Vector3(0.1f, 0.05f, 0f)) && !levelTransition.IsPending,
+                    "Refitting the same tracked support must follow immediately without restarting the cross-level dwell.");
+                table.transform.position = Vector3.zero;
+                results.Add("PASS: same-plane drag support refits bypass the level-change timer instead of freezing a moving component");
                 var upper = CreateTrackedPlane(dragFixture, dragManager, new TrackableId(780, 3), new[]
                 {
                     new Vector2(-0.16f, -0.16f), new Vector2(0.16f, -0.16f),
@@ -859,7 +865,7 @@ internal static class ARPlacementRegressionChecks
                     return hit;
                 }
                 table.transform.position = Vector3.up * 0.01f;
-                Vector3 tabletopContact = previousContact + Vector3.right * 0.15f;
+                Vector3 tabletopContact = previousContact + Vector3.right * 0.15f + Vector3.up * 0.01f;
                 Require(HeadsetDragHit(tabletopContact, out Pose tablePose, out TrackableId hitId) &&
                     hitId == tableId &&
                     Vector3.Distance(tablePose.position + Vector3.up * controller.surfaceContactOffset, tabletopContact) < 0.001f,
@@ -876,9 +882,9 @@ internal static class ARPlacementRegressionChecks
                 {
                     Vector3 estimatedContact = previousContact + Vector3.right * 0.45f;
                     Require(HeadsetDragHit(estimatedContact, out Pose estimatedPose, out hitId) &&
-                        hitId == TrackableId.invalidId && (bool)Get(controller, "dragSurfaceIsEstimated") &&
-                        Vector3.Distance(estimatedPose.position, estimatedContact) < 0.001f && !levelTransition.IsPending,
-                        "An estimated headset drag must follow the grab eye at its original height without waiting on the lower floor.");
+                        hitId != TrackableId.invalidId && !(bool)Get(controller, "dragSurfaceIsEstimated") &&
+                        estimatedPose.position.y < previousContact.y - 0.01f && !levelTransition.IsPending,
+                        "An estimated headset drag must resolve down to the measured floor rather than keep its old air height.");
                 }
                 finally
                 {
@@ -897,7 +903,7 @@ internal static class ARPlacementRegressionChecks
             results.Add("PASS: drag rays reject accidental floor jumps but allow a stable deliberate hold over the lower measured floor");
             results.Add("PASS: the live drag cannot bypass the support hold and lift a component onto a higher plane");
             results.Add("PASS: headset drags follow the grab eye across a tracked tabletop without a height jump and honor its edge");
-            results.Add("PASS: headset drags of estimated placements follow immediately at the original contact height");
+            results.Add("PASS: estimated headset drags resolve down onto measured support instead of retaining a floating height");
 
             controller.StartPreview("Test");
             Set(controller, "placementRequestHasSurface", true);
@@ -959,10 +965,12 @@ internal static class ARPlacementRegressionChecks
                 controller.scaleMultiplier = 0.03f;
                 controller.StartPreview("Shipped");
                 var shippedVisual = (GameObject)Get(controller, "previewVisual");
+                Vector3 normalizedScale = shippedVisual.transform.localScale;
+                Call(controller, "ShowUngroundedPreview");
                 RequirePreviewFramed(camera, shippedVisual);
-                Require(shippedVisual.transform.localScale == Vector3.one * 0.03f &&
+                Require(shippedVisual.transform.localScale == normalizedScale &&
                         !(bool)Get(controller, "canPlace"),
-                    "A real prefab must be visible without resizing it or authorizing an unmeasured placement.");
+                    "A normalized real prefab must stay framed without changing scale again or authorizing startup placement.");
                 controller.ClearPreview();
             }
             results.Add("PASS: shipped lamp, battery and voltmeter stay visibly framed at physical scale on 1080x2400 startup");
@@ -1054,6 +1062,10 @@ internal static class ARPlacementRegressionChecks
     {
         var plane = Child(root, "TrackedPlane_" + id).AddComponent<ARPlane>();
         SetPlaneTracking(plane, id, trackingState, alignment);
+        // SetSessionRelativeData can initialize a fallback boundary. Release it
+        // before injecting the fixture polygon instead of leaking that buffer.
+        var previousBoundary = (NativeArray<Vector2>)Get(plane, "m_Boundary");
+        if (previousBoundary.IsCreated) previousBoundary.Dispose();
         Set(plane, "m_Boundary", new NativeArray<Vector2>(polygon, Allocator.Persistent));
         PlaneDictionary(manager).Add(id, plane);
         return plane;
@@ -1111,7 +1123,15 @@ internal static class ARPlacementRegressionChecks
     }
 
     private static object Get(object instance, string name) => instance.GetType().GetField(name, PrivateInstance).GetValue(instance);
-    private static void Set(object instance, string name, object value) => instance.GetType().GetField(name, PrivateInstance).SetValue(instance, value);
+    private static void Set(object instance, string name, object value)
+    {
+        instance.GetType().GetField(name, PrivateInstance).SetValue(instance, value);
+        if (instance is ButtonInteractor && name == "<CurrentScreenPos>k__BackingField")
+        {
+            typeof(ButtonInteractor).GetField("rawWorldDragPoint", PrivateInstance).SetValue(instance, value);
+            typeof(ButtonInteractor).GetField("hasWorldDragPoint", PrivateInstance).SetValue(instance, true);
+        }
+    }
     private static void Call(object instance, string name, params object[] args) => instance.GetType().GetMethod(name, PrivateInstance).Invoke(instance, args);
     private static void Require(bool condition, string message)
     {

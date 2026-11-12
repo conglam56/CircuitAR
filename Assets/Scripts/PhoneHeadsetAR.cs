@@ -15,7 +15,24 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private static readonly Color32 Violet = new(77, 53, 137, 255);
     private static readonly Color32 Red = new(119, 47, 56, 255);
     private static readonly Color32 Neutral = new(42, 56, 77, 255);
-    private const float MinimumMenuDepth = 0.60f;
+    // The passthrough background comes from one camera. Virtual content must use
+    // that same view; offset virtual eyes alone would detach it from the real table.
+    [SerializeField] private bool cameraAlignedProjection = true;
+    public bool CameraAlignedProjection => cameraAlignedProjection;
+    private const float MinimumMenuDepth = 0.15f;
+    private const float TrackingSettleTime = 0.4f;
+    private bool wasTracking;
+    private float trackingStartedAt;
+    [SerializeField, Range(0.05f, 0.075f)] private float eyeSeparation = 0.060f;
+    [SerializeField, Range(0.60f, 2f)] private float convergenceDistance = PhoneHeadsetStereo.ConvergenceDistance;
+    [SerializeField, Range(-0.24f, 0.24f)] private float imageOffset;
+    private const string ImageOffsetPreference = "PhoneHeadset.ImageOffset";
+    public float ViewScale => 1f - Mathf.Abs(ImageOffset);
+    public float EyeSeparation => Mathf.Clamp(eyeSeparation, 0.05f, 0.075f);
+    public float EyeConvergence => Mathf.Clamp(convergenceDistance, 0.60f, 2f);
+    public float ImageOffset => Mathf.Clamp(imageOffset, -0.24f, 0.24f);
+    private ARCameraManager focusCamera;
+    private bool previousAutoFocus;
 
     private static readonly (string Key, string Label)[] Components =
     {
@@ -29,6 +46,10 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private ButtonInteractor hand;
     private Action returnToMenu;
     private Canvas panel;
+    private UnityEngine.XR.ARFoundation.ARAnchor menuAnchor;
+    private bool menuAnchorPending;
+    private int menuAnchorGeneration;
+    private float nextMenuAnchorAttempt;
     private readonly List<RectTransform> buttons = new();
     private readonly List<Renderer> componentRenderers = new();
     private RectTransform componentToolbar;
@@ -37,10 +58,13 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private GameObject toolbarTarget;
     private RectTransform currentPage;
     private Action pendingMenuAction;
+    private readonly Queue<Action> pendingHandActions = new();
+    private readonly HashSet<RectTransform> inventoryControls = new();
     private RectTransform simulationPage;
     private TextMeshProUGUI simulationStatus;
     private TextMeshProUGUI wireHint;
     private bool previousTapToPlace;
+    private bool previousInstantPlacement;
     private ScreenOrientation previousOrientation;
     private bool previousFullscreen;
     private PhoneHeadsetStereo stereo;
@@ -51,16 +75,32 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private bool isDraggingMenu;
     private bool isHoveringDragHandle;
     private Plane menuDragPlane;
-    private Vector3 menuDragGripOffset;
+    private Vector3 menuDragPanelOffset;
+    private Vector3 menuDragCameraPosition, menuDragStartPosition;
+    private Quaternion menuDragCameraRotation;
+    private bool menuGripPending, menuDragNeedsRelease;
+    private float menuGripStartedAt;
+    private float menuReleaseTimer, menuHandLostAt = float.NegativeInfinity;
+    private ButtonInteractor menuDragHand;
+    private ButtonInteractor controlHand;
+    private readonly Dictionary<RectTransform, ButtonInteractor> controlOwners = new();
 
     public bool IsActive { get; private set; }
     public PhoneHeadsetStereo Stereo => stereo;
     public Vector4 Cursor => hand != null ? hand.GetHeadsetCursor() : Vector4.zero;
+    public Vector4 SecondCursor => hand != null && hand.SecondHand != null ? hand.SecondHand.GetHeadsetCursor() : Vector4.zero;
 
     public void Enter(TapToPlaceController controller, ButtonInteractor interactor, Action onExit)
     {
         if (IsActive) return;
+        RestoreHeadsetPreferences();
         arCamera = GetComponent<Camera>();
+        focusCamera = GetComponent<ARCameraManager>();
+        if (focusCamera != null)
+        {
+            previousAutoFocus = focusCamera.autoFocusRequested;
+            focusCamera.autoFocusRequested = true;
+        }
         placement = controller;
         wires = placement.wireConnectionController != null
             ? placement.wireConnectionController : FindFirstObjectByType<WireConnectionController>();
@@ -68,7 +108,9 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         hand = interactor;
         returnToMenu = onExit;
         previousTapToPlace = placement.enableTapToPlace;
+        previousInstantPlacement = placement.enableInstantPlacement;
         placement.enableTapToPlace = false;
+        placement.enableInstantPlacement = true;
         previousOrientation = Screen.orientation;
         previousFullscreen = Screen.fullScreen;
         if (Application.isMobilePlatform)
@@ -77,6 +119,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
             Screen.orientation = ScreenOrientation.LandscapeLeft;
         }
         hand.SetHeadsetCamera(arCamera);
+        placement.SetSecondHand(hand.CreateSecondHand(arCamera));
         foreach (var canvas in FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
         {
             if (!canvas.enabled || canvas.renderMode == RenderMode.WorldSpace) continue;
@@ -90,6 +133,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private void LateUpdate()
     {
         if (!IsActive) return;
+        while (pendingHandActions.Count > 0 && IsActive) pendingHandActions.Dequeue().Invoke();
         var action = pendingMenuAction;
         pendingMenuAction = null;
         action?.Invoke();
@@ -99,20 +143,33 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         // Use the camera's full viewport for both AR raycasts and hand input.
         // The display pass splits only the final image.
         bool tracking = ARSession.state == ARSessionState.SessionTracking && stereo.IsReady;
-        if (tracking && panel == null) CreatePanel();
-        if (panel != null && panel.gameObject.activeSelf != tracking)
-            panel.gameObject.SetActive(tracking);
+        bool trackingRegained = tracking && !wasTracking;
+        if (trackingRegained) trackingStartedAt = Time.unscaledTime;
+        wasTracking = tracking;
+        bool trackingSettled = tracking && (!Application.isPlaying ||
+            Time.unscaledTime - trackingStartedAt >= TrackingSettleTime);
+        if (trackingSettled && panel == null) CreatePanel();
+        if (panel != null && panel.gameObject.activeSelf != stereo.IsReady)
+            panel.gameObject.SetActive(stereo.IsReady);
 
         if (tracking && panel != null)
         {
+            EnsureMenuWorldAnchor();
             UpdateMenuDrag();
+            // Rotate for readability; world position changes only on an explicit grip drag.
+            FaceMenuTowardViewer();
             UpdateComponentToolbar();
             UpdateWorkStatus();
         }
         else
         {
-            isDraggingMenu = false;
+            CancelMenuGrip();
             isHoveringDragHandle = false;
+            if (panel != null)
+            {
+                FaceMenuTowardViewer();
+                UpdateComponentToolbar();
+            }
         }
     }
 
@@ -120,11 +177,23 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     {
         if (!IsActive) return;
         IsActive = false;
+        menuAnchorGeneration++;
+        menuAnchorPending = false;
+        if (panel != null) panel.transform.SetParent(null, true);
+        if (menuAnchor != null) Destroy(menuAnchor.gameObject);
+        menuAnchor = null;
+        PlayerPrefs.Save();
         pendingMenuAction = null;
+        pendingHandActions.Clear();
+        inventoryControls.Clear();
+        if (focusCamera != null && focusCamera.autoFocusRequested)
+            focusCamera.autoFocusRequested = previousAutoFocus;
+        focusCamera = null;
         if (CircuitSimulationManager.Instance != null)
             CircuitSimulationManager.Instance.SetSimulationMode(false);
-        isDraggingMenu = false;
+        isDraggingMenu = menuGripPending = menuDragNeedsRelease = false;
         isHoveringDragHandle = false;
+        wasTracking = false;
         dragHandleHitbox = null;
         dragHandleVisual = null;
         if (wires != null) wires.IsWireMode = false;
@@ -136,8 +205,14 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         hiddenOverlays.Clear();
         if (hand != null)
         {
+            if (placement != null) placement.SetSecondHand(null);
             hand.SetHeadsetCamera(null);
-            foreach (var button in buttons) hand.UnregisterButton(button);
+            foreach (var button in buttons)
+            {
+                hand.UnregisterButton(button);
+                hand.SecondHand?.UnregisterButton(button);
+            }
+            hand.ReleaseSecondHand();
         }
         if (panel != null)
         {
@@ -150,12 +225,15 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         simulationStatus = null;
         wireHint = null;
         buttons.Clear();
+        controlOwners.Clear();
+        menuDragHand = controlHand = null;
         componentRenderers.Clear();
         componentToolbar = rotateAction = deleteAction = null;
         toolbarTarget = null;
         if (placement != null)
         {
             placement.enableTapToPlace = previousTapToPlace;
+            placement.enableInstantPlacement = previousInstantPlacement;
             placement.CancelPlacement();
         }
         if (Application.isMobilePlatform)
@@ -168,23 +246,82 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
 
     private void OnDisable() => Exit();
 
+    private void OnApplicationFocus(bool focused)
+    {
+        if (!focused && IsActive) PlayerPrefs.Save();
+        if (focused && IsActive && focusCamera != null) focusCamera.autoFocusRequested = true;
+    }
+
+    private void OnApplicationPause(bool paused)
+    {
+        if (paused && IsActive) PlayerPrefs.Save();
+    }
+
+    /// <summary>Đặt menu ngay trước mặt ở khoảng cách hội tụ mắt (vị trí mặc định).</summary>
+    private void PlacePanelInFront()
+    {
+        float distance = EyeConvergence;
+        Vector3 position = arCamera.ViewportToWorldPoint(new Vector3(0.51f, 0.56f, distance));
+        Vector3 rightEdge = arCamera.ViewportToWorldPoint(new Vector3(0.70f, 0.56f, distance));
+        var rect = (RectTransform)panel.transform;
+        rect.SetPositionAndRotation(position, arCamera.transform.rotation);
+        rect.localScale = Vector3.one * (2f * Vector3.Distance(position, rightEdge) / 600f);
+    }
+
+    private async void EnsureMenuWorldAnchor()
+    {
+        if (menuAnchor != null || menuAnchorPending || Time.unscaledTime < nextMenuAnchorAttempt || placement == null) return;
+        var manager = placement.arAnchorManager;
+        if (manager == null || !manager.isActiveAndEnabled || manager.subsystem == null || !manager.subsystem.running) return;
+        menuAnchorPending = true;
+        nextMenuAnchorAttempt = Time.unscaledTime + 2f;
+        int generation = menuAnchorGeneration;
+        var requestedPanel = panel;
+        UnityEngine.XR.ARFoundation.ARAnchor created = null;
+        try
+        {
+            var result = await manager.TryAddAnchorAsync(new Pose(panel.transform.position, panel.transform.rotation));
+            if (result.status.IsSuccess()) created = result.value;
+            float deadline = Time.realtimeSinceStartup + 2f;
+            bool Current() => this != null && IsActive && generation == menuAnchorGeneration && panel == requestedPanel && panel != null;
+            while (created != null && Current() && (created.pending || created.trackingState != UnityEngine.XR.ARSubsystems.TrackingState.Tracking) && Time.realtimeSinceStartup < deadline)
+                await Awaitable.NextFrameAsync();
+            if (created == null || !Current() || created.pending || created.trackingState != UnityEngine.XR.ARSubsystems.TrackingState.Tracking) return;
+            created.gameObject.name = "HeadsetMenuSupport";
+            panel.transform.SetParent(created.transform, true); // Preserve current authored position, including any manual drag.
+            menuAnchor = created;
+            created = null;
+        }
+        catch (Exception ex) { if (this != null) Debug.LogWarning("[HeadsetMenu] World anchor pending: " + ex.Message); }
+        finally
+        {
+            if (created != null) Destroy(created.gameObject);
+            if (this != null && generation == menuAnchorGeneration) menuAnchorPending = false;
+        }
+    }
+
+    private void FaceMenuTowardViewer()
+    {
+        if (isDraggingMenu || menuGripPending) return;
+        Vector3 forward = panel.transform.position - arCamera.transform.position;
+        forward.y = 0f; // Upright board: camera height/pitch must not swing pages down towards the table.
+        if (forward.sqrMagnitude > 0.0001f)
+            panel.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+    }
+
     private void CreatePanel()
     {
-        const float distance = PhoneHeadsetStereo.ConvergenceDistance;
         var root = new GameObject("Headset Controls", typeof(RectTransform), typeof(Canvas));
         panel = root.GetComponent<Canvas>();
         panel.renderMode = RenderMode.WorldSpace;
         panel.worldCamera = arCamera;
 
         // Anchor all pages to the same pose and leave room around the lenses.
-        Vector3 position = arCamera.ViewportToWorldPoint(new Vector3(0.51f, 0.56f, distance));
-        Vector3 rightEdge = arCamera.ViewportToWorldPoint(new Vector3(0.70f, 0.56f, distance));
-        var rect = (RectTransform)root.transform;
-        rect.SetPositionAndRotation(position, arCamera.transform.rotation);
-        rect.localScale = Vector3.one * (2f * Vector3.Distance(position, rightEdge) / 600f);
+        PlacePanelInFront();
 
         // Kích thước các trang lớn, thoáng đãng, các nút to gấp nhiều lần để pinch cực dễ
         var home = CreatePage("MENU", 410f, 160f, 64f);
+        var alignment = CreatePage("CHỈNH KÍNH", 390f, 150f, 64f);
         var toolbox = CreatePage("KHO LINH KIỆN", 510f, 205f, 72f);
         var wireTools = CreatePage("DÂY", 340f, 125f, 64f);
         var connecting = CreateWireWorkPage("Nối dây", wireTools, out var connectHint);
@@ -192,6 +329,16 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         simulationPage = CreateSimulationPage(home);
 
         // --- TRANG MENU CHÍNH (home) ---
+        AddButton(home, "Chỉnh kính", new Vector2(242f, 160f), new Vector2(170f, 56f), Neutral,
+            () => ShowPage(alignment));
+        AddLabel(alignment, "MENU", new Vector2(0f, 79f), new Vector2(500f, 48f), 38f);
+        AddLabel(alignment, "Chỉnh đến khi hai chữ ghép thành một", new Vector2(0f, 32f),
+            new Vector2(650f, 36f), 23f);
+        AddButton(alignment, "Hai ảnh gần nhau", new Vector2(-160f, -35f), new Vector2(292f, 82f), Teal,
+            () => AdjustImageOffset(-0.01f));
+        AddButton(alignment, "Hai ảnh xa nhau", new Vector2(160f, -35f), new Vector2(292f, 82f), Violet,
+            () => AdjustImageOffset(0.01f));
+        AddBackButton(alignment, () => ShowPage(home));
         // Hàng 1 (3 nút chính to lớn): Kho linh kiện, Dây, Thoát kính (Cách tiêu đề 25px thoáng đãng)
         AddButton(home, "Kho linh kiện", new Vector2(-230f, 40f), new Vector2(210f, 126f), Teal,
             () => ShowPage(toolbox), UIIconAssets.GetHeadsetToolboxSprite());
@@ -212,32 +359,32 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         // --- TRANG KHO LINH KIỆN (toolbox) ---
         AddBackButton(toolbox, () =>
         {
-            placement.CancelPlacement();
+            placement.ClearPreview();
             ShowPage(home);
         });
 
         // Nút Hủy đặt to lớn (170x66) bên phải header, cân đối hoàn hảo với Quay lại
         AddButton(toolbox, "Hủy đặt", new Vector2(242f, 205f), new Vector2(170f, 66f), Red, () =>
         {
-            placement.CancelPlacement();
+            placement.ClearPreview();
         });
 
         // Hàng 1: Pin, Đèn, Công tắc (Kích thước to 210x126, cách tiêu đề 54px thoáng đãng, không đè)
         AddButton(toolbox, "Pin", new Vector2(-230f, 52f), new Vector2(210f, 126f), Teal,
-            () => placement.StartPreview("Pin"), UIIconAssets.GetComponentSprite("Pin"));
+            () => placement.StartHandPreview("Pin", controlHand ?? hand), UIIconAssets.GetComponentSprite("Pin"), inventory: true);
 
         AddButton(toolbox, "Đèn", new Vector2(0f, 52f), new Vector2(210f, 126f), Teal,
-            () => placement.StartPreview("Den"), UIIconAssets.GetComponentSprite("Den"));
+            () => placement.StartHandPreview("Den", controlHand ?? hand), UIIconAssets.GetComponentSprite("Den"), inventory: true);
 
         AddButton(toolbox, "Công tắc", new Vector2(230f, 52f), new Vector2(210f, 126f), Teal,
-            () => placement.StartPreview("Cong Tac"), UIIconAssets.GetComponentSprite("Cong Tac"));
+            () => placement.StartHandPreview("Cong Tac", controlHand ?? hand), UIIconAssets.GetComponentSprite("Cong Tac"), inventory: true);
 
         // Hàng 2: Ampe kế, Vôn kế, Hoàn tác, Làm lại (4 nút to 152x120, cách hàng 1 hợp lý)
         AddButton(toolbox, "Ampe kế", new Vector2(-246f, -95f), new Vector2(152f, 120f), Neutral,
-            () => placement.StartPreview("Ampe Ke"), UIIconAssets.GetComponentSprite("Ampe Ke"));
+            () => placement.StartHandPreview("Ampe Ke", controlHand ?? hand), UIIconAssets.GetComponentSprite("Ampe Ke"), inventory: true);
 
         AddButton(toolbox, "Vôn kế", new Vector2(-82f, -95f), new Vector2(152f, 120f), Neutral,
-            () => placement.StartPreview("Von Ke"), UIIconAssets.GetComponentSprite("Von Ke"));
+            () => placement.StartHandPreview("Von Ke", controlHand ?? hand), UIIconAssets.GetComponentSprite("Von Ke"), inventory: true);
 
         AddButton(toolbox, "Hoàn tác", new Vector2(82f, -95f), new Vector2(152f, 120f), Violet,
             OnClickUndo, UIIconAssets.GetUndoSprite());
@@ -272,6 +419,20 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         UpdateDragHandlePosition();
     }
 
+    private void RestoreHeadsetPreferences()
+    {
+        float saved = PlayerPrefs.GetFloat(ImageOffsetPreference, imageOffset);
+        imageOffset = float.IsNaN(saved) || float.IsInfinity(saved) ? 0f : Mathf.Clamp(saved, -0.24f, 0.24f);
+    }
+
+    private void AdjustImageOffset(float delta)
+    {
+        imageOffset = Mathf.Clamp(ImageOffset + delta, -0.24f, 0.24f);
+        PlayerPrefs.SetFloat(ImageOffsetPreference, imageOffset);
+        // Android can kill a background app without calling Exit/OnDestroy.
+        PlayerPrefs.Save();
+    }
+
     private void UpdateDragHandlePosition()
     {
         if (dragHandleHitbox == null || currentPage == null) return;
@@ -279,39 +440,71 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         dragHandleHitbox.anchoredPosition = new Vector2(0f, bottomY);
     }
 
-    internal bool HandleMenuPointer(Vector2 screenPoint, bool pinchStarted, bool overComponentAction)
+    internal bool HandleMenuPointer(Vector2 screenPoint, bool pinchStarted, bool overComponentAction,
+        ButtonInteractor input)
     {
+        input ??= hand;
         if (!IsActive || panel == null || !panel.isActiveAndEnabled || !stereo.IsReady ||
-            ARSession.state != ARSessionState.SessionTracking || !hand.IsHandVisible) return false;
+            ARSession.state != ARSessionState.SessionTracking || !input.IsHandVisible) return false;
 
-        if (!hand.isPinching) isDraggingMenu = false;
+        if ((isDraggingMenu || menuGripPending) && menuDragHand != input) return false;
+        if (!input.isPinching && menuDragHand == input && !isDraggingMenu)
+        {
+            menuGripPending = menuDragNeedsRelease = false;
+        }
+        if (menuDragNeedsRelease && menuDragHand == input) return false;
         if (isDraggingMenu)
         {
-            hand.PinchConsumedByUI = true;
+            input.PinchConsumedByUI = true;
             return true;
         }
 
-        // A new pinch may take over from a released component still in its release grace period.
-        isHoveringDragHandle = !overComponentAction && (!placement.IsDragging || pinchStarted) &&
-            HitsInEitherEye(dragHandleHitbox, screenPoint);
-        if (isHoveringDragHandle && pinchStarted && !hand.PinchConsumedByUI)
+        isHoveringDragHandle = !overComponentAction && HitsInEitherEye(dragHandleHitbox, screenPoint);
+        if (isHoveringDragHandle && pinchStarted && !input.PinchConsumedByUI)
         {
-            hand.PinchConsumedByUI = true;
-            Vector3 forward = arCamera.transform.forward;
-            float depth = Vector3.Dot(panel.transform.position - arCamera.transform.position, forward);
-            Vector3 grip = dragHandleHitbox.position + forward * Mathf.Max(0f, MinimumMenuDepth - depth);
-            menuDragPlane = new Plane(forward, grip);
-            Ray ray = arCamera.ScreenPointToRay(screenPoint);
-            if (menuDragPlane.Raycast(ray, out float distance))
+            input.PinchConsumedByUI = true;
+            menuDragHand = input;
+            menuDragNeedsRelease = false;
+            menuGripPending = true;
+            menuReleaseTimer = 0f;
+            menuHandLostAt = float.NegativeInfinity;
+            menuGripStartedAt = Time.unscaledTime;
+            menuDragCameraPosition = arCamera.transform.position;
+            menuDragCameraRotation = arCamera.transform.rotation;
+            menuDragStartPosition = panel.transform.position;
+        }
+        if (menuGripPending && menuDragHand == input)
+        {
+            input.PinchConsumedByUI = true;
+            if (!input.isPinching) CancelMenuGrip();
+            else
             {
-                menuDragGripOffset = grip - ray.GetPoint(distance);
-                isDraggingMenu = true;
+                Vector3 forward = menuDragCameraRotation * Vector3.forward;
+                if (Vector3.Dot(panel.transform.position - arCamera.transform.position, forward) < MinimumMenuDepth)
+                    CancelMenuGrip();
+                else
+                {
+                    // Freeze the panel center's plane and grab offset. Neither the
+                    // viewport edges nor a moving handle may pull it towards the eyes.
+                    menuDragPlane = new Plane(forward, panel.transform.position);
+                    Ray ray = arCamera.ScreenPointToRay(screenPoint);
+                    if (menuDragPlane.Raycast(ray, out float distance))
+                    {
+                        menuDragPanelOffset = panel.transform.position - ray.GetPoint(distance);
+                        menuGripPending = false;
+                        isDraggingMenu = true;
+                    }
+                    else CancelMenuGrip();
+                }
             }
+            return true;
         }
         return isHoveringDragHandle;
     }
 
-    private bool HitsInEitherEye(RectTransform rect, Vector2 screenPoint, Vector2 padding = default)
+    internal bool IsHeadsetControl(RectTransform rect) => panel != null && rect.IsChildOf(panel.transform);
+
+    internal bool HitsInEitherEye(RectTransform rect, Vector2 screenPoint, Vector2 padding = default)
     {
         var plane = new Plane(rect.forward, rect.position);
         Rect area = rect.rect;
@@ -327,39 +520,70 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         return false;
     }
 
+    private void CancelMenuGrip()
+    {
+        isDraggingMenu = menuGripPending = false;
+        menuDragNeedsRelease = true;
+    }
+
     private void UpdateMenuDrag()
     {
-        if (!hand.IsHandVisible || !hand.isPinching) isDraggingMenu = false;
-        if (isDraggingMenu) MoveMenu(hand.CurrentScreenPos, Time.unscaledDeltaTime);
+        if ((isDraggingMenu || menuGripPending) && menuDragHand != null)
+        {
+            if (!menuDragHand.IsHandVisible)
+            {
+                if (float.IsNegativeInfinity(menuHandLostAt)) menuHandLostAt = Time.unscaledTime;
+                if (Time.unscaledTime - menuHandLostAt > 0.18f) CancelMenuGrip();
+            }
+            else if (!menuDragHand.isPinching)
+            {
+                menuReleaseTimer += Mathf.Min(Time.unscaledDeltaTime, 0.05f);
+                if (menuReleaseTimer > 0.14f) CancelMenuGrip();
+            }
+            else
+            {
+                menuHandLostAt = float.NegativeInfinity;
+                menuReleaseTimer = 0f;
+                if (isDraggingMenu) MoveMenu(menuDragHand.CurrentScreenPos, Time.unscaledDeltaTime);
+            }
+        }
+        if (menuDragHand != null && menuDragHand.IsHandVisible && !menuDragHand.isPinching && !isDraggingMenu)
+            menuDragNeedsRelease = false;
 
         bool hovered = isHoveringDragHandle && hand.IsHandVisible;
         dragHandleVisual.color = isDraggingMenu ? new Color32(100, 220, 255, 255) :
             hovered ? new Color32(220, 247, 255, 255) : new Color32(255, 255, 255, 215);
     }
 
+    internal void NotifyControlHand(ButtonInteractor input) => controlHand = input;
+
+    internal bool CanResetControl(RectTransform rect, ButtonInteractor input)
+    {
+        if (inventoryControls.Contains(rect) || !IsHeadsetControl(rect) || !controlOwners.TryGetValue(rect, out var owner) || owner == input) return true;
+        return owner == null || !owner.isActiveAndEnabled || (!owner.isPinching && !owner.IsGestureTemporarilyOccluded);
+    }
+
+    internal bool CanProcessControl(RectTransform rect, ButtonInteractor input) =>
+        !IsHeadsetControl(rect) || (ARSession.state == ARSessionState.SessionTracking &&
+        (!(isDraggingMenu || menuGripPending) || menuDragHand == input) && CanResetControl(rect, input));
+
+    internal void ClaimControl(RectTransform rect, ButtonInteractor input) => controlOwners[rect] = input;
+
     private void MoveMenu(Vector2 screenPoint, float deltaTime)
     {
+        if (!isDraggingMenu) return;
+        bool poseJumped = Vector3.Distance(arCamera.transform.position, menuDragCameraPosition) > 0.25f ||
+            Quaternion.Angle(arCamera.transform.rotation, menuDragCameraRotation) > 35f;
+        menuDragCameraPosition = arCamera.transform.position;
+        menuDragCameraRotation = arCamera.transform.rotation;
+        if (poseJumped) return; // Freeze one bad tracking frame, retain the captured gesture.
         Ray ray = arCamera.ScreenPointToRay(screenPoint);
         if (!menuDragPlane.Raycast(ray, out float distance)) return;
-
-        // Keep both the free drag and its viewport limits on the same world plane.
-        Vector3 grip = ray.GetPoint(distance) + menuDragGripOffset;
-        Vector3 viewport = arCamera.WorldToViewportPoint(grip);
-        if (viewport.z <= arCamera.nearClipPlane) return;
-        var bounded = new Vector2(Mathf.Clamp(viewport.x, 0.32f, 0.68f), Mathf.Clamp(viewport.y, 0.16f, 0.84f));
-        if (bounded != (Vector2)viewport)
-        {
-            Ray boundedRay = arCamera.ViewportPointToRay(bounded);
-            if (!menuDragPlane.Raycast(boundedRay, out distance)) return;
-            grip = boundedRay.GetPoint(distance);
-        }
-
         Vector3 position = panel.transform.position;
-        Vector3 desired = grip - (dragHandleHitbox.position - position);
-        if (arCamera.WorldToViewportPoint(desired).z < MinimumMenuDepth - 0.001f) return;
+        Vector3 desired = ray.GetPoint(distance) + menuDragPanelOffset;
+        if (arCamera.WorldToViewportPoint(desired).z < MinimumMenuDepth) return;
         deltaTime = Mathf.Min(deltaTime, 0.05f);
-        Vector3 smoothed = Vector3.Lerp(position, desired, 1f - Mathf.Exp(-24f * deltaTime));
-        panel.transform.position = Vector3.MoveTowards(position, smoothed, 2f * deltaTime);
+        panel.transform.position = Vector3.MoveTowards(position, desired, 2.5f * deltaTime);
     }
 
     private void CreateComponentToolbar()
@@ -415,8 +639,9 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private bool CanEditComponent()
     {
         return IsActive && stereo?.IsReady == true && ARSession.state == ARSessionState.SessionTracking && !isDraggingMenu &&
-            placement != null && !placement.IsDragging && placement.CurrentPrefabToPlace == null &&
+            placement != null && !placement.HasAnyPreview &&
             placement.SelectedComponent != null && placement.SelectedComponent.activeInHierarchy &&
+            !placement.IsObjectBeingDragged(placement.SelectedComponent) &&
             (wires == null || !wires.IsWireMode) && CircuitSimulationManager.Instance?.isSimulationMode != true;
     }
 
@@ -519,7 +744,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
     private void StartWireMode(WireConnectionController.WireSubMode mode, RectTransform page, TextMeshProUGUI hint)
     {
         if (wires == null) return;
-        placement.CancelPlacement();
+        placement.ClearPreview();
         wires.SetWireSubMode(mode);
         ShowPage(page);
         wireHint = hint;
@@ -606,7 +831,7 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
             new Vector2(276f, 78f), Header, action);
 
     private Button AddButton(RectTransform parent, string caption, Vector2 position, Vector2 size, Color color,
-        Action action, Sprite glyph = null)
+        Action action, Sprite glyph = null, bool inventory = false)
     {
         var rect = CreateSurface(caption, parent, position, size, color);
         var background = rect.GetComponent<Image>();
@@ -615,9 +840,16 @@ public sealed class PhoneHeadsetAR : MonoBehaviour
         button.targetGraphic = background;
         button.transition = Selectable.Transition.None;
         // Apply page and mode changes after all pinch consumers have processed this frame.
-        if (action != null) button.onClick.AddListener(() => pendingMenuAction = action);
+        if (action != null) button.onClick.AddListener(() =>
+        {
+            ButtonInteractor input = controlHand ?? hand;
+            if (inventory) pendingHandActions.Enqueue(() => { controlHand = input; action(); });
+            else if (pendingMenuAction == null) pendingMenuAction = () => { controlHand = input; action(); };
+        });
+        if (inventory) inventoryControls.Add(rect);
         buttons.Add(rect);
         hand.RegisterButton(rect);
+        hand.SecondHand?.RegisterButton(rect);
 
         if (glyph != null)
         {

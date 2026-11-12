@@ -181,6 +181,7 @@ internal static class ARDragUsabilityRegressionChecks
             controller.SelectComponent(near);
             CheckEmptyPinchDeselect(controller, near, emptyCorner);
             results.Add("PASS: a pinch inside projected bounds but outside the actual mesh does not grab the component");
+            CheckTwoHands(controller, camera, near, far, results);
         }
         finally
         {
@@ -195,6 +196,78 @@ internal static class ARDragUsabilityRegressionChecks
                 }
             }
             EditorSceneManager.ClosePreviewScene(scene);
+        }
+    }
+
+    private static void CheckTwoHands(TapToPlaceController controller, Camera camera,
+        GameObject leftObject, GameObject rightObject, List<string> results)
+    {
+        var primary = controller.buttonInteractor;
+        var secondary = Child(controller.gameObject, "SecondHandFixture").AddComponent<ButtonInteractor>();
+        secondary.interactiveButtons = new List<RectTransform>();
+        controller.SetSecondHand(secondary);
+        leftObject.transform.localPosition = new Vector3(-0.3f, 0f, 2f);
+        rightObject.transform.localPosition = new Vector3(0.3f, 0f, 2f);
+        leftObject.transform.localRotation = Quaternion.identity;
+        rightObject.SetActive(true);
+        Vector2 leftPoint = camera.WorldToScreenPoint(leftObject.transform.position);
+        Vector2 rightPoint = camera.WorldToScreenPoint(rightObject.transform.position);
+        var operation = typeof(TapToPlaceController).GetNestedType("HandOperation", BindingFlags.NonPublic);
+        void Second(string name) => Call(controller, "ProcessSecondHand", Enum.Parse(operation, name));
+        try
+        {
+            Set(controller, "cooldownTimer", 0f);
+            SetInput(primary, true, true, true);
+            Set(primary, "<CurrentScreenPos>k__BackingField", leftPoint);
+            Call(controller, "HandleDragAndDrop");
+            SetInput(secondary, true, true, true);
+            Set(secondary, "<CurrentScreenPos>k__BackingField", rightPoint);
+            Second("Drag");
+            Require(controller.IsObjectBeingDragged(leftObject) && controller.IsObjectBeingDragged(rightObject) &&
+                controller.buttonInteractor == primary,
+                "Both hands must retain independent object ownership and restore the primary context.");
+            Require(leftObject.GetComponent<Renderer>().sharedMaterial == rightObject.GetComponent<Renderer>().sharedMaterial,
+                "Both held objects must retain their selection feedback.");
+            results.Add("PASS: two hands hold separate components simultaneously with separate drag contexts and highlights");
+
+            SetInput(secondary, false, false, false);
+            Second("Drag");
+            object state = Get(controller, "secondDrag");
+            state.GetType().GetField("dragHandLostAt").SetValue(state, Time.unscaledTime - 0.36f);
+            Second("Drag");
+            Require(controller.IsObjectBeingDragged(leftObject) && !controller.IsObjectBeingDragged(rightObject),
+                "Losing the second hand must release only its own component.");
+            results.Add("PASS: losing one hand releases its component without dropping the other hand's object");
+
+            SetInput(secondary, true, true, true);
+            Set(secondary, "<CurrentScreenPos>k__BackingField", leftPoint);
+            Second("Drag");
+            Require(controller.IsObjectBeingDragged(leftObject) && !(bool)state.GetType().GetField("isDragging").GetValue(state),
+                "A second hand must not steal the first hand's component.");
+            Set(secondary, "<PinchConsumedByUI>k__BackingField", true);
+            Second("Drag");
+            controller.wireConnectionController.isWireMode = true;
+            SetInput(primary, true, true, false);
+            Call(controller, "HandleDragAndDrop");
+            Require(controller.IsObjectBeingDragged(leftObject),
+                "UI input and entering wire mode with the second hand must preserve the first hand's drag.");
+            results.Add("PASS: a held component cannot be stolen and survives the other hand using UI or entering wire mode");
+
+            Set(controller, "previewInput", secondary);
+            SetInput(primary, true, false, false);
+            SetInput(secondary, true, true, false);
+            Require((bool)typeof(TapToPlaceController).GetMethod("IsWorldPinchHeld", PrivateInstance).Invoke(controller, null),
+                "Async placement must continue to read the preview owner's gesture after restoring the primary context.");
+            Set(controller, "previewInput", null);
+            results.Add("PASS: pending placement uses its owning hand independently of the active drag context");
+        }
+        finally
+        {
+            controller.wireConnectionController.isWireMode = false;
+            controller.CancelPlacement();
+            controller.SetSecondHand(null);
+            controller.ClearSelectedComponent();
+            UnityEngine.Object.DestroyImmediate(secondary.gameObject);
         }
     }
 
@@ -215,10 +288,30 @@ internal static class ARDragUsabilityRegressionChecks
         try
         {
             Set(headset, "stereo", stereo);
+            Set(headset, "cameraAlignedProjection", false); // Retain coverage of the optional geometric stereo helpers.
+            Set(headset, "eyeSeparation", 0.064f);
+            Set(headset, "convergenceDistance", 1.2f);
+            Vector3 convergencePoint = camera.transform.TransformPoint(new Vector3(0.08f, 0.03f, 1.2f));
+            Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, convergencePoint, false, out Vector2 leftAtConvergence) &&
+                PhoneHeadsetStereo.TryProjectIntoEye(camera, convergencePoint, true, out Vector2 rightAtConvergence) &&
+                Vector2.Distance(leftAtConvergence, rightAtConvergence) < 0.01f,
+                "Both eyes must meet at the configured convergence depth without vertical disparity.");
+            Require(Mathf.Approximately(headset.ViewScale, 1f), "The default headset image must use the reduced view scale.");
+            Set(headset, "eyeSeparation", 0.060f);
+            Set(headset, "convergenceDistance", PhoneHeadsetStereo.ConvergenceDistance);
+            results.Add("PASS: headset eye projections honor configurable separation and convergence and default to a smaller image");
             Require(stereo.IsReady && camera.cullingMask == 0,
                 "The fixture must exercise headset rendering with the source camera's object layers masked out.");
+            Matrix4x4 fitted = PhoneHeadsetStereo.MakeEyeProjection(camera.projectionMatrix, 0f, false);
+            float focalPixelsX = landscape.width * 0.5f * fitted.m00;
+            float focalPixelsY = landscape.height * fitted.m11;
+            Require(Mathf.Abs(focalPixelsX - focalPixelsY) < 0.01f &&
+                Mathf.Abs(fitted.m11 * PhoneHeadsetStereo.SceneFieldScale - camera.projectionMatrix.m11) < 0.0001f,
+                "The widened SBS view must reduce magnification equally in both axes without changing eye-frame aspect.");
+            results.Add("PASS: full-height SBS eye coverage preserves pixel aspect without the shrunken letterbox eye frame");
             var input = controller.buttonInteractor;
             input.SetHeadsetCamera(camera);
+            Require(input.minStablePinchFrames == 1, "Headset gestures must not wait for a second slow inference result.");
             Vector2 center = camera.WorldToScreenPoint(near.transform.position);
             SetInput(input, visible: true, pinching: true, justPinched: true);
             Set(input, "<CurrentScreenPos>k__BackingField", center);
@@ -239,6 +332,17 @@ internal static class ARDragUsabilityRegressionChecks
                 controller.SelectComponent(near);
                 CheckEmptyPinchDeselect(controller, near, edgePointer);
             }
+            Set(headset, "cameraAlignedProjection", true);
+            foreach (float depth in new[] { 0.3f, 0.85f, 1.5f })
+            {
+                Vector3 contact = camera.transform.TransformPoint(new Vector3(0.02f, 0.01f, depth));
+                Vector2 sourcePoint = camera.WorldToScreenPoint(contact);
+                Require(PhoneHeadsetStereo.TryProjectIntoEye(camera, contact, false, out Vector2 left) &&
+                    PhoneHeadsetStereo.TryProjectIntoEye(camera, contact, true, out Vector2 right) &&
+                    Vector2.Distance(left, sourcePoint) < 0.01f && Vector2.Distance(right, sourcePoint) < 0.01f,
+                    "Phone passthrough must keep both virtual-eye projections registered to the single source camera at every contact depth.");
+            }
+            results.Add("PASS: phone passthrough aligns virtual content with the real camera in both eyes at near and far support depths");
             CheckHeadsetMenu(headset, controller, camera, near, results);
             input.SetHeadsetCamera(null);
         }
@@ -266,21 +370,83 @@ internal static class ARDragUsabilityRegressionChecks
         Set(headset, "<IsActive>k__BackingField", true);
         try
         {
+            var focusObject = new GameObject("HeadsetFocusFixture");
+            focusObject.SetActive(false);
+            focusObject.transform.SetParent(camera.transform, false);
+            var focus = focusObject.AddComponent<ARCameraManager>();
+            focus.autoFocusRequested = false;
+            Set(headset, "focusCamera", focus);
+            Call(headset, "OnApplicationFocus", true);
+            Require(focus.autoFocusRequested, "Returning to headset mode must request camera autofocus.");
+            Set(headset, "focusCamera", null);
+            UnityEngine.Object.DestroyImmediate(focusObject);
+            results.Add("PASS: headset focus recovery requests autofocus on the physical AR camera");
             Call(headset, "CreatePanel");
             var panel = (Canvas)Get(headset, "panel");
             SceneManager.MoveGameObjectToScene(panel.gameObject, camera.gameObject.scene);
             Require(panel.transform.Find("MENU").Find("Căn trước mặt") == null,
                 "The headset home page must not include a recenter button.");
+            const string alignmentKey = "PhoneHeadset.ImageOffset";
+            bool hadAlignment = PlayerPrefs.HasKey(alignmentKey);
+            float savedAlignment = PlayerPrefs.GetFloat(alignmentKey);
+            const string scaleKey = "PhoneHeadset.ViewScale";
+            bool hadScale = PlayerPrefs.HasKey(scaleKey);
+            float savedScale = PlayerPrefs.GetFloat(scaleKey);
+            try
+            {
+                panel.transform.Find("MENU").Find("Chỉnh kính").GetComponent<Button>().onClick.Invoke();
+                Call(headset, "LateUpdate");
+                var alignment = (RectTransform)Get(headset, "currentPage");
+                Require(alignment.name == "CHỈNH KÍNH", "The headset alignment page must be reachable from the menu.");
+                alignment.Find("Hai ảnh gần nhau").GetComponent<Button>().onClick.Invoke();
+                Call(headset, "LateUpdate");
+                Require(Mathf.Abs(headset.ImageOffset + 0.01f) < 0.0001f &&
+                    Mathf.Abs(PlayerPrefs.GetFloat(alignmentKey) - headset.ImageOffset) < 0.0001f,
+                    "The inward alignment step must update and remember the image offset.");
+                Require(alignment.Find("Cảnh nhỏ hơn") == null && alignment.Find("Cảnh lớn hơn") == null,
+                    "Manual scene sizing must be removed from headset controls.");
+                PlayerPrefs.SetFloat(scaleKey, 0.65f); // Old installations may still contain this setting.
+                var reopened = Child(controller.gameObject, "ReopenedHeadsetPreferences").AddComponent<PhoneHeadsetAR>();
+                try
+                {
+                    Call(headset, "OnApplicationPause", true);
+                    Call(headset, "OnApplicationFocus", false);
+                    Call(reopened, "RestoreHeadsetPreferences");
+                    Require(Mathf.Abs(reopened.ViewScale - headset.ViewScale) < 0.0001f &&
+                        Mathf.Abs(reopened.ImageOffset - headset.ImageOffset) < 0.0001f,
+                        "A new headset session must restore alignment even before the old session exits VR.");
+                    results.Add("PASS: headset preferences restore in a new session after backgrounding without exiting VR");
+                }
+                finally { UnityEngine.Object.DestroyImmediate(reopened.gameObject); }
+                results.Add("PASS: automatic view fitting ignores obsolete scale preferences and manual size controls are absent");
+                alignment.Find("Hai ảnh xa nhau").GetComponent<Button>().onClick.Invoke();
+                Call(headset, "LateUpdate");
+                Require(Mathf.Abs(headset.ImageOffset) < 0.0001f,
+                    "The outward alignment step must reverse the inward step.");
+                alignment.Find("Quay lại").GetComponent<Button>().onClick.Invoke();
+                Call(headset, "LateUpdate");
+                results.Add("PASS: headset image alignment can be adjusted inward and outward on-device and is remembered");
+            }
+            finally
+            {
+                if (hadAlignment) PlayerPrefs.SetFloat(alignmentKey, savedAlignment);
+                else PlayerPrefs.DeleteKey(alignmentKey);
+                if (hadScale) PlayerPrefs.SetFloat(scaleKey, savedScale);
+                else PlayerPrefs.DeleteKey(scaleKey);
+                PlayerPrefs.Save();
+            }
             var toolbar = (RectTransform)Get(headset, "componentToolbar");
             var rotate = ((RectTransform)Get(headset, "rotateAction")).GetComponent<Button>();
             var delete = ((RectTransform)Get(headset, "deleteAction")).GetComponent<Button>();
             Require(!toolbar.gameObject.activeSelf && toolbar.parent == panel.transform,
                 "The headset must have one contextual toolbar, independent of the menu pages.");
             controller.SelectComponent(component);
+            Set(controller, "draggedObject", component);
             Set(controller, "isDragging", true);
             Call(headset, "LateUpdate");
             Require(!toolbar.gameObject.activeSelf, "The toolbar must stay hidden while moving the selected component.");
             Set(controller, "isDragging", false);
+            Set(controller, "draggedObject", null);
             Call(headset, "LateUpdate");
             Require(toolbar.gameObject.activeSelf &&
                 camera.WorldToViewportPoint(toolbar.position).y > camera.WorldToViewportPoint(component.transform.position).y,
@@ -354,7 +520,11 @@ internal static class ARDragUsabilityRegressionChecks
                 "Undo must restore both a headset deletion and a headset rotation.");
             results.Add("PASS: headset Rotate and held Delete use the shared undo history and a brief pinch cannot delete");
 
+            CheckTwoHandInventory(headset, controller, camera, results);
             var grip = (RectTransform)Get(headset, "dragHandleHitbox");
+            // Menu mặc định cố định; bật kéo để kiểm tra riêng cơ chế kéo menu
+            Require(grip.gameObject.activeInHierarchy, "The menu drag bar must be visible by default.");
+            grip.gameObject.SetActive(true);
             panel.transform.position += camera.ViewportToWorldPoint(new Vector3(0.5f, 0.34f, 0.68f)) - grip.position;
             Vector2 GripPointer()
             {
@@ -367,18 +537,21 @@ internal static class ARDragUsabilityRegressionChecks
 
             var handlePointer = typeof(PhoneHeadsetAR).GetMethod("HandleMenuPointer", PrivateInstance);
             bool PointAtGrip(Vector2 point, bool pinchStarted) =>
-                (bool)handlePointer.Invoke(headset, new object[] { point, pinchStarted, false });
+                (bool)handlePointer.Invoke(headset, new object[] { point, pinchStarted, false, input });
 
+            // A fresh grip must also work after startup tracking was unavailable.
+            Set(headset, "menuDragNeedsRelease", true);
             Vector2 edgePointer = GripPointer();
-            Require(!RectTransformUtility.RectangleContainsScreenPoint(grip, edgePointer, camera),
-                "The grip fixture must be outside the center-camera hit box.");
+            Require(RectTransformUtility.RectangleContainsScreenPoint(grip, edgePointer, camera),
+                "The camera-aligned grip edge must match its visible source-camera hit box.");
             SetInput(input, visible: true, pinching: true, justPinched: false);
             Require(PointAtGrip(edgePointer, false) && !input.PinchConsumedByUI && !(bool)Get(headset, "isDraggingMenu"),
                 "Sliding an already held pinch over the grip must not start a menu drag.");
 
             Set(controller, "currentPrefabToPlace", component);
             Require(PointAtGrip(edgePointer, true) && input.PinchConsumedByUI && (bool)Get(headset, "isDraggingMenu"),
-                "A fresh pinch on the stereo grip must claim the gesture even while a preview is open.");
+                "A fresh pinch precisely on the grip must capture it immediately without repeated dwell attempts.");
+
             Call(headset, "LateUpdate");
             var bar = (Image)Get(headset, "dragHandleVisual");
             Require(((Color32)bar.color).Equals(new Color32(100, 220, 255, 255)),
@@ -396,19 +569,42 @@ internal static class ARDragUsabilityRegressionChecks
             {
                 camera.transform.position += camera.transform.forward * 0.18f;
                 Call(headset, "MoveMenu", edgePointer + Vector2.left * 100f, 0.05f);
-                Require(panel.transform.position == movedPanel,
-                    "An active drag must pause if head movement brings its plane too close.");
+                Require((bool)Get(headset, "isDraggingMenu") &&
+                    Mathf.Abs(((Plane)Get(headset, "menuDragPlane")).GetDistanceToPoint(panel.transform.position)) < 0.001f,
+                    "A modest head translation must not interrupt dragging; the menu must stay on its captured world plane.");
             }
             finally { camera.transform.position = cameraStart; }
 
             SetInput(input, visible: true, pinching: false, justPinched: false);
+            Set(headset, "menuReleaseTimer", 0f);
             Call(headset, "LateUpdate");
-            Require(!(bool)Get(headset, "isDraggingMenu"), "Releasing the pinch must release the menu.");
+            Require((bool)Get(headset, "isDraggingMenu"), "A one-frame pinch fluctuation must not interrupt menu dragging.");
+            Set(headset, "menuReleaseTimer", 0.15f);
+            Call(headset, "LateUpdate");
+            Require(!(bool)Get(headset, "isDraggingMenu"), "A sustained open hand must release the menu.");
             SetInput(input, visible: true, pinching: true, justPinched: false);
-            Require(PointAtGrip(GripPointer(), true) && (bool)Get(headset, "isDraggingMenu"),
-                "A quick second pinch must grab the handle again.");
-            results.Add("PASS: headset grip captures an eye-projected edge before world gestures and supports quick regrabs");
+            Vector2 nextGrip = GripPointer();
+            Require(PointAtGrip(nextGrip, true) && (bool)Get(headset, "isDraggingMenu"),
+                "A quick second pinch must immediately resume menu dragging.");
+            Quaternion beforeHeadRotation = camera.transform.rotation;
+            camera.transform.rotation = Quaternion.Euler(0f, 15f, 0f) * beforeHeadRotation;
+            Call(headset, "LateUpdate");
+            Require((bool)Get(headset, "isDraggingMenu") &&
+                Mathf.Abs(((Plane)Get(headset, "menuDragPlane")).GetDistanceToPoint(panel.transform.position)) < 0.001f,
+                "Ordinary head movement must retain the grip and its fixed world plane.");
+            Vector3 beforeMissingHand = panel.transform.position;
+            SetInput(input, visible: false, pinching: true, justPinched: false);
+            Set(headset, "menuHandLostAt", Time.unscaledTime - 0.1f);
+            Call(headset, "LateUpdate");
+            Require((bool)Get(headset, "isDraggingMenu") && panel.transform.position == beforeMissingHand,
+                "A brief lost hand sample must freeze the menu without dropping the grip.");
+            SetInput(input, visible: true, pinching: true, justPinched: false);
+            camera.transform.rotation = beforeHeadRotation;
+            Call(headset, "LateUpdate");
+            Require((bool)Get(headset, "isDraggingMenu"), "The same held gesture must resume after a short occlusion.");
+            results.Add("PASS: menu dragging captures immediately, tolerates ordinary head motion and resumes after brief hand loss");
             SetInput(input, visible: true, pinching: false, justPinched: false);
+            Set(headset, "menuReleaseTimer", 0.15f);
             Call(headset, "LateUpdate");
             Vector3 releasedPanel = panel.transform.position;
             try
@@ -416,12 +612,84 @@ internal static class ARDragUsabilityRegressionChecks
                 camera.transform.position += camera.transform.up * 0.2f;
                 Call(headset, "ShowPage", (RectTransform)panel.transform.Find("KHO LINH KIỆN"));
                 Call(headset, "LateUpdate");
-                Require(panel.transform.position == releasedPanel &&
-                    Quaternion.Angle(panelRotation, panel.transform.rotation) < 0.01f,
-                    "Changing to a taller page near the lens edge must keep the released menu at the same world pose.");
+                Require(panel.transform.position == releasedPanel,
+                    "Changing to a taller page must keep the released menu at the same world position.");
+                foreach (Vector3 side in new[] { Vector3.right, Vector3.left, Vector3.forward })
+                {
+                    camera.transform.position = releasedPanel + side;
+                    Call(headset, "FaceMenuTowardViewer");
+                    Require(panel.transform.position == releasedPanel &&
+                        Vector3.Dot(panel.transform.forward, Vector3.ProjectOnPlane(releasedPanel - camera.transform.position, Vector3.up).normalized) > 0.999f,
+                        "The menu must face a viewer at either side or behind it while staying in place.");
+                    Quaternion beforeRoll = camera.transform.rotation;
+                    camera.transform.rotation *= Quaternion.Euler(0f, 0f, 70f);
+                    Call(headset, "FaceMenuTowardViewer");
+                    Require(panel.transform.position == releasedPanel && Vector3.Dot(panel.transform.up, Vector3.up) > 0.999f,
+                        "Rolling/removing the phone must not roll the menu with the headset.");
+                    camera.transform.rotation = beforeRoll;
+                }
             }
             finally { camera.transform.position = cameraStart; }
-            results.Add("PASS: the headset menu drags at fixed depth, pauses close to the camera and keeps its pose across pages");
+            results.Add("PASS: the headset menu keeps its world position and faces viewers at either side or behind it");
+            var stateField = typeof(ARSession).GetField("s_State", PrivateStatic);
+            stateField.SetValue(null, ARSessionState.SessionInitializing);
+            Call(headset, "LateUpdate");
+            Require(panel.gameObject.activeSelf, "A temporary AR tracking loss must not hide the headset menu.");
+            stateField.SetValue(null, ARSessionState.SessionTracking);
+            Call(headset, "LateUpdate"); // Let the current tracking-recovery policy settle first.
+            Vector3 fixedMenuPosition = panel.transform.position;
+            Quaternion originalCameraRotation = camera.transform.rotation;
+            try
+            {
+                // Look away, turn around, and move to either side without gripping.
+                foreach (float yaw in new[] { 90f, 180f, 270f, 0f })
+                {
+                    camera.transform.rotation = Quaternion.Euler(0f, yaw, 0f) * originalCameraRotation;
+                    Vector3 walkStart = camera.transform.position;
+                    Vector3 walkEnd = cameraStart + camera.transform.right * 0.5f;
+                    for (int frame = 1; frame <= 20; frame++)
+                    {
+                        camera.transform.position = Vector3.Lerp(walkStart, walkEnd, frame / 20f);
+                        Call(headset, "LateUpdate");
+                    }
+                    Require(panel.transform.position == fixedMenuPosition && !panel.transform.IsChildOf(camera.transform),
+                        $"Head rotation and walking must never recenter a released menu into the user's gaze. expected={fixedMenuPosition:F6}; actual={panel.transform.position:F6}; dragging={Get(headset, "isDraggingMenu")}; parent={panel.transform.parent}");
+                }
+                stateField.SetValue(null, ARSessionState.SessionInitializing);
+                Call(headset, "LateUpdate");
+                stateField.SetValue(null, ARSessionState.SessionTracking);
+                Call(headset, "LateUpdate");
+                Require(panel.transform.position == fixedMenuPosition,
+                    "Tracking recovery while looking down must not drop the menu onto the table in front of the user.");
+                camera.transform.rotation = Quaternion.Euler(70f, 0f, 0f);
+                camera.transform.position = fixedMenuPosition + Vector3.up * 0.2f;
+                stateField.SetValue(null, ARSessionState.SessionInitializing);
+                Call(headset, "LateUpdate");
+                stateField.SetValue(null, ARSessionState.SessionTracking);
+                Call(headset, "LateUpdate");
+                Require(panel.transform.position == fixedMenuPosition,
+                    "Approaching the menu and looking down during recovery must never trigger automatic relocation.");
+                results.Add("PASS: headset menu keeps its world position through walking, approaching, looking down and tracking recovery");
+            }
+            finally
+            {
+                camera.transform.SetPositionAndRotation(cameraStart, originalCameraRotation);
+                stateField.SetValue(null, ARSessionState.SessionTracking);
+            }
+            var other = Child(controller.gameObject, "OtherMenuHand").AddComponent<ButtonInteractor>();
+            other.interactiveButtons = new List<RectTransform>();
+            try
+            {
+                SetInput(input, true, true, false);
+                input.enabled = true;
+                Call(headset, "ClaimControl", grip, input);
+                Require(!(bool)typeof(PhoneHeadsetAR).GetMethod("CanProcessControl", PrivateInstance).Invoke(headset, new object[] { grip, other }), "The other hand cannot reset an owned UI hold.");
+                SetInput(input, true, false, false);
+                Require((bool)typeof(PhoneHeadsetAR).GetMethod("CanProcessControl", PrivateInstance).Invoke(headset, new object[] { grip, other }), "A released UI control must be available to the other hand.");
+                results.Add("PASS: UI control ownership prevents cross-hand hold resets and permits takeover after release");
+            }
+            finally { input.enabled = false; UnityEngine.Object.DestroyImmediate(other.gameObject); }
+
         }
         finally
         {
@@ -430,6 +698,151 @@ internal static class ARDragUsabilityRegressionChecks
             foreach (var button in (List<RectTransform>)Get(headset, "buttons")) input.UnregisterButton(button);
             var panel = (Canvas)Get(headset, "panel");
             if (panel != null) UnityEngine.Object.DestroyImmediate(panel.gameObject);
+        }
+    }
+
+    private static void CheckTwoHandInventory(PhoneHeadsetAR headset, TapToPlaceController controller,
+        Camera camera, List<string> results)
+    {
+        var primary = controller.buttonInteractor;
+        var secondary = Child(controller.gameObject, "SecondInventoryHand").AddComponent<ButtonInteractor>();
+        secondary.interactiveButtons = new List<RectTransform>();
+        var prefab = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        prefab.transform.SetParent(controller.transform, false);
+        prefab.transform.localPosition = Vector3.right * 100f;
+        var oldPrefabs = controller.componentPrefabs;
+        var oldNames = controller.componentNames;
+        int beforeCount = controller.placedObjectsHistory.Count;
+        var existingVisibility = new Dictionary<GameObject, bool>();
+        foreach (var existing in controller.placedObjectsHistory)
+            if (existing != null) { existingVisibility[existing] = existing.activeSelf; existing.SetActive(false); }
+        controller.componentPrefabs = new[] { prefab };
+        controller.componentNames = new[] { "Pin" };
+        controller.SetSecondHand(secondary);
+        var spawned = new List<GameObject>();
+        try
+        {
+            SetInput(primary, true, true, true);
+            SetInput(secondary, true, true, true);
+            Set(primary, "<PinchConsumedByUI>k__BackingField", true);
+            Set(secondary, "<PinchConsumedByUI>k__BackingField", true);
+            var panel = (Canvas)Get(headset, "panel");
+            var inventory = (RectTransform)panel.transform.Find("KHO LINH KIỆN");
+            var battery = inventory.Find("Pin").GetComponent<Button>();
+            Call(headset, "NotifyControlHand", primary);
+            battery.onClick.Invoke();
+            Call(headset, "NotifyControlHand", secondary);
+            battery.onClick.Invoke();
+            Call(headset, "LateUpdate");
+            object secondState = Get(controller, "secondDrag");
+            var firstPreview = (GameObject)Get(controller, "previewAnchor");
+            var secondPreview = (GameObject)secondState.GetType().GetField("previewAnchor").GetValue(secondState);
+            Require(controller.placedObjectsHistory.Count == beforeCount && firstPreview != null && secondPreview != null && firstPreview != secondPreview,
+                "Two inventory clicks must create independent previews, without placing anything or recording history.");
+            SceneManager.MoveGameObjectToScene(firstPreview, controller.gameObject.scene);
+            SceneManager.MoveGameObjectToScene(secondPreview, controller.gameObject.scene);
+            var operation = typeof(TapToPlaceController).GetNestedType("HandOperation", BindingFlags.NonPublic);
+            object frame = Enum.Parse(operation, "Frame");
+            Set(controller, "cooldownTimer", 0f);
+            secondState.GetType().GetField("cooldownTimer").SetValue(secondState, 0f);
+            Call(controller, "UpdateActiveHand");
+            Call(controller, "ProcessSecondHand", frame);
+            Require(controller.placedObjectsHistory.Count == beforeCount && !controller.IsDragging,
+                "A held menu pinch must not commit or select either preview.");
+            SetInput(primary, true, false, false);
+            SetInput(secondary, true, false, false);
+            Call(controller, "UpdateActiveHand");
+            Call(controller, "ProcessSecondHand", frame);
+            Require(controller.placedObjectsHistory.Count == beforeCount &&
+                !(bool)Get(controller, "requireMeasuredForPreview") &&
+                !(bool)secondState.GetType().GetField("requireMeasuredForPreview").GetValue(secondState),
+                "Releasing the menu pinch must not commit; both VR previews must allow the same instant fallback as Manual Assembly.");
+            results.Add("PASS: each hand owns an AR preview, menu gestures cannot auto-place, and VR shares AR's immediate fallback");
+
+            var managerRoot = Child(controller.gameObject, "PreviewSupportManager");
+            managerRoot.SetActive(false);
+            var manager = managerRoot.AddComponent<ARPlaneManager>();
+            manager.enabled = false;
+            ARPlane plane = null;
+            bool oldTap = controller.enableTapToPlace;
+            controller.enableTapToPlace = false;
+            try
+            {
+                var polygon = new[] { new Vector2(-2f, -2f), new Vector2(2f, -2f), new Vector2(2f, 2f), new Vector2(-2f, 2f) };
+                var id = new TrackableId(833, 1);
+                plane = (ARPlane)typeof(ARPlacementRegressionChecks).GetMethod("CreateTrackedPlane", PrivateStatic).Invoke(null,
+                    new object[] { managerRoot, manager, id, polygon, TrackingState.Tracking, PlaneAlignment.HorizontalUp });
+                plane.transform.position = camera.transform.position + Vector3.down * 0.35f + camera.transform.forward;
+                controller.arPlaneManager = manager;
+                Vector3 left = plane.transform.position + camera.transform.right * -0.2f;
+                Vector3 right = plane.transform.position + camera.transform.right * 0.2f;
+                Set(primary, "<CurrentScreenPos>k__BackingField", (Vector2)camera.WorldToScreenPoint(left));
+                Set(secondary, "<CurrentScreenPos>k__BackingField", (Vector2)camera.WorldToScreenPoint(right));
+                // Open first, then confirm at the actual measured points, exactly as in Manual Assembly.
+                SetInput(primary, true, false, false);
+                SetInput(secondary, true, false, false);
+                Call(controller, "UpdateActiveHand");
+                Call(controller, "ProcessSecondHand", frame);
+                Require(controller.placedObjectsHistory.Count == beforeCount, "Moving previews onto a table must still wait for confirmation.");
+                SetInput(primary, true, true, true);
+                SetInput(secondary, true, true, true);
+                Call(controller, "UpdateActiveHand");
+                Call(controller, "ProcessSecondHand", frame);
+                Require(controller.placedObjectsHistory.Count == beforeCount + 2 && !controller.HasAnyPreview,
+                    "Both owners must independently confirm onto the measured table using the shared AR placement flow.");
+                spawned.Add(controller.placedObjectsHistory[beforeCount]);
+                spawned.Add(controller.placedObjectsHistory[beforeCount + 1]);
+                var contacts = (System.Collections.IDictionary)Get(controller, "placedContacts");
+                foreach (var item in spawned)
+                {
+                    Require(!controller.IsObjectBeingDragged(item) && controller.SelectedComponent != item &&
+                        Mathf.Abs(item.transform.position.y - plane.transform.position.y) < 0.0001f,
+                        "A confirmed component must rest on measured support without silently becoming a drag.");
+                    object contact = contacts[item];
+                    Require((TrackableId)contact.GetType().GetField("planeId").GetValue(contact) == id,
+                        "VR must retain the same measured plane binding as the Manual Assembly path.");
+                    var support = item.GetComponent<ARInstantPlacementAnchor>()?.SupportRoot;
+                    if (support != null) support.SetParent(controller.transform, true);
+                }
+                Vector3 firstPosition = spawned[0].transform.position;
+                Vector3 secondPosition = spawned[1].transform.position;
+                Vector3 cameraBefore = camera.transform.position;
+                camera.transform.position -= camera.transform.forward * 0.3f;
+                Call(controller, "HandleDragAndDrop");
+                Call(controller, "ProcessSecondHand", frame);
+                Require(spawned[0].transform.position == firstPosition && spawned[1].transform.position == secondPosition,
+                    "Confirmed components must stay fixed when the viewer moves, even with the placement pinch held.");
+                camera.transform.position = cameraBefore;
+                results.Add("PASS: two previews commit independently through the shared measured AR path, keep support bindings and stay world-fixed");
+            }
+            finally
+            {
+                controller.arPlaneManager = null;
+                controller.enableTapToPlace = oldTap;
+                if (plane != null) UnityEngine.Object.DestroyImmediate(plane.gameObject);
+                UnityEngine.Object.DestroyImmediate(manager.gameObject);
+            }
+        }
+        finally
+        {
+            controller.CancelPlacement();
+            controller.SetSecondHand(null);
+            controller.ClearSelectedComponent();
+            controller.componentPrefabs = oldPrefabs;
+            controller.componentNames = oldNames;
+            foreach (var entry in existingVisibility) if (entry.Key != null) entry.Key.SetActive(entry.Value);
+            foreach (var item in spawned)
+            {
+                controller.placedObjectsHistory.Remove(item);
+                var support = item != null ? item.transform.parent : null;
+                if (item != null) UnityEngine.Object.DestroyImmediate(item);
+                if (support != null && support != controller.transform && support.childCount == 0)
+                    UnityEngine.Object.DestroyImmediate(support.gameObject);
+            }
+            UnityEngine.Object.DestroyImmediate(prefab);
+            UnityEngine.Object.DestroyImmediate(secondary.gameObject);
+            SetInput(primary, true, false, false);
+            Call(controller, "HandleDragAndDrop"); // Deliver the post-placement open hand before the next fixture.
         }
     }
 
@@ -502,7 +915,15 @@ internal static class ARDragUsabilityRegressionChecks
     private static object Static(string name, params object[] args) =>
         typeof(TapToPlaceController).GetMethod(name, PrivateStatic).Invoke(null, args);
     private static object Get(object instance, string name) => instance.GetType().GetField(name, PrivateInstance).GetValue(instance);
-    private static void Set(object instance, string name, object value) => instance.GetType().GetField(name, PrivateInstance).SetValue(instance, value);
+    private static void Set(object instance, string name, object value)
+    {
+        instance.GetType().GetField(name, PrivateInstance).SetValue(instance, value);
+        if (instance is ButtonInteractor && name == "<CurrentScreenPos>k__BackingField")
+        {
+            typeof(ButtonInteractor).GetField("rawWorldDragPoint", PrivateInstance).SetValue(instance, value);
+            typeof(ButtonInteractor).GetField("hasWorldDragPoint", PrivateInstance).SetValue(instance, true);
+        }
+    }
     private static void Call(object instance, string name, params object[] args) => instance.GetType().GetMethod(name, PrivateInstance).Invoke(instance, args);
     private static void Require(bool condition, string message)
     {

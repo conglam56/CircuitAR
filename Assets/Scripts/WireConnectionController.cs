@@ -271,8 +271,11 @@ public class WireConnectionController : MonoBehaviour
         // 3. Lắng nghe cử chỉ Pinch trong Wire Mode
         if (buttonInteractor.IsHandVisible && buttonInteractor.JustPinched && !buttonInteractor.PinchConsumedByUI)
         {
-            HandlePinchRaycast();
+            HandlePinchRaycast(buttonInteractor.CurrentScreenPos);
         }
+        var second = buttonInteractor.SecondHand;
+        if (second != null && second.IsHandVisible && second.JustPinched && !second.PinchConsumedByUI)
+            HandlePinchRaycast(second.CurrentScreenPos);
     }
 
     void LateUpdate()
@@ -284,9 +287,8 @@ public class WireConnectionController : MonoBehaviour
     /// <summary>
     /// Bắn raycast 3D từ con trỏ ngón tay vào không gian để tìm Collider mang Tag "Terminal"
     /// </summary>
-    private void HandlePinchRaycast()
+    private void HandlePinchRaycast(Vector2 screenPos)
     {
-        Vector2 screenPos = buttonInteractor.CurrentScreenPos;
         Ray ray = mainCamera.ScreenPointToRay(screenPos);
         Physics.SyncTransforms();
 

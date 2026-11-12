@@ -24,6 +24,7 @@ internal static class HandInputLatencyRegressionChecks
     public static void Run(List<string> results)
     {
         CheckCursorFilter(results);
+        CheckHandIdentity(results);
         var previousSource = Mediapipe.Unity.Sample.ImageSourceProvider.ImageSource;
         var scene = EditorSceneManager.NewPreviewScene();
         var root = new GameObject("HandInputLatencyFixture");
@@ -97,6 +98,52 @@ internal static class HandInputLatencyRegressionChecks
                 "Reacquisition must snap to the current fingertip instead of travelling from the lost position.");
             results.Add("PASS: hand reacquisition restores the cursor on its first result without a stale-position tail");
 
+            if (Screen.width > Screen.height)
+            {
+                var headsetCamera = Child(root, "OcclusionHeadsetCamera").AddComponent<Camera>();
+                try
+                {
+                    Set(input, "targetX", 0.5f);
+                    Set(input, "targetY", 0.5f);
+                    Set(input, "targetThumbX", 0.5f);
+                    Set(input, "targetThumbY", 0.5f);
+                    Set(input, "lastGlobalPinchTime", float.NegativeInfinity);
+                    input.SetHeadsetCamera(headsetCamera);
+                    NewSample(1f);
+                    NewSample(0.01f);
+                    Require(input.isPinching, "A deliberate headset pinch must confirm on its first fresh closed sample after opening.");
+                    Set(input, "isHandVisible", false);
+                    Set(input, "lastHandResultTicks", Stopwatch.GetTimestamp());
+                    Set(input, "lastVisibleHandAt", Time.unscaledTime - 0.1f);
+                    Update(input);
+                    Require(input.IsGestureTemporarilyOccluded && input.isPinching && !(bool)Get(input, "headsetNeedsOpenHand"),
+                        "A fresh brief headset hand loss must retain the gesture without demanding a new open hand.");
+                    Require(!input.IsHandVisible && !input.JustPinched && input.GetHeadsetCursor().z > 0f &&
+                        !input.IsPointerOverUI && !(bool)Get(input, "hasWorldDragPoint") && (int)Get(input, "handMaskHullCount") == 0,
+                        "Brief missing inference must retain only cursor appearance, with no valid world pointer or depth mask.");
+                    NewSample(0.01f);
+                    Require(input.isPinching && !input.JustPinched,
+                        "Reacquiring the still-closed hand must resume the held gesture without generating another pinch edge.");
+                    Set(input, "isHandVisible", false);
+                    Set(input, "lastHandResultTicks", Stopwatch.GetTimestamp());
+                    Set(input, "lastVisibleHandAt", Time.unscaledTime - 1f);
+                    Update(input);
+                    Require(input.GetHeadsetCursor() == Vector4.zero,
+                        "Cursor retention must expire after sustained hand loss rather than showing a stale finger indefinitely.");
+                    results.Add("PASS: cursor survives short inference gaps visually while stale pointer actions stay blocked and long loss hides it");
+                    NewSample(0.01f);
+                    Require(!input.isPinching && (bool)Get(input, "headsetNeedsOpenHand"),
+                        "Sustained loss must still require opening before any new headset grab.");
+                    NewSample(1f);
+                    results.Add("PASS: headset pinch survives transient hand loss and resumes without rearming; sustained loss still blocks stale grabs");
+                }
+                finally
+                {
+                    input.SetHeadsetCamera(null);
+                    UnityEngine.Object.DestroyImmediate(headsetCamera.gameObject);
+                }
+            }
+
             var runner = root.AddComponent<Mediapipe.Unity.Sample.HandLandmarkDetection.HandLandmarkerRunner>();
             var baseType = typeof(Mediapipe.Unity.Sample.BaseRunner);
             var getTimestamp = baseType.GetMethod("GetCurrentTimestampMillisec", PrivateInstance);
@@ -133,6 +180,29 @@ internal static class HandInputLatencyRegressionChecks
             Mediapipe.Unity.Sample.ImageSourceProvider.SetCustomSource(previousSource);
             EditorSceneManager.ClosePreviewScene(scene);
         }
+    }
+
+    private static void CheckHandIdentity(List<string> results)
+    {
+        var result = Mediapipe.Tasks.Vision.HandLandmarker.HandLandmarkerResult.Alloc(2);
+        Mediapipe.Tasks.Components.Containers.Classifications Hand(string name) =>
+            Mediapipe.Tasks.Components.Containers.Classifications.CreateFrom(new Mediapipe.ClassificationList
+            {
+                Classification = { new Mediapipe.Classification { Label = name, Score = 0.99f } }
+            });
+        result.handLandmarks.Add(default);
+        result.handLandmarks.Add(default);
+        result.handedness.Add(Hand("Left"));
+        result.handedness.Add(Hand("Right"));
+        var find = typeof(ButtonInteractor).GetMethod("FindHandIndex", BindingFlags.Static | BindingFlags.NonPublic);
+        int Index(int channel) => (int)find.Invoke(null, new object[] { result, channel });
+        Require(Index(1) == 0 && Index(2) == 1, "Each hand channel must select its own handedness.");
+        result.handedness.Reverse();
+        Require(Index(1) == 1 && Index(2) == 0, "Reordering inference results must not swap hand channels.");
+        result.handedness.RemoveAt(1);
+        result.handLandmarks.RemoveAt(1);
+        Require(Index(1) == -1 && Index(2) == 0, "Losing one hand must not transfer its pointer to the remaining hand.");
+        results.Add("PASS: two-hand identities survive result reordering and loss without assigning both pointers to one hand");
     }
 
     private static void CheckSourceFreshness(ButtonInteractor input,

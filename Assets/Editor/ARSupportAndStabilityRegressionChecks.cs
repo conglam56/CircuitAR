@@ -57,7 +57,8 @@ internal static class ARSupportAndStabilityRegressionChecks
             "Invalid target/pointer values cannot finish a support transition.");
         results.Add("PASS: support switching is canceled by misses, moving pointers and invalid geometry instead of extrapolating into air");
 
-        Require(ARSupportPolicy.CanCorrectContactHeight(0.45f, 0f) &&
+        Require(ARSupportPolicy.CanCorrectContactHeight(0.008f, 0f) &&
+            ARSupportPolicy.CanCorrectContactHeight(0.45f, 0f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0.75f, 0f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0f, 0.23f) &&
             !ARSupportPolicy.CanCorrectContactHeight(0f, 0.02f) &&
@@ -107,7 +108,27 @@ internal static class ARSupportAndStabilityRegressionChecks
             "A real SLAM correction must snap immediately, not lerp behind the camera or stay at the old floor height.");
         Require(filter.Apply(jitter, true).position == jitter.position,
             "Tracking recovery must force a native-pose resynchronization.");
-        results.Add("PASS: only sub-2mm/sub-0.3degree anchor noise is held; real pose corrections and recovery snap immediately");
+        results.Add("PASS: micro anchor noise is held; large corrections and recovery snap immediately");
+        filter.Reset();
+        filter.Apply(floor, false);
+        Pose medium = new Pose(Vector3.right * 0.01f, Quaternion.Euler(0f, 1f, 0f));
+        Pose firstStep = filter.Apply(medium, false, 1f / 60f);
+        Require(firstStep.position.x > 0f && firstStep.position.x < 0.01f,
+            "A medium anchor correction must be damped instead of snapping by a centimetre.");
+        for (int i = 0; i < 30; i++) held = filter.Apply(medium, false, 1f / 60f);
+        Require(Vector3.Distance(held.position, medium.position) <= 0.0031f &&
+            Quaternion.Angle(held.rotation, medium.rotation) <= 0.36f,
+            "Damping must converge within the deadband instead of hiding cumulative movement.");
+        filter.Reset();
+        filter.Apply(floor, false);
+        for (int i = 0; i < 60; i++)
+        {
+            held = filter.Apply(new Pose(Vector3.right * (i % 2 == 0 ? 0.008f : -0.008f), Quaternion.identity),
+                false, 1f / 60f);
+            Require(Mathf.Abs(held.position.x) < 0.003f,
+                "Alternating 8mm native jitter must not make a resting component jump between both extremes.");
+        }
+        results.Add("PASS: medium anchor jitter is damped, sustained movement converges and alternating native noise stays bounded");
 
         var scene = EditorSceneManager.NewPreviewScene();
         var root = new GameObject("ARBoundedStabilityFixture");
@@ -132,10 +153,16 @@ internal static class ARSupportAndStabilityRegressionChecks
             Tick();
             Require(body.transform.position.sqrMagnitude < 0.00000001f && body.transform.parent == anchorRoot.transform,
                 "Presentation noise suppression must retain the genuine anchor hierarchy.");
+            Require(stabilizer.AuthoredContactLocalPosition == Vector3.zero,
+                "Presentation offsets must not be mistaken for authored ground-contact changes.");
             anchorRoot.transform.position = Vector3.right * 0.01f;
             Tick();
+            Require(body.transform.position.x >= 0f && body.transform.position.x < 0.01f,
+                "A moderate native update must not jump the resting presentation to the full tracked displacement.");
+            anchorRoot.transform.position = Vector3.right * 0.04f;
+            Tick();
             Require(Vector3.Distance(body.transform.position, anchorRoot.transform.position) < 0.00001f,
-                "Cumulative drift must not stick inside a series of ignored per-frame deltas.");
+                "Cumulative drift beyond the snap boundary must immediately resynchronize.");
             body.transform.localPosition = Vector3.forward * 0.1f;
             body.transform.localRotation = Quaternion.Euler(0f, 90f, 0f);
             Vector3 edited = body.transform.position;
@@ -150,12 +177,21 @@ internal static class ARSupportAndStabilityRegressionChecks
             Require(body.transform.position == native, "An anchor handoff must temporarily bypass micro filtering.");
             stabilizer.SuspendFiltering = false;
             Tick(false);
-            anchorRoot.transform.position += Vector3.up * 0.05f;
-            native = body.transform.position;
+            Vector3 frozen = body.transform.position;
+            for (int i = 0; i < 4; i++)
+            {
+                anchorRoot.transform.position += Vector3.up * 0.0125f;
+                Tick(false);
+                Require(Vector3.Distance(body.transform.position, frozen) < 0.00001f,
+                    "A lost anchor must not move the displayed component through inherited parent motion.");
+            }
+            Require(Vector3.Distance(stabilizer.AuthoredContactLocalPosition, Vector3.forward * 0.1f) < 0.00001f,
+                "Freezing a lost anchor must preserve the authored contact coordinate rather than baking in its drift.");
+            native = frozen + Vector3.up * 0.05f;
             Tick();
             Require(Vector3.Distance(body.transform.position, native) < 0.00001f,
                 "Recovery must immediately adopt the current native height without smoothing it through the floor.");
-            results.Add("PASS: anchored presentation preserves hierarchy, cumulative corrections, undo/rotation and native-anchor handoff/recovery");
+            results.Add("PASS: anchored presentation preserves hierarchy and edits, freezes during tracking loss and resynchronizes on recovery");
 
             body.transform.position = new Vector3(0.2f, 0.45f, 0.3f);
             Vector3 fixedXZ = body.transform.position;
@@ -200,6 +236,17 @@ internal static class ARSupportAndStabilityRegressionChecks
                 neighbour.transform.position == neighbourBefore && bindings[neighbour] == anchor,
                 "Reanchoring one member cannot destroy or move a sibling's shared anchor.");
             results.Add("PASS: sharing/reanchoring preserves each measured contact, orientation and the previous anchor's remaining members");
+            var supportId = new TrackableId(991, 4);
+            typeof(TapToPlaceController).GetMethod("RememberPlacedContact", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(controller, new object[] { body, supportId });
+            typeof(TapToPlaceController).GetMethod("AdoptInstantPlacementAnchor", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(controller, new object[] { body, destinationAnchor, true });
+            var contacts = (System.Collections.IDictionary)typeof(TapToPlaceController)
+                .GetField("placedContacts", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+            object remembered = contacts[body];
+            Require((TrackableId)remembered.GetType().GetField("planeId").GetValue(remembered) == supportId,
+                "Native promotion must retain the measured plane binding so the next drag can use its immediate support path.");
+            results.Add("PASS: native anchor promotion retains the measured support plane for responsive subsequent drags");
         }
         finally { EditorSceneManager.ClosePreviewScene(scene); }
     }

@@ -32,6 +32,10 @@ public class SwitchInteractor : MonoBehaviour
             return;
         }
 
+        var second = buttonInteractor != null ? buttonInteractor.SecondHand : null;
+        if (second != null && second.IsHandVisible && second.JustPinched && !second.PinchConsumedByUI)
+            ExecuteSwitchRaycast(second.CurrentScreenPos);
+
         Vector2 interactionScreenPos = Vector2.zero;
         bool shouldInteract = false;
 

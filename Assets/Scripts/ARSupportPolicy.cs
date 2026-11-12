@@ -28,7 +28,7 @@ public static class ARSupportPolicy
     // automatically lift a floor object onto a newly merged tabletop.
     public static bool CanCorrectContactHeight(float current, float measured) =>
         IsFinite(new Vector3(current, measured, 0f)) &&
-            measured - current < -0.012f && measured - current >= -0.6f;
+            measured - current < -0.002f && measured - current >= -0.6f;
 
     public static bool TryProjectContactVertically(Vector3 contact, Vector3 planePoint,
         Vector3 normal, out Vector3 projected)
@@ -134,13 +134,27 @@ public static class ARSupportPolicy
         private bool initialized;
         private Pose presented;
         public void Reset() { initialized = false; }
-        public Pose Apply(Pose tracked, bool forceSnap)
+        public Pose Apply(Pose tracked, bool forceSnap) => Apply(tracked, forceSnap, 1f / 60f);
+
+        public Pose Apply(Pose tracked, bool forceSnap, float deltaTime)
         {
-            if (!initialized || forceSnap || Vector3.Distance(tracked.position, presented.position) > 0.002f ||
-                Quaternion.Angle(tracked.rotation, presented.rotation) > 0.3f)
+            if (!IsFinite(tracked.position) ||
+                !IsFinite(new Vector3(tracked.rotation.x, tracked.rotation.y, tracked.rotation.z)) ||
+                float.IsNaN(tracked.rotation.w) || float.IsInfinity(tracked.rotation.w)) return initialized ? presented : Pose.identity;
+            float distance = Vector3.Distance(tracked.position, presented.position);
+            float angle = Quaternion.Angle(tracked.rotation, presented.rotation);
+            if (!initialized || forceSnap || distance >= 0.025f || angle >= 3f)
             {
                 presented = tracked;
                 initialized = true;
+            }
+            else
+            {
+                // Filter anchor updates only. Authored moves reset the filter before this call.
+                float dt = float.IsNaN(deltaTime) || float.IsInfinity(deltaTime) ? 0f : Mathf.Clamp(deltaTime, 0f, 0.05f);
+                float follow = 1f - Mathf.Exp(-14f * dt);
+                if (distance > 0.003f) presented.position = Vector3.Lerp(presented.position, tracked.position, follow);
+                if (angle > 0.35f) presented.rotation = Quaternion.Slerp(presented.rotation, tracked.rotation, follow);
             }
             return presented;
         }

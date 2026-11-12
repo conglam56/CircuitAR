@@ -22,6 +22,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
     private float refinementDeadline;
     private float requestDeadline;
     private float promotionNotBefore;
+    private float promotionRetryDelay = 0.5f;
     private int generation;
     private bool configured;
     private bool runtimeActive;
@@ -29,6 +30,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
     private bool refinementStopped;
     private bool usedInitialRay;
     private bool requestInFlight;
+    private bool nativeRequestOutstanding;
     private bool promotionExhausted;
     private bool hasMeasuredSurface;
 
@@ -49,6 +51,8 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
             ? 1f : Mathf.Clamp(estimatedDistance, 0.1f, 10f);
         supportRoot = placementSupport;
         hasMeasuredSurface = measuredSurface;
+        promotionRetryDelay = 0.5f;
+        promotionNotBefore = 0f;
         refinementStopped = false;
         usedInitialRay = false;
         configured = true;
@@ -68,7 +72,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         owner != null && owner.isActiveAndEnabled && gameObject.activeInHierarchy &&
         ARSession.state == ARSessionState.SessionTracking;
 
-    private bool IsBeingDragged() => owner != null && owner.IsDragging && owner.DraggedObject == gameObject;
+    private bool IsBeingDragged() => owner != null && owner.IsObjectBeingDragged(gameObject);
 
     private void OnEnable() { runtimeActive = false; }
 
@@ -93,11 +97,14 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
             {
                 generation++;
                 requestInFlight = false;
-                promotionExhausted = true;
+                SchedulePromotionRetry();
             }
             return;
         }
-        if (promotionExhausted || Time.realtimeSinceStartup < promotionNotBefore) return;
+        // An expired result is discarded by generation, but the provider still
+        // owns that request until it returns. Never queue overlapping retries.
+        if (nativeRequestOutstanding || Time.realtimeSinceStartup < promotionNotBefore) return;
+        if (promotionExhausted) promotionExhausted = false;
 
         if (trackedRaycast != null)
         {
@@ -114,6 +121,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         if (anchors == null || !anchors.isActiveAndEnabled || anchors.subsystem == null ||
             !anchors.subsystem.running) return;
         requestInFlight = true;
+        nativeRequestOutstanding = true;
         requestDeadline = Time.realtimeSinceStartup + AnchorTimeout;
         // A drag moves the child rather than its old support. Anchor the authored
         // object pose in that case, preserving its world pose during adoption.
@@ -196,6 +204,7 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
             supportRoot = null;
             RemoveEmptySupport(previousSupport);
             owner.AdoptInstantPlacementAnchor(gameObject, adopted, hasMeasuredSurface);
+            configured = false;
             Destroy(this);
         }
         catch (System.Exception ex)
@@ -205,11 +214,12 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         }
         finally
         {
+            nativeRequestOutstanding = false;
             if (replacement != null) Destroy(replacement.gameObject);
-            if (this != null && request == generation)
+            if (this != null && request == generation && configured)
             {
                 requestInFlight = false;
-                promotionExhausted = true;
+                SchedulePromotionRetry();
             }
         }
     }
@@ -224,6 +234,13 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         // Native removal normally destroys this next subsystem update; explicit
         // destruction also covers a stopped/disabled manager with no next update.
         if (previous != null) Destroy(previous.gameObject);
+    }
+
+    private void SchedulePromotionRetry()
+    {
+        promotionExhausted = true;
+        promotionNotBefore = Time.realtimeSinceStartup + promotionRetryDelay;
+        promotionRetryDelay = Mathf.Min(4f, promotionRetryDelay * 2f);
     }
 
     private void CancelActiveWork()

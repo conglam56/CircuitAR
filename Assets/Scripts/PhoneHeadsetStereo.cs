@@ -7,6 +7,7 @@ using UnityEngine.Rendering.Universal;
 /// <summary>Renders only virtual objects for each eye. The tracked AR camera supplies the shared background.</summary>
 public sealed class PhoneHeadsetStereo : IDisposable
 {
+    public const float SceneFieldScale = 1.20f;
     public const float ConvergenceDistance = 0.85f;
     private const float EyeSeparation = 0.060f;
     private const int MaxEyeDimension = 960;
@@ -99,21 +100,29 @@ public sealed class PhoneHeadsetStereo : IDisposable
         if (!IsReady || !cameras.Contains(source)) return;
         for (int i = 0; i < eyes.Length; i++)
         {
-            float offset = GetEyeOffset(i == 1);
+            float offset = GetEyeOffset(source, i == 1);
             eyes[i].transform.localPosition = Vector3.right * offset;
-            eyes[i].projectionMatrix = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic);
+            eyes[i].transform.localRotation = Quaternion.identity;
+            eyes[i].projectionMatrix = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic,
+                GetConvergence(source));
         }
     }
 
-    public static Matrix4x4 MakeEyeProjection(Matrix4x4 centerProjection, float eyeOffset, bool orthographic)
+    public static Matrix4x4 MakeEyeProjection(Matrix4x4 centerProjection, float eyeOffset, bool orthographic,
+        float convergence = ConvergenceDistance)
     {
-        // Each lens uses the center half of the tracked camera's horizontal FoV.
+        // Fill each half-width eye using the matching central source viewport.
         // Parallel eye axes converge on the same pixels at the interaction distance.
         centerProjection.m00 *= 2f;
         centerProjection.m02 *= 2f;
         centerProjection.m03 *= 2f;
+        for (int column = 0; column < 4; column++)
+        {
+            centerProjection[0, column] /= SceneFieldScale;
+            centerProjection[1, column] /= SceneFieldScale;
+        }
         if (orthographic) centerProjection.m03 += centerProjection.m00 * eyeOffset;
-        else centerProjection.m02 -= centerProjection.m00 * eyeOffset / ConvergenceDistance;
+        else centerProjection.m02 -= centerProjection.m00 * eyeOffset / Mathf.Max(0.01f, convergence);
         return centerProjection;
     }
 
@@ -121,16 +130,16 @@ public sealed class PhoneHeadsetStereo : IDisposable
         bool clipToLens = true)
     {
         screenPoint = default;
-        float offset = GetEyeOffset(rightEye);
+        float offset = GetEyeOffset(source, rightEye);
         Vector3 view = source.worldToCameraMatrix.MultiplyPoint3x4(worldPoint);
         if (-view.z <= source.nearClipPlane) return false;
         view.x -= offset;
-        Matrix4x4 projection = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic);
+        Matrix4x4 projection = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic, GetConvergence(source));
         Vector4 clip = projection * new Vector4(view.x, view.y, view.z, 1f);
         if (clip.w <= 0f) return false;
 
         // Undo the eye half's crop. Hand input and UI use the source camera's viewport.
-        var viewport = new Vector2(0.5f + clip.x / (4f * clip.w), 0.5f + clip.y / (2f * clip.w));
+        var viewport = new Vector2(0.5f + clip.x * SceneFieldScale / (4f * clip.w), 0.5f + clip.y * SceneFieldScale / (2f * clip.w));
         if (clipToLens && !ContainsSourcePoint(viewport)) return false;
         screenPoint = source.pixelRect.min + Vector2.Scale(viewport, source.pixelRect.size);
         return true;
@@ -143,8 +152,9 @@ public sealed class PhoneHeadsetStereo : IDisposable
         Vector2 viewport = source.ScreenToViewportPoint(screenPoint);
         if (clipToLens && !ContainsSourcePoint(viewport)) return false;
 
-        float offset = GetEyeOffset(rightEye);
-        Matrix4x4 clipToView = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic).inverse;
+        float offset = GetEyeOffset(source, rightEye);
+        Matrix4x4 clipToView = MakeEyeProjection(source.projectionMatrix, offset, source.orthographic,
+            GetConvergence(source)).inverse;
         Matrix4x4 viewToWorld = source.cameraToWorldMatrix;
         Vector2 ndc = SourceToEyeNdc(viewport);
         Vector3 near = clipToView.MultiplyPoint(new Vector3(ndc.x, ndc.y, -1f));
@@ -154,13 +164,22 @@ public sealed class PhoneHeadsetStereo : IDisposable
         return true;
     }
 
-    private static float GetEyeOffset(bool rightEye) => (rightEye ? 0.5f : -0.5f) * EyeSeparation;
+    private static float GetEyeOffset(Camera camera, bool rightEye)
+    {
+        float separation = camera.TryGetComponent(out PhoneHeadsetAR headset)
+            ? (headset.CameraAlignedProjection ? 0f : headset.EyeSeparation) : EyeSeparation;
+        return (rightEye ? 0.5f : -0.5f) * separation;
+    }
+
+    private static float GetConvergence(Camera camera) =>
+        camera.TryGetComponent(out PhoneHeadsetAR headset) ? headset.EyeConvergence : ConvergenceDistance;
 
     private static Vector2 SourceToEyeNdc(Vector2 viewport) =>
-        new Vector2(4f * (viewport.x - 0.5f), 2f * (viewport.y - 0.5f));
+        new Vector2(4f * (viewport.x - 0.5f), 2f * (viewport.y - 0.5f)) / SceneFieldScale;
 
     public static bool ContainsSourcePoint(Vector2 viewportPoint)
     {
+        if (viewportPoint.x < 0f || viewportPoint.x > 1f || viewportPoint.y < 0f || viewportPoint.y > 1f) return false;
         Vector2 warped = SourceToEyeNdc(viewportPoint);
         if (Mathf.Abs(warped.x) > 1f || Mathf.Abs(warped.y) > 1f) return false;
         // Invert the compositor's mild radial warp to reject points in its black border.
