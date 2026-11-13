@@ -47,3 +47,6 @@ Thumbs.db
 CMakeCache.txt
 *.ninja_log
 *.ninja_deps
+
+# ==== Local cursor/placement analysis captures ====
+/CursorAnalysis/
