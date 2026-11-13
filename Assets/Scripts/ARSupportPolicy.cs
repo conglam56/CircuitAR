@@ -129,6 +129,33 @@ public static class ARSupportPolicy
         public void CancelPending() { IsPending = false; }
     }
 
+    public sealed class RecoveryConfirmation
+    {
+        private bool pending;
+        private Pose first;
+        private float startedAt, lastAt;
+        private int observations;
+        public void Reset() { pending = false; observations = 0; }
+        public bool Observe(Pose pose, float now)
+        {
+            if (!IsFinite(pose.position) || !IsFinite(new Vector3(pose.rotation.x, pose.rotation.y, pose.rotation.z)) ||
+                float.IsNaN(pose.rotation.w) || float.IsInfinity(pose.rotation.w) ||
+                float.IsNaN(now) || float.IsInfinity(now)) { Reset(); return false; }
+            if (!pending || now < lastAt || now - lastAt > 0.5f ||
+                Vector3.Distance(first.position, pose.position) > 0.015f || Quaternion.Angle(first.rotation, pose.rotation) > 2f)
+            {
+                pending = true;
+                first = pose;
+                startedAt = lastAt = now;
+                observations = 1;
+                return false;
+            }
+            if (now <= lastAt) return false;
+            lastAt = now;
+            return ++observations >= 3 && now - startedAt >= 0.25f;
+        }
+    }
+
     public sealed class PoseDeadband
     {
         private bool initialized;

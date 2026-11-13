@@ -95,6 +95,16 @@ internal static class ARSupportAndStabilityRegressionChecks
             "Contact correction must project vertically at the object's fixed XZ, never along the changing camera/finger ray.");
         results.Add("PASS: ground projection preserves world XZ and rejects steep/invalid support geometry");
 
+        var recoveryCheck = new ARSupportPolicy.RecoveryConfirmation();
+        Require(!recoveryCheck.Observe(table, 0f) && !recoveryCheck.Observe(table, 0.13f) &&
+            recoveryCheck.Observe(table, 0.26f), "Recovery must require distinct observations spanning 250ms.");
+        recoveryCheck.Reset();
+        Require(!recoveryCheck.Observe(table, 1f) && !recoveryCheck.Observe(table, 1f) &&
+            !recoveryCheck.Observe(new Pose(Vector3.up * 0.9f, Quaternion.identity), 1.3f) &&
+            !recoveryCheck.Observe(new Pose(Vector3.one * float.NaN, Quaternion.identity), 1.6f),
+            "Duplicate timestamps, jumping poses and invalid data cannot confirm a recovered contact.");
+        results.Add("PASS: tracking recovery needs consistent finite observations across 250ms instead of accepting its first pose");
+
         var filter = new ARSupportPolicy.PoseDeadband();
         Require(filter.Apply(floor, false).position == Vector3.zero,
             "The first tracked pose must be presented immediately.");
@@ -187,11 +197,14 @@ internal static class ARSupportAndStabilityRegressionChecks
             }
             Require(Vector3.Distance(stabilizer.AuthoredContactLocalPosition, Vector3.forward * 0.1f) < 0.00001f,
                 "Freezing a lost anchor must preserve the authored contact coordinate rather than baking in its drift.");
-            native = frozen + Vector3.up * 0.05f;
+            for (int i = 0; i < 5; i++) Tick();
+            Require(Vector3.Distance(body.transform.position, frozen) < 0.00001f && stabilizer.IsRecovering,
+                "A recovered tracking flag alone cannot lift a resting object to an unverified native height.");
+            anchorRoot.transform.position += Vector3.forward * 2f;
             Tick();
-            Require(Vector3.Distance(body.transform.position, native) < 0.00001f,
-                "Recovery must immediately adopt the current native height without smoothing it through the floor.");
-            results.Add("PASS: anchored presentation preserves hierarchy and edits, freezes during tracking loss and resynchronizes on recovery");
+            Require(Vector3.Distance(body.transform.position, frozen) < 0.00001f,
+                "An unverified recovery jump must not teleport the component out of view.");
+            results.Add("PASS: anchored presentation preserves edits, freezes during loss and rejects unsupported recovery height/position jumps");
 
             body.transform.position = new Vector3(0.2f, 0.45f, 0.3f);
             Vector3 fixedXZ = body.transform.position;
@@ -247,8 +260,210 @@ internal static class ARSupportAndStabilityRegressionChecks
             Require((TrackableId)remembered.GetType().GetField("planeId").GetValue(remembered) == supportId,
                 "Native promotion must retain the measured plane binding so the next drag can use its immediate support path.");
             results.Add("PASS: native anchor promotion retains the measured support plane for responsive subsequent drags");
+            CheckTrackingRecovery(root, results);
+            CheckRemovedAnchorRetention(root, results);
+
         }
         finally { EditorSceneManager.ClosePreviewScene(scene); }
+    }
+
+    private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+    private static void CheckTrackingRecovery(GameObject root, List<string> results)
+    {
+        var fixture = new GameObject("RecoveryPlaneFixture");
+        fixture.transform.SetParent(root.transform, false);
+        fixture.SetActive(false);
+        var planes = fixture.AddComponent<ARPlaneManager>();
+        planes.enabled = false;
+        var controller = fixture.AddComponent<TapToPlaceController>();
+        controller.enabled = false;
+        controller.arPlaneManager = planes;
+        var id = new TrackableId(992, 2);
+        var polygon = new[] { new Vector2(-1f, -1f), new Vector2(1f, -1f), new Vector2(1f, 1f), new Vector2(-1f, 1f) };
+        var plane = (ARPlane)typeof(ARPlacementRegressionChecks).GetMethod("CreateTrackedPlane", BindingFlags.Static | BindingFlags.NonPublic)
+            .Invoke(null, new object[] { fixture, planes, id, polygon, TrackingState.Tracking, PlaneAlignment.HorizontalUp });
+        plane.transform.position = Vector3.up * 0.75f;
+        var parent = new GameObject("NativeRecoveryAnchor");
+        parent.transform.SetParent(fixture.transform, false);
+        parent.transform.position = new Vector3(0.2f, 0.75f, 0.3f);
+        var anchor = parent.AddComponent<ARAnchor>();
+        anchor.enabled = false;
+        var body = new GameObject("Placed_RecoveryContact");
+        body.transform.SetParent(parent.transform, false);
+        var stabilizer = body.AddComponent<ARPlacedObjectStabilizer>();
+        stabilizer.enabled = false;
+        fixture.SetActive(true);
+        var sessionState = typeof(ARSession).GetField("s_State", BindingFlags.Static | BindingFlags.NonPublic);
+        object previousState = sessionState.GetValue(null);
+        sessionState.SetValue(null, ARSessionState.SessionTracking);
+        try
+        {
+            typeof(TapToPlaceController).GetMethod("AdoptInstantPlacementAnchor", Private).Invoke(controller, new object[] { body, anchor, true });
+            typeof(TapToPlaceController).GetMethod("RememberPlacedContact", Private).Invoke(controller, new object[] { body, id });
+            var update = typeof(ARPlacedObjectStabilizer).GetMethod("UpdatePresentation", Private);
+            void Tick(bool tracked) => update.Invoke(stabilizer, new object[] { tracked });
+            Tick(true);
+            Pose retained = new Pose(body.transform.position, body.transform.rotation);
+            Tick(false);
+            parent.transform.position += Vector3.up * 0.35f;
+            Tick(true);
+            Require(stabilizer.IsRecovering && body.transform.position == retained.position,
+                "The first recovered 35cm native height jump must stay frozen on the last tabletop contact.");
+            var confirmation = typeof(ARPlacedObjectStabilizer).GetField("recovery", Private).GetValue(stabilizer);
+            var type = confirmation.GetType();
+            Pose expected = new Pose(new Vector3(retained.position.x, plane.transform.position.y + controller.surfaceContactOffset, retained.position.z), retained.rotation);
+            type.GetField("pending", Private).SetValue(confirmation, true);
+            type.GetField("first", Private).SetValue(confirmation, expected);
+            type.GetField("startedAt", Private).SetValue(confirmation, Time.unscaledTime - 0.3f);
+            type.GetField("lastAt", Private).SetValue(confirmation, Time.unscaledTime - 0.1f);
+            type.GetField("observations", Private).SetValue(confirmation, 2);
+            Tick(true);
+            Require(!stabilizer.IsRecovering && Vector3.Distance(body.transform.position, expected.position) < 0.00001f,
+                "A consistent recovered contact must resolve onto its own measured table, not the raised native origin.");
+            Tick(true);
+            Require(!stabilizer.IsRecovering && Vector3.Distance(body.transform.position, expected.position) < 0.00001f,
+                "Rebinding the corrected contact must prevent the native height error returning on the next frame.");
+            results.Add("PASS: recovery rejects the first native height jump, confirms its measured tabletop and keeps that corrected binding on later frames");
+            var retreatCamera = new GameObject("RetreatCamera");
+            retreatCamera.transform.SetParent(fixture.transform, false);
+            var camera = retreatCamera.AddComponent<Camera>();
+            camera.enabled = false;
+            typeof(TapToPlaceController).GetField("mainCamera", Private).SetValue(controller, camera);
+            for (int i = 0; i < 8; i++)
+            {
+                camera.transform.position += Vector3.back * 0.08f;
+                parent.transform.position += Vector3.right * 0.01f;
+                Tick(true);
+                Require(Vector3.Distance(body.transform.position, expected.position) < 0.003f,
+                    "Repeated small native corrections must not accumulate into camera-follow after the object was released.");
+            }
+            parent.transform.position -= Vector3.right * 0.08f;
+            Tick(true);
+            results.Add("PASS: eight small native drifts during camera retreat cannot pull a released component away from its committed support");
+            Tick(false);
+            parent.transform.position += Vector3.forward * 0.5f; // Still inside the same large polygon.
+            Tick(true);
+            Require(stabilizer.IsRecovering && Vector3.Distance(body.transform.position, expected.position) < 0.00001f,
+                "Being above the same table does not authorize a 50cm anchor jump away from its recorded contact.");
+            parent.transform.position -= Vector3.forward * 0.5f;
+            parent.transform.position += Vector3.right * 0.5f;
+            plane.transform.position += Vector3.right * 0.5f;
+            Tick(true);
+            expected.position += Vector3.right * 0.5f;
+            type.GetField("pending", Private).SetValue(confirmation, true);
+            type.GetField("first", Private).SetValue(confirmation, expected);
+            type.GetField("startedAt", Private).SetValue(confirmation, Time.unscaledTime - 0.3f);
+            type.GetField("lastAt", Private).SetValue(confirmation, Time.unscaledTime - 0.1f);
+            type.GetField("observations", Private).SetValue(confirmation, 2);
+            Tick(true);
+            Require(!stabilizer.IsRecovering && Vector3.Distance(body.transform.position, expected.position) < 0.00001f,
+                "A consistent common correction of both the anchor and its recorded plane contact must still be accepted.");
+            var tilted = new object[] { body, new Pose(expected.position, Quaternion.Euler(35f, 0f, 0f)), expected, Pose.identity };
+            Require(!(bool)typeof(TapToPlaceController).GetMethod("TryConstrainRecoveredContact", Private).Invoke(controller, tilted),
+                "A tilted native pose cannot flip an upright component off its measured horizontal support.");
+            results.Add("PASS: recovery distinguishes a native-only teleport from a legitimate shared plane/anchor correction and rejects unsupported tilt");
+            typeof(ARPlacementRegressionChecks).GetMethod("SetPlaneTracking", BindingFlags.Static | BindingFlags.NonPublic)
+                .Invoke(null, new object[] { plane, id, TrackingState.Limited, PlaneAlignment.HorizontalUp });
+            Tick(false);
+            parent.transform.position += Vector3.forward * 2f;
+            Tick(true);
+            Require(stabilizer.IsRecovering && Vector3.Distance(body.transform.position, expected.position) < 0.00001f,
+                "A limited/out-of-bound plane cannot authorize a recovered native teleport.");
+            results.Add("PASS: recovery cannot use a lost or out-of-bound support plane to move an object out of view");
+        }
+        finally
+        {
+            sessionState.SetValue(null, previousState);
+            if (plane != null) typeof(ARPlane).GetMethod("DisposeNativeContainers", Private).Invoke(plane, null);
+            UnityEngine.Object.DestroyImmediate(fixture);
+        }
+    }
+
+    private static void CheckRemovedAnchorRetention(GameObject root, List<string> results)
+    {
+        var fixture = new GameObject("RemovedAnchorFixture");
+        fixture.transform.SetParent(root.transform, false);
+        fixture.SetActive(false);
+        var manager = fixture.AddComponent<ARAnchorManager>();
+        manager.enabled = false;
+        var controller = fixture.AddComponent<TapToPlaceController>();
+        controller.enabled = false;
+        controller.arAnchorManager = manager;
+        var nativeRoot = new GameObject("NativeAnchorToRemove");
+        nativeRoot.transform.SetParent(fixture.transform, false);
+        var anchor = nativeRoot.AddComponent<ARAnchor>();
+        anchor.enabled = false;
+        var bodies = new List<GameObject>();
+        var original = new List<Pose>();
+        for (int i = 0; i < 3; i++)
+        {
+            var body = new GameObject("Placed_Retained_" + i);
+            body.transform.SetParent(nativeRoot.transform, false);
+            body.transform.localPosition = new Vector3(i * 0.2f, 0.75f, 1f);
+            bodies.Add(body);
+            original.Add(new Pose(body.transform.position, body.transform.rotation));
+            if (i == 2) body.SetActive(false); // An undone/deleted history target must stay inactive.
+        }
+        fixture.SetActive(true);
+        var sessionState = typeof(ARSession).GetField("s_State", BindingFlags.Static | BindingFlags.NonPublic);
+        object previousState = sessionState.GetValue(null);
+        sessionState.SetValue(null, ARSessionState.SessionTracking);
+        try
+        {
+            foreach (var body in bodies)
+                typeof(TapToPlaceController).GetMethod("AdoptInstantPlacementAnchor", Private).Invoke(controller, new object[] { body, anchor, true });
+            controller.placedObjectsHistory.Add(bodies[0]);
+            controller.placedObjectsHistory.Add(bodies[1]);
+            controller.History.RecordAction(new PlaceComponentAction(bodies[0], controller));
+            Require(!anchor.destroyOnRemoval, "Owned anchors must opt out of provider-driven recursive content destruction.");
+            var secondInput = new GameObject("RecoverySecondInput");
+            secondInput.transform.SetParent(fixture.transform, false);
+            var input = secondInput.AddComponent<ButtonInteractor>();
+            input.enabled = false;
+            controller.SetSecondHand(input);
+            foreach (string name in new[] { "draggedObject", "isDragging", "dragStartPos", "dragStartRot", "lastValidDragPos", "lastValidDragRot" })
+            {
+                object value = name == "draggedObject" ? bodies[0] : name == "isDragging" ? (object)true :
+                    name.EndsWith("Rot") ? original[0].rotation : (object)original[0].position;
+                typeof(TapToPlaceController).GetField(name, Private).SetValue(controller, value);
+            }
+            object secondState = typeof(TapToPlaceController).GetField("secondDrag", Private).GetValue(controller);
+            foreach (string name in new[] { "draggedObject", "isDragging", "dragStartPos", "dragStartRot", "lastValidDragPos", "lastValidDragRot" })
+            {
+                object value = name == "draggedObject" ? bodies[1] : name == "isDragging" ? (object)true :
+                    name.EndsWith("Rot") ? original[1].rotation : (object)original[1].position;
+                secondState.GetType().GetField(name).SetValue(secondState, value);
+            }
+            nativeRoot.transform.position += Vector3.up * 0.4f;
+            var removed = new Unity.XR.CoreUtils.Collections.ReadOnlyList<KeyValuePair<TrackableId, ARAnchor>>(
+                new List<KeyValuePair<TrackableId, ARAnchor>> { new(anchor.trackableId, anchor) });
+            manager.trackablesChanged.Invoke(new ARTrackablesChangedEventArgs<ARAnchor>(null, null, removed));
+            for (int i = 0; i < bodies.Count; i++)
+            {
+                var body = bodies[i];
+                Require(body != null && Vector3.Distance(body.transform.position, original[i].position) < 0.00001f &&
+                    body.activeSelf == (i != 2), "Native removal must preserve every shared member's last presented pose and authored active state.");
+                var recovery = body.GetComponent<ARInstantPlacementAnchor>();
+                Require(recovery != null && recovery.SupportRoot == body.transform.parent &&
+                    recovery.SupportRoot.GetComponent<ARAnchor>() == null &&
+                    (bool)typeof(ARInstantPlacementAnchor).GetField("refinementStopped", Private).GetValue(recovery),
+                    "Retained members must retry a fresh world anchor without reusing an old screen pixel.");
+            }
+            Require(controller.placedObjectsHistory.Count == 2 && controller.History.UndoCount == 1,
+                "Provider removal must not delete objects from active placement or undo history.");
+            Require(!controller.IsObjectBeingDragged(bodies[0]) && !controller.IsObjectBeingDragged(bodies[1]),
+                "Both held objects must release onto their last valid contacts when their shared native anchor is removed.");
+            results.Add("PASS: anchor removal during simultaneous two-hand drags restores both valid contacts without recording a phantom jump");
+            Require(controller.UndoLastPlacedComponent() && !bodies[0].activeSelf && controller.RedoLastAction() && bodies[0].activeSelf,
+                "Undo/redo must keep working on the retained object reference after its native parent disappears.");
+            results.Add("PASS: removed shared anchors retain active and undone components at their last poses and retry native binding without replaying stale rays");
+            results.Add("PASS: native anchor removal preserves placement history and existing undo/redo object references");
+        }
+        finally
+        {
+            sessionState.SetValue(null, previousState);
+            UnityEngine.Object.DestroyImmediate(fixture);
+        }
     }
 
     private static void Require(bool value, string message)

@@ -194,6 +194,7 @@ internal static class ARInstantPlacementRegressionChecks
             results.Add("PASS: only estimated objects use free hand-plane drag fallback, and grabbing permanently cancels native ray refinement");
 
             CheckAuthoringCancellation(root, camera, results);
+            CheckWorldFixedEstimatedPlacement(root, results);
 
             controller.StartPreview("Test");
             MovePreview(controller, scene);
@@ -298,6 +299,59 @@ internal static class ARInstantPlacementRegressionChecks
             controller.ClearPreview();
             controller.componentPrefabs = previousPrefabs;
             controller.componentNames = previousNames;
+        }
+    }
+
+    private static void CheckWorldFixedEstimatedPlacement(GameObject root, List<string> results)
+    {
+        var fixture = Child(root, "WorldFixedInstantPlacement");
+        fixture.SetActive(false);
+        var rig = Child(fixture, "MovingCameraRig");
+        var camera = Child(rig, "Camera").AddComponent<Camera>();
+        camera.enabled = false;
+        camera.transform.localPosition = Vector3.up;
+        camera.transform.localRotation = Quaternion.Euler(45f, 0f, 0f);
+        var manager = rig.AddComponent<ARRaycastManager>();
+        manager.enabled = false;
+        var owner = Child(fixture, "Placement").AddComponent<TapToPlaceController>();
+        Set(owner, "mainCamera", camera);
+        owner.arRaycastManager = manager;
+        var prefab = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        prefab.transform.SetParent(fixture.transform, false);
+        prefab.transform.localPosition = Vector3.right * 20f;
+        owner.componentNames = new[] { "Test" };
+        owner.componentPrefabs = new[] { prefab };
+        fixture.SetActive(true);
+        GameObject support = null;
+        try
+        {
+            owner.StartPreview("Test");
+            MovePreview(owner, root.scene);
+            Set(owner, "cooldownTimer", 0f);
+            Pose contact = new Pose(root.transform.position + new Vector3(2f, 0f, 1f), Quaternion.identity);
+            Require(Place(owner, contact, camera.WorldToScreenPoint(contact.position)), "The camera-rig fixture must place immediately without a measured plane.");
+            var body = owner.placedObjectsHistory[0];
+            var helper = body.GetComponent<ARInstantPlacementAnchor>();
+            support = helper.SupportRoot.gameObject;
+            Require(support.transform.parent == null && !body.transform.IsChildOf(rig.transform),
+                "Estimated support must not inherit the raycast manager or any camera-rig transform.");
+            SceneManager.MoveGameObjectToScene(support, root.scene);
+            for (int i = 0; i < 30; i++)
+            {
+                rig.transform.position += new Vector3(0.003f, 0f, -0.025f);
+                rig.transform.rotation = Quaternion.Euler(0f, i * 0.5f, 0f);
+                Call(helper, "Update");
+                Require(Vector3.Distance(body.transform.position, contact.position) < 0.0001f && helper.IsEstimated &&
+                    !(bool)Get(helper, "requestInFlight"),
+                    "A committed unmeasured object must remain world-fixed through camera retreat without adopting an unconfirmed native anchor.");
+            }
+            results.Add("PASS: a committed estimate stays fixed through 30 camera-rig retreat/rotation updates, independently of manager parenting and unconfirmed native promotion");
+        }
+        finally
+        {
+            owner.CancelPlacement();
+            if (support != null) UnityEngine.Object.DestroyImmediate(support);
+            UnityEngine.Object.DestroyImmediate(fixture);
         }
     }
 

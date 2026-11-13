@@ -132,6 +132,9 @@ public class TapToPlaceController : MonoBehaviour
         public TrackableId planeId;
         public Transform parent;
         public Vector3 expectedLocal;
+        public Vector3 committedWorldContact;
+        public Vector3 planeLocalContact;
+        public bool hasPlaneLocalContact;
         public bool settling;
         public float targetHeight;
         public readonly ARSupportPolicy.ContactConfirmation confirmation = new ARSupportPolicy.ContactConfirmation();
@@ -170,6 +173,9 @@ public class TapToPlaceController : MonoBehaviour
     private bool? previewIsInvalid;
     private TrackableId dragSurfaceTrackableId = TrackableId.invalidId;
     private readonly Dictionary<GameObject, ARAnchor> objectAnchors = new Dictionary<GameObject, ARAnchor>();
+    private ARAnchorManager observedPlacementAnchors;
+    private readonly List<GameObject> removedAnchorMembers = new();
+
     private readonly Dictionary<GameObject, int> dragAnchorRequests = new Dictionary<GameObject, int>();
     private int nextDragAnchorRequest;
 
@@ -765,6 +771,7 @@ public class TapToPlaceController : MonoBehaviour
 
     void Update()
     {
+        ObservePlacementAnchors();
         RefreshSurfaceGuidance();
         // Nếu đang bật Chế độ Mô phỏng, khóa hoàn toàn các thao tác chọn, nhấc và di chuyển linh kiện
         if (CircuitSimulationManager.Instance != null && CircuitSimulationManager.Instance.isSimulationMode)
@@ -1492,6 +1499,10 @@ public class TapToPlaceController : MonoBehaviour
         GameObject releasedObject = draggedObject;
         if (draggedObject != null)
         {
+            var presentation = draggedObject.GetComponent<ARPlacedObjectStabilizer>();
+            if (ARSession.state != ARSessionState.SessionTracking ||
+                (presentation != null && (presentation.IsRecovering || presentation.HasUnverifiedAnchorJump)))
+                RestoreLastDragPose();
             // Thả tay bình thường trên bàn -> Đảm bảo không bị chồng lấn
             bool isOverlapping = CheckOverlap(draggedObject.transform.position, draggedObject, out _);
             if (isOverlapping)
@@ -1556,8 +1567,9 @@ public class TapToPlaceController : MonoBehaviour
         // Never replace a real binding with a free-floating Transform fallback.
         if (previous == null) return;
         Transform oldParent = obj.transform.parent;
-        Vector3 localPosition = obj.transform.localPosition;
-        Quaternion localRotation = obj.transform.localRotation;
+        Vector3 localPosition = GetAuthoredContactLocalPosition(obj);
+        var presentation = obj.GetComponent<ARPlacedObjectStabilizer>();
+        Quaternion localRotation = presentation != null ? presentation.AuthoredContactLocalRotation : obj.transform.localRotation;
         Pose requested = new Pose(obj.transform.position, obj.transform.rotation);
         if (TryGetNearbySupportAnchor(requested.position, obj, out ARAnchor shared) && shared != previous)
         {
@@ -1567,13 +1579,14 @@ public class TapToPlaceController : MonoBehaviour
         int request = ++nextDragAnchorRequest;
         dragAnchorRequests[obj] = request;
         var stabilizer = obj.GetComponent<ARPlacedObjectStabilizer>();
-        if (stabilizer != null) stabilizer.SuspendFiltering = true;
+        // Keep filtering/recovery protection active while the async replacement
+        // is pending. Compare authored coordinates below, not presentation offsets.
         ARAnchor replacement = null;
         bool StillCurrent() => this != null && obj != null && obj.activeInHierarchy && isActiveAndEnabled &&
             dragAnchorRequests.TryGetValue(obj, out int current) && current == request &&
             !IsObjectBeingDragged(obj) && obj.transform.parent == oldParent &&
-            Vector3.Distance(obj.transform.localPosition, localPosition) < 0.0001f &&
-            Quaternion.Angle(obj.transform.localRotation, localRotation) < 0.1f;
+            Vector3.Distance(GetAuthoredContactLocalPosition(obj), localPosition) < 0.0001f &&
+            Quaternion.Angle(stabilizer != null ? stabilizer.AuthoredContactLocalRotation : obj.transform.localRotation, localRotation) < 0.1f;
         try
         {
             // ReleaseDraggedObject clears its interaction state in this frame.
@@ -1626,10 +1639,149 @@ public class TapToPlaceController : MonoBehaviour
         }
     }
 
+    internal void ObservePlacementAnchors()
+    {
+        if (observedPlacementAnchors == arAnchorManager) return;
+        if (observedPlacementAnchors != null) observedPlacementAnchors.trackablesChanged.RemoveListener(OnPlacementAnchorsChanged);
+        observedPlacementAnchors = arAnchorManager;
+        if (observedPlacementAnchors != null) observedPlacementAnchors.trackablesChanged.AddListener(OnPlacementAnchorsChanged);
+    }
+
+    private void OnPlacementAnchorsChanged(ARTrackablesChangedEventArgs<ARAnchor> changes)
+    {
+        foreach (var removed in changes.removed)
+            if (removed.Value != null) RetainRemovedPlacementAnchor(removed.Value);
+    }
+
+    internal void RetainRemovedPlacementAnchor(ARAnchor removed)
+    {
+        removedAnchorMembers.Clear();
+        foreach (var entry in objectAnchors)
+            if (entry.Key != null && entry.Value == removed && entry.Key.transform.parent == removed.transform)
+                removedAnchorMembers.Add(entry.Key);
+        if (removedAnchorMembers.Count == 0) return;
+        removed.destroyOnRemoval = false;
+        foreach (var obj in removedAnchorMembers)
+        {
+            var presentation = obj.GetComponent<ARPlacedObjectStabilizer>();
+            if (isDragging && draggedObject == obj) ReleaseDraggedObject();
+            if (secondDrag.isDragging && secondDrag.draggedObject == obj) ProcessSecondHand(HandOperation.Release);
+            Pose retained = presentation != null ? presentation.RetainedPose : new Pose(obj.transform.position, obj.transform.rotation);
+            dragAnchorRequests.Remove(obj); // Invalidate any pending handoff from this lost binding.
+            TrackableId planeId = placedContacts.TryGetValue(obj, out PlacedContact contact) ? contact.planeId : TrackableId.invalidId;
+            bool measured = !instantPlacedObjects.Contains(obj);
+            var support = new GameObject("InstantSupport_" + obj.name).transform;
+            support.SetParent(removed.transform.parent, false);
+            support.SetPositionAndRotation(retained.position, retained.rotation);
+            obj.transform.SetParent(support, true);
+            obj.transform.SetPositionAndRotation(retained.position, retained.rotation);
+            objectAnchors.Remove(obj);
+            if (presentation == null) presentation = obj.AddComponent<ARPlacedObjectStabilizer>();
+            presentation.SuspendFiltering = false;
+            presentation.Bind(this, null);
+            RememberPlacedContact(obj, planeId);
+            var recovery = obj.GetComponent<ARInstantPlacementAnchor>();
+            if (recovery == null) recovery = obj.AddComponent<ARInstantPlacementAnchor>();
+            recovery.Initialize(this, arRaycastManager, arAnchorManager, mainCamera, Vector2.zero, 1f, support, measured);
+            recovery.StopRefinement(); // Do not reuse an old camera pixel after turning away.
+            Debug.Log("[ARBinding] Retained " + obj.name + " after native anchor removal; awaiting a fresh world anchor.");
+        }
+        removedAnchorMembers.Clear();
+        if (removed.transform.childCount == 0)
+        {
+            if (Application.isPlaying) Destroy(removed.gameObject);
+            else DestroyImmediate(removed.gameObject);
+        }
+        wireConnectionController?.UpdateActiveWirePositionsExternal();
+    }
+
+    internal bool IsPlacementAnchorRegistered(ARAnchor anchor) =>
+        arAnchorManager == null || arAnchorManager.GetAnchor(anchor.trackableId) == anchor;
+
+    internal void RefreshPlacedContactBinding(GameObject obj)
+    {
+        TrackableId id = placedContacts.TryGetValue(obj, out PlacedContact contact) ? contact.planeId : TrackableId.invalidId;
+        RememberPlacedContact(obj, id);
+    }
+
+    internal bool TryConstrainRecoveredContact(GameObject obj, Pose candidate, Pose retained, out Pose constrained)
+    {
+        constrained = candidate;
+        if (arPlaneManager == null || !placedContacts.TryGetValue(obj, out PlacedContact contact)) return false;
+        ARPlane original = contact.planeId != TrackableId.invalidId ? arPlaneManager.GetPlane(contact.planeId) : null;
+        if (original != null)
+        {
+            ARPlane plane = original;
+            for (int i = 0; i < 16 && plane.subsumedBy != null; i++) plane = plane.subsumedBy;
+            if (!TryGetRecoveryPlanePose(candidate, plane, out constrained)) return false;
+            Vector3 reference = plane == original && contact.hasPlaneLocalContact
+                ? plane.transform.TransformPoint(contact.planeLocalContact) : retained.position;
+            if (Vector3.ProjectOnPlane(candidate.position - reference, Vector3.up).sqrMagnitude > 0.08f * 0.08f) return false;
+            // A merged floor plane is not evidence that a tabletop object changed levels.
+            if (plane != original && Mathf.Abs(constrained.position.y - candidate.position.y) > 0.03f) return false;
+            contact.planeId = plane.trackableId;
+            return true;
+        }
+        // If the original plane was removed, accept only a replacement at the last
+        // known support height. Never select an arbitrary newly seen floor/table.
+        if (Vector3.ProjectOnPlane(candidate.position - retained.position, Vector3.up).sqrMagnitude > 0.08f * 0.08f) return false;
+        float closest = 0.03f;
+        ARPlane best = null;
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!TryGetRecoveryPlanePose(candidate, plane, out Pose projected)) continue;
+            float difference = Mathf.Abs(projected.position.y - retained.position.y);
+            if (difference > closest) continue;
+            closest = difference;
+            constrained = projected;
+            best = plane;
+        }
+        if (best == null) return false;
+        contact.planeId = best.trackableId;
+        return true;
+    }
+
+    private bool TryGetRecoveryPlanePose(Pose candidate, ARPlane plane, out Pose constrained)
+    {
+        constrained = candidate;
+        if (!IsUsableSurfacePlane(plane) || Vector3.Dot(candidate.rotation * Vector3.up, plane.transform.up) < 0.9659258f) return false;
+        Vector2 center = plane.center;
+        Vector3 planePoint = plane.transform.TransformPoint(new Vector3(center.x, 0f, center.y));
+        if (!ARSupportPolicy.TryProjectContactVertically(candidate.position, planePoint, plane.transform.up, out Vector3 foot)) return false;
+        Vector3 local = plane.transform.InverseTransformPoint(foot);
+        if (!IsPointInSurfaceBoundary(new Vector2(local.x, local.z), plane.boundary)) return false;
+        constrained.position = foot + Vector3.up * surfaceContactOffset;
+        return true;
+    }
+
     private void RememberPlacedContact(GameObject obj, TrackableId planeId)
     {
-        placedContacts[obj] = new PlacedContact { planeId = planeId,
-            parent = obj.transform.parent, expectedLocal = GetAuthoredContactLocalPosition(obj) };
+        placedContacts.TryGetValue(obj, out PlacedContact previous);
+        var contact = new PlacedContact { planeId = planeId,
+            parent = obj.transform.parent, expectedLocal = GetAuthoredContactLocalPosition(obj),
+            committedWorldContact = obj.transform.position };
+        ARPlane plane = arPlaneManager != null && planeId != TrackableId.invalidId ? arPlaneManager.GetPlane(planeId) : null;
+        if (ARSession.state == ARSessionState.SessionTracking && IsUsableSurfacePlane(plane))
+        {
+            contact.planeLocalContact = plane.transform.InverseTransformPoint(obj.transform.position);
+            contact.hasPlaneLocalContact = true;
+        }
+        else if (previous != null && previous.planeId == planeId)
+        {
+            contact.planeLocalContact = previous.planeLocalContact;
+            contact.hasPlaneLocalContact = previous.hasPlaneLocalContact;
+        }
+        placedContacts[obj] = contact;
+    }
+
+    internal bool TryGetCommittedPositionReference(GameObject obj, out Vector3 position)
+    {
+        position = default;
+        if (!placedContacts.TryGetValue(obj, out PlacedContact contact)) return false;
+        ARPlane plane = arPlaneManager != null && contact.planeId != TrackableId.invalidId ? arPlaneManager.GetPlane(contact.planeId) : null;
+        position = contact.hasPlaneLocalContact && IsUsableSurfacePlane(plane)
+            ? plane.transform.TransformPoint(contact.planeLocalContact) : contact.committedWorldContact;
+        return true;
     }
 
     private void UpdatePlacedContacts()
@@ -1656,6 +1808,7 @@ public class TapToPlaceController : MonoBehaviour
             {
                 contact.parent = obj.transform.parent;
                 contact.expectedLocal = GetAuthoredContactLocalPosition(obj);
+                contact.committedWorldContact = obj.transform.position;
                 contact.settling = false;
                 contact.confirmation.Reset();
             }
@@ -1664,6 +1817,7 @@ public class TapToPlaceController : MonoBehaviour
                 // Undo/redo or another authored move owns the new contact. Do not
                 // settle it back onto the surface associated with the old pose.
                 contact.planeId = TrackableId.invalidId;
+                contact.committedWorldContact = obj.transform.position;
                 contact.settling = false;
                 contact.confirmation.Reset();
             }
@@ -1753,6 +1907,8 @@ public class TapToPlaceController : MonoBehaviour
 
     private bool HasStableContactBinding(GameObject obj)
     {
+        if (obj.TryGetComponent(out ARPlacedObjectStabilizer presentation) &&
+            (presentation.IsRecovering || presentation.HasUnverifiedAnchorJump)) return false;
         if (objectAnchors.TryGetValue(obj, out ARAnchor anchor) && anchor != null)
             return !anchor.pending && anchor.trackingState == TrackingState.Tracking;
         var instant = obj.GetComponent<ARInstantPlacementAnchor>();
@@ -1854,7 +2010,9 @@ public class TapToPlaceController : MonoBehaviour
         // A shared anchor's origin is another component's contact, not this one.
         obj.transform.SetPositionAndRotation(contact.position, contact.rotation);
         objectAnchors[obj] = target;
-        obj.GetComponent<ARPlacedObjectStabilizer>()?.Bind(this, target);
+        var presentation = obj.GetComponent<ARPlacedObjectStabilizer>();
+        if (presentation == null) presentation = obj.AddComponent<ARPlacedObjectStabilizer>();
+        presentation.Bind(this, target);
         bool stillUsed = false;
         foreach (var entry in objectAnchors)
             if (entry.Key != null && entry.Key != obj && entry.Value == previous) { stillUsed = true; break; }
@@ -2603,9 +2761,9 @@ public class TapToPlaceController : MonoBehaviour
             return true;
         }
         GameObject placed = previewAnchor;
+        // An unmeasured placement is a fixed world point. A raycast manager can
+        // live on a moving camera rig; it is not a placement support transform.
         Transform support = new GameObject("InstantSupport_" + currentPrefabToPlace.name).transform;
-        if (arRaycastManager != null && !arRaycastManager.transform.IsChildOf(mainCamera.transform))
-            support.SetParent(arRaycastManager.transform, true);
         support.SetPositionAndRotation(pose.position, pose.rotation);
         previewAnchor.transform.SetPositionAndRotation(pose.position, pose.rotation);
         previewAnchor.SetActive(true);
@@ -2645,12 +2803,43 @@ public class TapToPlaceController : MonoBehaviour
             return false;
         float height = point.y + surfaceContactOffset;
         float change = height - position.y;
-        if (change >= 0f) return change <= 0.012f;
+        if (change >= 0f)
+        {
+            if (change > 0.012f) return false;
+            RememberPlacedContact(obj, measuredPlane.trackableId);
+            instantPlacedObjects.Remove(obj);
+            return true;
+        }
         if (change < -0.002f && !ARSupportPolicy.CanCorrectContactHeight(position.y, height)) return false;
         Vector3 candidate = new Vector3(position.x, height, position.z);
         if (CheckOverlapForObject(obj, candidate, obj.transform.rotation, obj, out _, 0f)) return false;
         support.position += candidate - position;
+        RememberPlacedContact(obj, measuredPlane.trackableId);
+        instantPlacedObjects.Remove(obj);
         wireConnectionController?.UpdateActiveWirePositionsExternal();
+        return true;
+    }
+
+    internal bool TryConfirmFixedInstantContact(GameObject obj, Transform support, bool mayRefine)
+    {
+        if (obj == null || support == null || arPlaneManager == null || mainCamera == null ||
+            ARSession.state != ARSessionState.SessionTracking) return false;
+        ARPlane best = null;
+        float closest = float.PositiveInfinity;
+        foreach (ARPlane plane in arPlaneManager.trackables)
+        {
+            if (!TryGetVerticalContactOnPlane(obj.transform.position, plane, out Vector3 foot, requireHeightCorrection: false)) continue;
+            float change = foot.y + surfaceContactOffset - obj.transform.position.y;
+            if (change > 0.012f || change < (mayRefine ? -0.6f : -0.012f) || Mathf.Abs(change) >= closest) continue;
+            closest = Mathf.Abs(change);
+            best = plane;
+        }
+        if (best == null) return false;
+        if (mayRefine) return TryRefineInstantPlacement(obj, support, best);
+        // A moved/rotated object owns its pose. Confirm contact without replaying
+        // a camera ray or silently changing the user's authored height.
+        RememberPlacedContact(obj, best.trackableId);
+        instantPlacedObjects.Remove(obj);
         return true;
     }
 
@@ -3017,6 +3206,8 @@ public class TapToPlaceController : MonoBehaviour
 
     private void OnDestroy()
     {
+        if (observedPlacementAnchors != null) observedPlacementAnchors.trackablesChanged.RemoveListener(OnPlacementAnchorsChanged);
+        observedPlacementAnchors = null;
         renderPolicy.Restore();
         geometryCache.Clear();
         instantPlacedObjects.Clear();
