@@ -768,8 +768,9 @@ internal static class ARDragUsabilityRegressionChecks
             Require(controller.placedObjectsHistory.Count == beforeCount &&
                 !(bool)Get(controller, "requireMeasuredForPreview") &&
                 !(bool)secondState.GetType().GetField("requireMeasuredForPreview").GetValue(secondState),
-                "Releasing the menu pinch must not commit; both VR previews must allow the same instant fallback as Manual Assembly.");
-            results.Add("PASS: each hand owns an AR preview, menu gestures cannot auto-place, and VR shares AR's immediate fallback");
+                "Releasing the menu pinch must keep both previews without committing either hand.");
+            Require(controller.requireMeasuredSurfaceForPlacement, "Entering VR must preserve the default measured/native placement policy.");
+            results.Add("PASS: each hand owns an immediate preview and VR preserves AR's measured/native commit policy");
 
             var managerRoot = Child(controller.gameObject, "PreviewSupportManager");
             managerRoot.SetActive(false);
@@ -800,8 +801,26 @@ internal static class ARDragUsabilityRegressionChecks
                 SetInput(secondary, true, true, true);
                 Call(controller, "UpdateActiveHand");
                 Call(controller, "ProcessSecondHand", frame);
+                Require(controller.placedObjectsHistory.Count == beforeCount && controller.HasAnyPreview,
+                    "Neither hand may finalize even a measured point while no native anchor subsystem is ready.");
+                bool Complete(ButtonInteractor input, bool second, Vector3 contact)
+                {
+                    var nativeRoot = Child(controller.gameObject, second ? "SecondNativeCommit" : "PrimaryNativeCommit");
+                    var anchor = nativeRoot.AddComponent<ARAnchor>();
+                    anchor.enabled = false;
+                    nativeRoot.transform.position = contact;
+                    return (bool)typeof(TapToPlaceController).GetMethod("RunWithPlacementHand", PrivateInstance).Invoke(controller, new object[] { input, second, (System.Func<bool>)(() =>
+                    {
+                        Call(controller, "PlaceAtNativeContact", anchor);
+                        return true;
+                    }) });
+                }
+                // Managed native completions arrive in reverse submission order.
+                // This checks callback hand ownership, not native provider readiness.
+                Require(Complete(secondary, true, right) && (GameObject)Get(controller, "previewAnchor") == firstPreview &&
+                    Complete(primary, false, left), "Native callbacks must commit only their own hand and preserve the other pending preview.");
                 Require(controller.placedObjectsHistory.Count == beforeCount + 2 && !controller.HasAnyPreview,
-                    "Both owners must independently confirm onto the measured table using the shared AR placement flow.");
+                    "Both managed completions must produce exactly one object per hand.");
                 spawned.Add(controller.placedObjectsHistory[beforeCount]);
                 spawned.Add(controller.placedObjectsHistory[beforeCount + 1]);
                 var contacts = (System.Collections.IDictionary)Get(controller, "placedContacts");

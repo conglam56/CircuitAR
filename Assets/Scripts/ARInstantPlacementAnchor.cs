@@ -23,7 +23,6 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
     private float requestDeadline;
     private float promotionNotBefore;
     private float promotionRetryDelay = 0.5f;
-    private float nextSupportProbeAt;
     private int generation;
     private bool configured;
     private bool runtimeActive;
@@ -54,7 +53,6 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
         hasMeasuredSurface = measuredSurface;
         promotionRetryDelay = 0.5f;
         promotionNotBefore = 0f;
-        nextSupportProbeAt = 0f;
         refinementStopped = false;
         usedInitialRay = false;
         configured = true;
@@ -118,19 +116,6 @@ public sealed class ARInstantPlacementAnchor : MonoBehaviour
             }
             else if (Time.realtimeSinceStartup < refinementDeadline) return;
             else RemoveTrackedRaycast();
-        }
-
-        // Do not promote an estimated pixel/depth into a native anchor that can
-        // keep changing range as the camera retreats. Placement is already visible
-        // at a fixed world pose; verify real support independently in the background.
-        if (!hasMeasuredSurface)
-        {
-            if (Time.realtimeSinceStartup >= nextSupportProbeAt)
-            {
-                nextSupportProbeAt = Time.realtimeSinceStartup + 0.25f;
-                hasMeasuredSurface = owner.TryConfirmFixedInstantContact(gameObject, supportRoot, !refinementStopped);
-            }
-            if (!hasMeasuredSurface) return;
         }
 
         if (anchors == null || !anchors.isActiveAndEnabled || anchors.subsystem == null ||

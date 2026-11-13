@@ -5,11 +5,11 @@
 ## Chức năng
 
 - Kho linh kiện: pin, đèn, công tắc, ampe kế và vôn kế.
-- Đặt linh kiện tức thì, chọn chính xác thân vật, kéo, xoay 90° và xóa từng linh kiện.
+- Xem trước linh kiện tức thì, chốt trên mặt đo thật với neo AR, chọn chính xác thân vật, kéo, xoay 90° và xóa từng linh kiện.
 - Chọn hai cực để nối dây; xóa dây và mô phỏng trạng thái mạch, đèn, công tắc, số đo.
 - Hoàn tác/làm lại thao tác đặt, di chuyển, xoay, xóa và nối dây.
 - Trong chế độ kính: hai tay thao tác độc lập, menu trong không gian, thanh kéo menu và chỉnh độ lệch hai ảnh. Thông số chỉnh ảnh được lưu trên máy.
-- Giữ linh kiện và lịch sử khi neo AR bị loại bỏ; kiểm tra lại mặt đỡ khi phục hồi tracking.
+- Đồng bộ linh kiện với neo AR khi tracking phục hồi.
 
 ## Công nghệ và môi trường
 
@@ -64,7 +64,7 @@ Báo cáo kiểm tra nằm trong `Logs/ARPlacementRegressionChecks.txt`; báo c�
 ### Tự lắp mạch bằng AR
 
 1. Cho phép truy cập camera và chọn **Tự lắp mạch**.
-2. Mở kho, chọn linh kiện, đưa con trỏ tới vị trí cần đặt rồi pinch để xác nhận; chế độ AR cũng hỗ trợ chạm màn hình.
+2. Mở kho để hiện vật xem trước ngay. Trỏ vào mặt bàn/sàn đã nhận diện rồi pinch để xác nhận; AR cũng hỗ trợ chạm màn hình. Vật chỉ được chốt khi điểm đo thật và neo AR đều hợp lệ.
 3. Pinch đúng thân linh kiện để kéo. Nhả ngón để dừng di chuyển; bấm vùng trống để bỏ chọn. Sử dụng các nút xoay/xóa của linh kiện đang chọn.
 4. Bật nối dây, pinch cực thứ nhất rồi cực thứ hai. Cực đang chọn được tô vàng. Chuyển sang xóa dây khi cần tháo kết nối.
 5. Bật mô phỏng và thao tác công tắc để kiểm tra mạch. Dùng hoàn tác/làm lại để sửa thao tác.
@@ -83,11 +83,13 @@ Pinch là chụm ngón cái và ngón trỏ trên **cùng một bàn tay**. Con 
 
 ## Đặt vật và độ ổn định
 
-Đặt tức thì cho phép xác nhận một vị trí ước lượng trước khi AR đo xong mặt đỡ. Sau khi xác nhận, vật giữ tọa độ thế giới; bước dò mặt đỡ và tạo neo chạy nền. Vị trí ước lượng chưa phải bằng chứng vật đã bám chính xác vào mặt bàn thật.
+Mặc định, AR và VR hiển thị vật xem trước ngay nhưng chỉ chốt linh kiện sau khi đo được mặt bàn/sàn và tạo được neo AR đang tracking. Nếu chưa đủ dữ liệu, vật vẫn là bản xem trước, chưa trở thành linh kiện có thể kéo hoặc xuất hiện trong lịch sử. Lia máy nhẹ quanh bề mặt có chi tiết để cung cấp dữ liệu đo; chỉ chờ đứng yên không bảo đảm tìm được khoảng cách thật.
 
-Chỉ chuyển sang neo khi có mặt đỡ thật được xác nhận. Việc tinh chỉnh sử dụng điểm đặt đã lưu, không lấy lại một pixel cố định trên màn hình khi camera di chuyển. Các cập nhật nhỏ, riêng lẻ của neo không được tích lũy thành chuyển động kéo vật theo camera.
+Neo tạo ở khoảng cách ước lượng có thể đứng yên trong Unity nhưng nằm sai khoảng cách so với bàn thật, gây sai thị sai khi tiến/lùi camera. Vì vậy cấu hình mặc định `requireMeasuredSurfaceForPlacement = true` không dùng khoảng cách vừa khung hình để hoàn tất đặt vật. Tùy chọn đặt ước lượng cũ vẫn có thể bật bằng cách tắt yêu cầu này trong Inspector, nhưng không bảo đảm tiếp xúc với bề mặt thật.
 
-Khi tracking bị gián đoạn hoặc neo bị loại bỏ, ứng dụng giữ vị trí hợp lệ cuối cùng cùng các tham chiếu linh kiện/Undo. Việc phục hồi phải có bằng chứng nhất quán từ mặt đỡ; các thay đổi hợp lệ chung của cả mặt phẳng và neo vẫn được xử lý.
+Khi tracking hợp lệ, linh kiện sử dụng tọa độ của neo AR. ARCore có thể điều chỉnh đồng thời tọa độ camera và neo; linh kiện cần đi theo cùng hệ tọa độ để giữ đúng vị trí nhìn trên cảnh thật. Với neo mới trả về bất đồng bộ, vật sử dụng điểm neo đã được hiệu chỉnh, tránh bù ngược về tọa độ Unity cũ. Kết quả đặt và trạng thái chờ neo thuộc riêng từng tay trong VR. Sau khi chốt theo mặc định, ứng dụng không tự đo lại từ góc camera mới để hạ chiều cao vật.
+
+Khi tạm mất tracking, ứng dụng giữ tư thế hiển thị cuối; khi tracking trở lại, đồng bộ lại với neo. Không tự tháo linh kiện khỏi neo chỉ vì một lần tra cứu chưa tìm thấy neo trong manager. Phần can thiệp vòng đời neo thêm sau bản đối chiếu đã được bỏ; nếu provider thực sự loại bỏ neo thì vẫn có thể mất đối tượng con. Trường hợp này cần được xử lý riêng sau khi xác nhận lại độ bám trên thiết bị thật.
 
 Độ chính xác vật lý vẫn phụ thuộc vào thiết bị, ánh sáng, chi tiết bề mặt và khả năng khôi phục tracking của ARCore. Bộ kiểm tra Editor không thay thế việc thử trên điện thoại và kính thật.
 
@@ -95,7 +97,7 @@ Khi tracking bị gián đoạn hoặc neo bị loại bỏ, ứng dụng giữ 
 
 1. Đặt vật, nhả pinch hoàn toàn, lùi camera khoảng 0,5–1 m và đổi góc nhìn: vật giữ điểm tiếp xúc đã chọn, không đi theo camera.
 2. Lặp lại trong chế độ kính, với một tay và hai tay; kiểm tra cả vật vừa đặt và vật đã kéo sang vị trí khác.
-3. Quay camera đi vài giây rồi quay lại: linh kiện không bị xóa khi mất neo, không tự nhảy lên một mặt đỡ khác.
+3. Quay camera đi vài giây rồi quay lại: kiểm tra khả năng khôi phục tracking, vị trí linh kiện và ghi nhận nếu provider loại bỏ neo.
 4. Kiểm tra pinch cực nhỏ, nối/xóa dây, mô phỏng và hoàn tác/làm lại sau khi phục hồi tracking.
 5. Thoát/mở lại ứng dụng để kiểm tra lưu thông số chỉnh kính. Đánh giá FPS bằng cùng một mạch và bản Release trên thiết bị thật.
 
@@ -105,7 +107,7 @@ Khi tracking bị gián đoạn hoặc neo bị loại bỏ, ứng dụng giữ 
 | --- | --- |
 | `Assets/Scripts/TapToPlaceController.cs` | Đặt, chọn, kéo, lịch sử và liên kết mặt đỡ |
 | `Assets/Scripts/ARInstantPlacementAnchor.cs` | Giữ điểm đặt tức thì, xác nhận mặt đỡ và tạo neo nền |
-| `Assets/Scripts/ARPlacedObjectStabilizer.cs` | Lọc rung và kiểm tra vị trí phục hồi |
+| `Assets/Scripts/ARPlacedObjectStabilizer.cs` | Lọc rung neo và giữ hiển thị khi tạm mất tracking |
 | `Assets/Scripts/ButtonInteractor.cs` | Nhận pinch, con trỏ và danh tính hai tay |
 | `Assets/Scripts/PhoneHeadsetAR.cs` | Menu và thao tác trong chế độ kính |
 | `Assets/Scripts/PhoneHeadsetStereo.cs` | Khung hình cho hai ô mắt |

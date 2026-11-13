@@ -70,8 +70,8 @@ internal static class ARSurfaceGuidanceRegressionChecks
             controller.wireConnectionController = wireController;
             controller.enableInstantPlacement = true;
             Refresh();
-            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Detected,
-                "Instant placement should show the readiness pill before entering wire mode.");
+            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Scanning,
+                "Immediate previews must still show scanning without measured support or a native anchor.");
             Set(controller, "nextSurfaceGuidanceAt", Time.unscaledTime + 5f);
             wireController.IsWireMode = true;
             Call(controller, "RefreshSurfaceGuidance");
@@ -82,8 +82,8 @@ internal static class ARSurfaceGuidanceRegressionChecks
             Require(!hud.gameObject.activeSelf, "Switching to wire deletion must keep the placement pill hidden.");
             wireController.IsWireMode = false;
             Call(controller, "RefreshSurfaceGuidance");
-            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Detected,
-                "Exiting wire mode must restore instant placement guidance on the next refresh.");
+            Require(hud.IsVisible && hud.CurrentState == ARScanFloatingHUD.ScanHUDState.Scanning,
+                "Exiting wire mode must restore measured-placement guidance on the next refresh.");
             controller.enableInstantPlacement = false;
             results.Add("PASS: wire mode hides placement guidance immediately and restores it on exit");
 
@@ -95,7 +95,7 @@ internal static class ARSurfaceGuidanceRegressionChecks
             controller.StartPreview("Test");
             Set(input, "<IsHandVisible>k__BackingField", false);
             Refresh();
-            Require(hud.CurrentTitle.Contains("chưa") && controller.placedObjectsHistory.Count == 0,
+            Require((hud.CurrentTitle.Contains("chưa") || hud.CurrentSubtitle.Contains("chưa")) && controller.placedObjectsHistory.Count == 0,
                 "A selected preview must clearly say it has not been placed.");
             Set(controller, "placementPending", true);
             Refresh();

@@ -62,6 +62,11 @@ internal static class ARInstantPlacementRegressionChecks
                 "The immediate-placement fixture must have neither hand data nor native surface/anchor managers.");
 
             CheckComponentSizes(controller, scene, results);
+            CheckMeasuredCommitPolicy(controller, camera, scene, results);
+            CheckNativeContactCommit(controller, camera, scene, results);
+
+            // Exercise the explicitly optional approximate-placement mode below.
+            controller.requireMeasuredSurfaceForPlacement = false;
 
             Vector3 contact = root.transform.position + Vector3.forward;
             Vector2 screenPoint = camera.WorldToScreenPoint(contact);
@@ -194,7 +199,6 @@ internal static class ARInstantPlacementRegressionChecks
             results.Add("PASS: only estimated objects use free hand-plane drag fallback, and grabbing permanently cancels native ray refinement");
 
             CheckAuthoringCancellation(root, camera, results);
-            CheckWorldFixedEstimatedPlacement(root, results);
 
             controller.StartPreview("Test");
             MovePreview(controller, scene);
@@ -302,55 +306,93 @@ internal static class ARInstantPlacementRegressionChecks
         }
     }
 
-    private static void CheckWorldFixedEstimatedPlacement(GameObject root, List<string> results)
+    private static void CheckMeasuredCommitPolicy(TapToPlaceController controller, Camera camera,
+        Scene scene, List<string> results)
     {
-        var fixture = Child(root, "WorldFixedInstantPlacement");
-        fixture.SetActive(false);
-        var rig = Child(fixture, "MovingCameraRig");
-        var camera = Child(rig, "Camera").AddComponent<Camera>();
-        camera.enabled = false;
-        camera.transform.localPosition = Vector3.up;
-        camera.transform.localRotation = Quaternion.Euler(45f, 0f, 0f);
-        var manager = rig.AddComponent<ARRaycastManager>();
-        manager.enabled = false;
-        var owner = Child(fixture, "Placement").AddComponent<TapToPlaceController>();
-        Set(owner, "mainCamera", camera);
-        owner.arRaycastManager = manager;
-        var prefab = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        prefab.transform.SetParent(fixture.transform, false);
-        prefab.transform.localPosition = Vector3.right * 20f;
-        owner.componentNames = new[] { "Test" };
-        owner.componentPrefabs = new[] { prefab };
-        fixture.SetActive(true);
-        GameObject support = null;
+        controller.StartPreview("Test");
+        MovePreview(controller, scene);
+        Set(controller, "cooldownTimer", 0f);
+        Vector3 point = camera.transform.position + camera.transform.forward;
+        var requested = new Pose(point, Quaternion.identity);
+        Vector2 pixel = camera.WorldToScreenPoint(point);
+        Require(!Place(controller, requested, pixel) && controller.placedObjectsHistory.Count == 0 &&
+            controller.History.UndoCount == 0 && Get(controller, "previewAnchor") != null,
+            "Default placement must not finalize an arbitrary estimated distance as a physical tabletop contact, even while SessionTracking.");
+        Require(!(bool)Call(controller, "PlaceInstantObject", requested, pixel, TrackableId.invalidId, true) &&
+            controller.placedObjectsHistory.Count == 0,
+            "A measured pose without a native anchor must not bypass the default native-commit gate.");
+        Set(controller, "placementPending", true);
+        try { Call(controller, "UpdatePreviewAndPlacement"); }
+        finally { Set(controller, "placementPending", false); }
+        Require(controller.placedObjectsHistory.Count == 0,
+            "Waiting for a tap-origin native anchor must remain safe without a hand-input component.");
+        var input = Child(controller.gameObject, "MeasuredPolicyInput").AddComponent<ButtonInteractor>();
+        input.enabled = false;
+        controller.buttonInteractor = input;
         try
         {
-            owner.StartPreview("Test");
-            MovePreview(owner, root.scene);
-            Set(owner, "cooldownTimer", 0f);
-            Pose contact = new Pose(root.transform.position + new Vector3(2f, 0f, 1f), Quaternion.identity);
-            Require(Place(owner, contact, camera.WorldToScreenPoint(contact.position)), "The camera-rig fixture must place immediately without a measured plane.");
-            var body = owner.placedObjectsHistory[0];
-            var helper = body.GetComponent<ARInstantPlacementAnchor>();
-            support = helper.SupportRoot.gameObject;
-            Require(support.transform.parent == null && !body.transform.IsChildOf(rig.transform),
-                "Estimated support must not inherit the raycast manager or any camera-rig transform.");
-            SceneManager.MoveGameObjectToScene(support, root.scene);
-            for (int i = 0; i < 30; i++)
-            {
-                rig.transform.position += new Vector3(0.003f, 0f, -0.025f);
-                rig.transform.rotation = Quaternion.Euler(0f, i * 0.5f, 0f);
-                Call(helper, "Update");
-                Require(Vector3.Distance(body.transform.position, contact.position) < 0.0001f && helper.IsEstimated &&
-                    !(bool)Get(helper, "requestInFlight"),
-                    "A committed unmeasured object must remain world-fixed through camera retreat without adopting an unconfirmed native anchor.");
-            }
-            results.Add("PASS: a committed estimate stays fixed through 30 camera-rig retreat/rotation updates, independently of manager parenting and unconfirmed native promotion");
+            Set(controller, "placementTapThisFrame", true);
+            Call(controller, "UpdatePlacementRequest", true, pixel);
+            Set(controller, "placementTapThisFrame", false);
+            Vector3 cameraPosition = camera.transform.position;
+            Call(controller, "UpdatePreviewAndPlacement");
+            camera.transform.position -= camera.transform.forward * 0.4f;
+            Call(controller, "UpdatePreviewAndPlacement");
+            camera.transform.position = cameraPosition;
+            Require(controller.placedObjectsHistory.Count == 0 && controller.History.UndoCount == 0 &&
+                !(bool)Get(controller, "canPlace") && !(bool)Get(controller, "placementRequestHasEstimate") &&
+                (GameObject)Get(controller, "previewAnchor") != null,
+                "A tap and camera retreat without measured support must keep only a preview, never create an interactive or historical placed object.");
+            results.Add("PASS: default AR/VR placement keeps an immediate preview but refuses estimated or unanchored commits during camera movement");
         }
         finally
         {
-            owner.CancelPlacement();
-            if (support != null) UnityEngine.Object.DestroyImmediate(support);
+            controller.ClearPreview();
+            controller.buttonInteractor = null;
+            UnityEngine.Object.DestroyImmediate(input.gameObject);
+        }
+    }
+
+    private static void CheckNativeContactCommit(TapToPlaceController template, Camera camera,
+        Scene scene, List<string> results)
+    {
+        var fixture = Child(template.gameObject, "NativeContactCommitFixture");
+        var owner = fixture.AddComponent<TapToPlaceController>();
+        owner.enabled = false;
+        Set(owner, "mainCamera", camera);
+        owner.componentPrefabs = template.componentPrefabs;
+        owner.componentNames = template.componentNames;
+        Vector3 cameraBefore = camera.transform.position;
+        try
+        {
+            owner.StartPreview("Test");
+            MovePreview(owner, scene);
+            var ghost = (GameObject)Get(owner, "previewAnchor");
+            Vector3 oldContact = camera.transform.position + camera.transform.forward;
+            ghost.transform.position = oldContact;
+            var nativeRoot = Child(fixture, "ReturnedNativeContact");
+            var anchor = nativeRoot.AddComponent<ARAnchor>();
+            anchor.enabled = false;
+            nativeRoot.transform.SetPositionAndRotation(oldContact + new Vector3(0.3f, 0.15f, -0.2f),
+                Quaternion.Euler(0f, 25f, 0f));
+            Call(owner, "PlaceAtNativeContact", anchor);
+            GameObject placed = owner.placedObjectsHistory[0];
+            Require(placed.transform.parent == nativeRoot.transform && placed.transform.localPosition.sqrMagnitude < 0.00000001f &&
+                Quaternion.Angle(placed.transform.localRotation, Quaternion.identity) < 0.001f &&
+                owner.History.UndoCount == 1 && Get(owner, "previewAnchor") == null,
+                "A new native contact returned in a corrected tracking frame must not inherit an offset to the obsolete requested Unity position.");
+            Vector3 world = placed.transform.position;
+            camera.transform.position -= camera.transform.forward * 0.6f;
+            Call(placed.GetComponent<ARPlacedObjectStabilizer>(), "UpdatePresentation", true);
+            Require(Vector3.Distance(placed.transform.position, world) < 0.00001f &&
+                !placed.transform.IsChildOf(camera.transform),
+                "A released native contact must remain stationary when only the camera retreats.");
+            results.Add("PASS: native commit uses the returned contact after coordinate corrections and stays fixed during camera-only retreat");
+        }
+        finally
+        {
+            camera.transform.position = cameraBefore;
+            owner.ClearPreview();
             UnityEngine.Object.DestroyImmediate(fixture);
         }
     }
